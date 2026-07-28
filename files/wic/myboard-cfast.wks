@@ -1,0 +1,7 @@
+part /boot --source bootimg-pcbios --sourceparams="loader-bios=grub" --ondisk sda --label boot --active --align 1024 --fixed-size 64M
+
+part / --source rootfs --ondisk sda --fstype=ext4 --label rootfs --align 1024
+
+part /data --ondisk sda --fstype=ext4 --label data --align 1024 --fixed-size 512M
+
+bootloader --ptable msdos --source bootimg-pcbios --timeout=3 --append="rootwait console=ttyS0,115200 quiet i915.enable_rc6=0"

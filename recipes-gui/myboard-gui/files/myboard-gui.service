@@ -1,0 +1,12 @@
+[Unit]
+Description=MyBoard Qt Kiosk GUI
+After=systemd-user-sessions.service
+
+[Service]
+ExecStart=/usr/bin/xinit /etc/xinitrc -- /usr/bin/Xorg :0 vt1
+Restart=on-failure
+TTYPath=/dev/tty1
+StandardInput=tty
+
+[Install]
+WantedBy=multi-user.target

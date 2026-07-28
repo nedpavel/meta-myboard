@@ -1,0 +1,15 @@
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Versehentlich hier gelandeter Build-Output
+/build/
+*.o
+*.rej
+*.orig

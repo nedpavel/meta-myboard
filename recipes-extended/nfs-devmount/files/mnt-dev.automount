@@ -1,0 +1,8 @@
+[Unit]
+Description=Automount NFS dev share
+
+[Automount]
+Where=/mnt/dev
+
+[Install]
+WantedBy=multi-user.target

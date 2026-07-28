@@ -1,0 +1,8 @@
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTR{interface}=="*A*", SYMLINK+="ttyRS485_A", MODE="0666"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6010", ATTR{interface}=="*B*", SYMLINK+="ttyRS485_B", MODE="0666"
+
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="ttyUSB_SC", MODE="0660"
+
+# Intel I210 — statische Interface-Namen
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="XX:XX:XX:XX:XX:01", NAME="eth-x2"
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="XX:XX:XX:XX:XX:02", NAME="eth-x3"
