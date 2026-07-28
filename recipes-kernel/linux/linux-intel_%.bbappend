@@ -9,7 +9,13 @@ EXTRA_OEMAKE:append = ' CROSS_CURSES_LIB=""'
 # than interactive menuconfig changes so they survive `bitbake -c clean`.
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI:append:intel-core2-32 = " \
+# Bewusst OHNE Maschinen-Override (frueher :intel-core2-32): die Fragmente sind
+# reine, architekturunabhaengige CONFIG_*-Symbole fuer die Board-Hardware
+# (CAN/SJA1000, AHCI/SATA-CFast, FTDI, ALC662, PENMOUNT, i210). So bleiben sie
+# auch bei einem MACHINE-Wechsel (z.B. intel-core2-32 -> intel-corei7-64)
+# aktiv, statt stillschweigend wegzufallen. Dieser Layer wird ohnehin nur fuer
+# dieses Board verwendet.
+SRC_URI:append = " \
     file://mydevice.cfg \
     file://can-sja1000.cfg \
     file://ftdi-serial.cfg \
