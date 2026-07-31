@@ -21,6 +21,8 @@ add_executable(myboard-gui
     canmatrix.h
     canreader.cpp
     canreader.h
+    canopen.cpp
+    canopen.h
     images.qrc
     can.qrc
 )

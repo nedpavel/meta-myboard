@@ -32,7 +32,9 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QAbstractItemView>
+#include <QColor>
 #include "canreader.h"
+#include "canopen.h"
 
 /* ------------------------------------------------------------------ */
 /* Farbschema — an das Original-Display angelehnt                      */
@@ -633,44 +635,71 @@ void MainWindow::onCanFrame(quint32 canId, const QByteArray &data)
     if (!m_pwTable)
         return;
 
+    const QString idStr =
+        QStringLiteral("0x") + QString::number(canId, 16).toUpper();
     const QVector<CanDecoded> sigs = m_canMatrix.decode(canId, data);
 
-    for (const CanDecoded &d : sigs) {
-        QString valStr;
-        if (d.isBool) {
-            valStr = d.raw ? QStringLiteral("1") : QStringLiteral("0");
-        } else if (qAbs(d.value - qRound64(d.value)) < 1e-9) {
-            valStr = QString::number((qlonglong)qRound64(d.value));
-        } else {
-            valStr = QString::number(d.value, 'f', 2);
-        }
+    if (!sigs.isEmpty()) {
+        /* 1) Matrix: PDO-Signalwerte — eine Zeile je Signal (Wert in-place). */
+        for (const CanDecoded &d : sigs) {
+            QString valStr;
+            if (d.isBool)
+                valStr = d.raw ? QStringLiteral("1") : QStringLiteral("0");
+            else if (qAbs(d.value - qRound64(d.value)) < 1e-9)
+                valStr = QString::number((qlonglong)qRound64(d.value));
+            else
+                valStr = QString::number(d.value, 'f', 2);
 
-        auto it = m_pwRows.constFind(d.name);
+            auto it = m_pwRows.constFind(d.name);
+            if (it == m_pwRows.constEnd()) {
+                int row = m_pwTable->rowCount();
+                m_pwTable->insertRow(row);
+                m_pwRows.insert(d.name, row);
+                const QString label = d.comment.isEmpty() ? d.name : d.comment;
+                m_pwTable->setItem(row, 0, new QTableWidgetItem(idStr));
+                QTableWidgetItem *sig = new QTableWidgetItem(label);
+                sig->setToolTip(d.name);
+                m_pwTable->setItem(row, 1, sig);
+                m_pwTable->setItem(row, 2, new QTableWidgetItem(valStr));
+                m_pwTable->setItem(row, 3, new QTableWidgetItem(d.unit));
+            } else {
+                m_pwTable->item(it.value(), 2)->setText(valStr);
+            }
+        }
+    } else {
+        /* 2) generisches CANopen (SYNC/SDO/Heartbeat/NMT/EMCY/PDO),
+           3) sonst Roh-Hex — je CAN-ID eine Zeile, grau markiert. */
+        CanOpenInfo co = canopenDescribe(canId, data);
+        const QString label = co.ok ? co.label : QStringLiteral("(unbekannt)");
+        const QString value = (co.ok && !co.value.isEmpty()) ? co.value : canHex(data);
+
+        const QString key = QStringLiteral("gen:") + QString::number(canId);
+        auto it = m_pwRows.constFind(key);
         if (it == m_pwRows.constEnd()) {
             int row = m_pwTable->rowCount();
             m_pwTable->insertRow(row);
-            m_pwRows.insert(d.name, row);
-
-            const QString idStr =
-                QStringLiteral("0x") + QString::number(canId, 16).toUpper();
-            const QString label = d.comment.isEmpty() ? d.name : d.comment;
-
+            m_pwRows.insert(key, row);
             m_pwTable->setItem(row, 0, new QTableWidgetItem(idStr));
             QTableWidgetItem *sig = new QTableWidgetItem(label);
-            sig->setToolTip(d.name);
+            sig->setForeground(QColor(0x66, 0x66, 0x66));  /* grau: nicht aus Matrix */
             m_pwTable->setItem(row, 1, sig);
-            m_pwTable->setItem(row, 2, new QTableWidgetItem(valStr));
-            m_pwTable->setItem(row, 3, new QTableWidgetItem(d.unit));
+            m_pwTable->setItem(row, 2, new QTableWidgetItem(value));
+            m_pwTable->setItem(row, 3, new QTableWidgetItem(QString()));
         } else {
-            m_pwTable->item(it.value(), 2)->setText(valStr);
+            int row = it.value();
+            m_pwTable->item(row, 1)->setText(label);   /* z.B. Zustandswechsel */
+            m_pwTable->item(row, 2)->setText(value);
         }
     }
 
-    /* Status nicht bei jedem Frame neu setzen (nur alle 25). */
+    /* Status alle 25 Frames: Matrix-Signale vs. CANopen/roh + Matrix-Umfang. */
     if (m_pwStatus && (m_pwFrames % 25 == 0)) {
+        int dec = 0, gen = 0;
+        for (auto it = m_pwRows.constBegin(); it != m_pwRows.constEnd(); ++it)
+            (it.key().startsWith(QLatin1String("gen:")) ? gen : dec)++;
         m_pwStatus->setText(
-            QString("CAN: can0 · %1 Telegramme · %2 Signale live")
-                .arg(m_pwFrames).arg(m_pwRows.size()));
+            QString("can0 · %1 Telegramme · %2 Matrix-Signale · %3 CANopen/roh · Matrix kennt %4")
+                .arg(m_pwFrames).arg(dec).arg(gen).arg(m_canMatrix.signalCount()));
     }
 }
 
