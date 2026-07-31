@@ -17,7 +17,12 @@ add_executable(myboard-gui
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    canmatrix.cpp
+    canmatrix.h
+    canreader.cpp
+    canreader.h
     images.qrc
+    can.qrc
 )
 
 target_link_libraries(myboard-gui PRIVATE Qt6::Widgets)

@@ -12,12 +12,18 @@
 
 #include <QWidget>
 #include <QStringList>
+#include <QHash>
+#include <QByteArray>
+
+#include "canmatrix.h"
 
 class QLabel;
 class QFrame;
 class QTimer;
 class QStackedWidget;
 class QKeyEvent;
+class QTableWidget;
+class CanReader;
 
 class MainWindow : public QWidget
 {
@@ -33,6 +39,7 @@ private slots:
     void updateClock();          /* Uhr in der Kopfzeile aktualisieren */
     void openPage();             /* Unterseite öffnen (von Button)      */
     void backToMenu();           /* zurück zum Hauptmenü                */
+    void onCanFrame(quint32 canId, const QByteArray &data); /* CAN-Telegramm dekodieren + anzeigen */
 
 private:
     QWidget *buildHeader();      /* Kopfzeile: Datum | Titel | Zuginfo  */
@@ -42,6 +49,7 @@ private:
     QWidget *buildButtonRow();   /* Funktionsleiste unten               */
     QWidget *createSubPage(const QString &title,
                            const QString &prosa);  /* Unterseite bauen  */
+    QWidget *buildProzesswertPage(); /* Seite 2: Live-CAN-Werte (dekodiert) */
     QWidget *buildUpdatePage();  /* Seite 5: App-Update ab USB-Stick    */
     void     showPage(int page); /* zentral: Seite + Titel umschalten   */
     void     updateCarSelection(); /* blauer Rand + "X" auf gewählten Wagen */
@@ -75,6 +83,15 @@ private:
     QLabel  *m_neinLabel;              /* "Nein" (über Taste 2)          */
     QLabel  *m_usbHint;                /* Status: USB erkannt / kein USB */
     bool     m_usbPresent;             /* aktueller USB-Zustand          */
+
+    /* --- CAN-Prozesswerte (Seite 2) --- */
+    static const int PROCESS_PAGE = 2; /* Seitenindex der Prozesswert-Seite  */
+    CanMatrix          m_canMatrix;    /* dekodiert Frames -> Signale        */
+    CanReader         *m_canReader = nullptr; /* SocketCAN can0              */
+    QTableWidget      *m_pwTable = nullptr;   /* Live-Tabelle dekod. Werte   */
+    QHash<QString,int> m_pwRows;       /* Signalname -> Tabellenzeile        */
+    QLabel            *m_pwStatus = nullptr;  /* Status (CAN offen? Frames?) */
+    int                m_pwFrames = 0; /* Zaehler empfangener Frames         */
 };
 
 #endif /* MAINWINDOW_H */

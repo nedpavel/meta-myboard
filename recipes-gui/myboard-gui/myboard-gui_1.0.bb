@@ -11,8 +11,14 @@ SRC_URI = " \
     file://src/main.cpp \
     file://src/mainwindow.cpp \
     file://src/mainwindow.h \
+    file://src/canmatrix.cpp \
+    file://src/canmatrix.h \
+    file://src/canreader.cpp \
+    file://src/canreader.h \
     file://src/CMakeLists.txt \
     file://src/images.qrc \
+    file://src/can.qrc \
+    file://src/can_matrix.tsv \
     file://src/ICN_Office.jpg \
     file://src/ICN_Office_2.jpg \
     file://myboard-gui.service \

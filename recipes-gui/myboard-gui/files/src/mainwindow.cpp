@@ -29,6 +29,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QAbstractItemView>
+#include "canreader.h"
 
 /* ------------------------------------------------------------------ */
 /* Farbschema — an das Original-Display angelehnt                      */
@@ -104,6 +108,10 @@ MainWindow::MainWindow(QWidget *parent)
     /* Fenster nimmt Tastatur-Eingaben entgegen */
     setFocusPolicy(Qt::StrongFocus);
 
+    /* CAN-Matrix (Signaltabelle) aus der eingebetteten Ressource laden —
+       liefert die Dekodierung fuer die Prozesswert-Seite. */
+    m_canMatrix.loadFromResource(QStringLiteral(":/can/can_matrix.tsv"));
+
     QVBoxLayout *root = new QVBoxLayout(this);
     root->setContentsMargins(2, 2, 2, 2);
     root->setSpacing(0);
@@ -143,7 +151,10 @@ MainWindow::MainWindow(QWidget *parent)
     };
 
     for (const auto &pg : pages) {
-        m_stack->addWidget(createSubPage(pg.title, pg.prosa));
+        if (QString::fromUtf8(pg.title) == QStringLiteral("Prozesswert"))
+            m_stack->addWidget(buildProzesswertPage());   /* Live-CAN-Werte */
+        else
+            m_stack->addWidget(createSubPage(pg.title, pg.prosa));
         m_pageTitles << pg.title;
     }
 
@@ -162,6 +173,23 @@ MainWindow::MainWindow(QWidget *parent)
     /* USB-Timer (läuft nur, solange die Update-Seite offen ist) */
     m_usbTimer = new QTimer(this);
     connect(m_usbTimer, &QTimer::timeout, this, &MainWindow::updateUsbState);
+
+    /* CAN-Empfang auf can0 starten — dekodierte Werte landen live auf
+       der Prozesswert-Seite (Seite 2). */
+    m_canReader = new CanReader(this);
+    connect(m_canReader, &CanReader::frameReceived,
+            this, &MainWindow::onCanFrame);
+    bool canOk = m_canReader->open(QStringLiteral("can0"));
+    if (m_pwStatus) {
+        if (canOk)
+            m_pwStatus->setText(
+                QString("CAN: can0 offen · %1 Signale in der Matrix · warte auf Telegramme …")
+                    .arg(m_canMatrix.signalCount()));
+        else
+            m_pwStatus->setText(
+                "CAN: can0 nicht verfügbar — Interface hochfahren: "
+                "'ip link set can0 up type can bitrate 250000'");
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -523,6 +551,127 @@ QWidget *MainWindow::createSubPage(const QString &title,
     lay->addLayout(backRow);
 
     return page;
+}
+
+/* ------------------------------------------------------------------ */
+/* Prozesswert-Seite — Live-CAN-Werte, dekodiert via CanMatrix          */
+/* ------------------------------------------------------------------ */
+
+QWidget *MainWindow::buildProzesswertPage()
+{
+    QFrame *page = new QFrame();
+    page->setStyleSheet(
+        QString("QFrame { background-color: %1; border: 1px solid %2; }")
+            .arg(COL_BG).arg(COL_BORDER));
+
+    QVBoxLayout *lay = new QVBoxLayout(page);
+    lay->setContentsMargins(8, 6, 8, 6);
+    lay->setSpacing(5);
+
+    QLabel *titleLabel = new QLabel("Prozesswerte (CAN live)");
+    QFont tf; tf.setPointSize(14); tf.setBold(true);
+    titleLabel->setFont(tf);
+    titleLabel->setStyleSheet(QString("color: %1; border: none;").arg(COL_BLUE));
+    lay->addWidget(titleLabel);
+
+    m_pwStatus = new QLabel("CAN: initialisiere …");
+    m_pwStatus->setWordWrap(true);
+    QFont sf; sf.setPointSize(9);
+    m_pwStatus->setFont(sf);
+    m_pwStatus->setStyleSheet("color: #888888; border: none;");
+    lay->addWidget(m_pwStatus);
+
+    /* Live-Tabelle: eine Zeile je Signal, Wert wird in-place aktualisiert. */
+    m_pwTable = new QTableWidget(0, 4);
+    QStringList headers;
+    headers << "CAN-ID" << "Signal" << "Wert" << "Einh.";
+    m_pwTable->setHorizontalHeaderLabels(headers);
+    m_pwTable->verticalHeader()->setVisible(false);
+    m_pwTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_pwTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_pwTable->setFocusPolicy(Qt::NoFocus);
+    QFont tbf; tbf.setPointSize(9);
+    m_pwTable->setFont(tbf);
+    m_pwTable->horizontalHeader()->setFont(tbf);
+    m_pwTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_pwTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_pwTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_pwTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_pwTable->setStyleSheet(
+        "QTableWidget { background-color: white; color: #202020; border: 1px solid #999; }"
+        "QHeaderView::section { background-color: #E0E0E0; color: #202020; padding: 1px; }");
+    lay->addWidget(m_pwTable, 1);
+
+    QPushButton *back = new QPushButton("◄  Zurück  (C)");
+    back->setStyleSheet(QString(
+        "QPushButton {"
+        "  background-color: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  font-size: 13px;"
+        "  padding: 5px 18px;"
+        "}"
+        "QPushButton:pressed { background-color: %4; color: white; }")
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE));
+    back->setFocusPolicy(Qt::NoFocus);
+    connect(back, &QPushButton::clicked, this, &MainWindow::backToMenu);
+
+    QHBoxLayout *backRow = new QHBoxLayout();
+    backRow->addWidget(back);
+    backRow->addStretch();
+    lay->addLayout(backRow);
+
+    return page;
+}
+
+/* Ein empfangenes CAN-Telegramm dekodieren und die Tabelle aktualisieren.
+   Jedes Signal bekommt eine feste Zeile (per Name); der Wert wird in-place
+   ueberschrieben, damit die Anzeige ruhig bleibt und nicht waechst. */
+void MainWindow::onCanFrame(quint32 canId, const QByteArray &data)
+{
+    ++m_pwFrames;
+    if (!m_pwTable)
+        return;
+
+    const QVector<CanDecoded> sigs = m_canMatrix.decode(canId, data);
+
+    for (const CanDecoded &d : sigs) {
+        QString valStr;
+        if (d.isBool) {
+            valStr = d.raw ? QStringLiteral("1") : QStringLiteral("0");
+        } else if (qAbs(d.value - qRound64(d.value)) < 1e-9) {
+            valStr = QString::number((qlonglong)qRound64(d.value));
+        } else {
+            valStr = QString::number(d.value, 'f', 2);
+        }
+
+        auto it = m_pwRows.constFind(d.name);
+        if (it == m_pwRows.constEnd()) {
+            int row = m_pwTable->rowCount();
+            m_pwTable->insertRow(row);
+            m_pwRows.insert(d.name, row);
+
+            const QString idStr =
+                QStringLiteral("0x") + QString::number(canId, 16).toUpper();
+            const QString label = d.comment.isEmpty() ? d.name : d.comment;
+
+            m_pwTable->setItem(row, 0, new QTableWidgetItem(idStr));
+            QTableWidgetItem *sig = new QTableWidgetItem(label);
+            sig->setToolTip(d.name);
+            m_pwTable->setItem(row, 1, sig);
+            m_pwTable->setItem(row, 2, new QTableWidgetItem(valStr));
+            m_pwTable->setItem(row, 3, new QTableWidgetItem(d.unit));
+        } else {
+            m_pwTable->item(it.value(), 2)->setText(valStr);
+        }
+    }
+
+    /* Status nicht bei jedem Frame neu setzen (nur alle 25). */
+    if (m_pwStatus && (m_pwFrames % 25 == 0)) {
+        m_pwStatus->setText(
+            QString("CAN: can0 · %1 Telegramme · %2 Signale live")
+                .arg(m_pwFrames).arg(m_pwRows.size()));
+    }
 }
 
 /* ------------------------------------------------------------------ */
