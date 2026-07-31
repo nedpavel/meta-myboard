@@ -1,7 +1,8 @@
 # meta-myboard
 
 Custom Yocto/OpenEmbedded layer für das **MyBoard** — ein Bahn-Bediendisplay auf
-Basis eines **Intel Atom E3845 (Bay Trail)**, Yocto-Maschine `intel-core2-32`.
+Basis eines **Intel Atom E3845 (Bay Trail)**, Yocto-Maschine `intel-corei7-64`
+(64-bit x86-64; die CPU ist Bay-Trail-64-bit-fähig).
 
 Enthält:
 

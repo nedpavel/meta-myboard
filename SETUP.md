@@ -101,7 +101,7 @@ Board mountet `/mnt/dev`:
 
 ```bash
 # Host:
-cp build/tmp/work/core2-32-poky-linux/myboard-gui/1.0/build/myboard-gui /srv/nfs/myboard-dev/
+cp build/tmp/work/corei7-64-poky-linux/myboard-gui/1.0/build/myboard-gui /srv/nfs/myboard-dev/
 # Board:
 systemctl stop myboard-gui && cp /mnt/dev/myboard-gui /usr/bin/ && systemctl start myboard-gui
 ```
