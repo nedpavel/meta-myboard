@@ -35,6 +35,7 @@
 #include <QColor>
 #include "canreader.h"
 #include "canopen.h"
+#include "ui_infopage.h"   /* aus infopage.ui via uic (AUTOUIC) generiert */
 
 /* ------------------------------------------------------------------ */
 /* Farbschema — an das Original-Display angelehnt                      */
@@ -163,6 +164,10 @@ MainWindow::MainWindow(QWidget *parent)
     /* Seite 5 — App-Update ab USB-Stick (Index UPDATE_PAGE) */
     m_stack->addWidget(buildUpdatePage());
     m_pageTitles << "Update App";   /* Index 5 */
+
+    /* Seite 6 — mit Qt Designer (infopage.ui) gebaut (Index INFO_PAGE) */
+    m_stack->addWidget(buildInfoPage());
+    m_pageTitles << "Info";         /* Index 6 */
 
     setLayout(root);
 
@@ -440,6 +445,7 @@ QWidget *MainWindow::buildButtonRow()
         { "Zustands-\ndaten", 3 },
         { "DDS -\nSpeicher",  4 },
         { "Update\nApp",      UPDATE_PAGE },  /* Taste 5 */
+        { "Info",             INFO_PAGE   },  /* Taste 6 (Designer-.ui) */
     };
 
     for (const auto &f : funcs) {
@@ -455,8 +461,8 @@ QWidget *MainWindow::buildButtonRow()
         lay->addWidget(btn, 1);
     }
 
-    /* Es gibt jetzt 5 belegte Funktionstasten (1..5), daher nur noch 3 leere. */
-    for (int i = 0; i < 3; i++) {
+    /* Es gibt jetzt 6 belegte Funktionstasten (1..6), daher nur noch 2 leere. */
+    for (int i = 0; i < 2; i++) {
         QPushButton *btn = new QPushButton("");
         btn->setStyleSheet(btnStyle);
         btn->setMinimumWidth(0);
@@ -704,6 +710,19 @@ void MainWindow::onCanFrame(quint32 canId, const QByteArray &data)
 }
 
 /* ------------------------------------------------------------------ */
+/* Info-Seite — komplett in Qt Designer (infopage.ui) gestaltet         */
+/* uic (AUTOUIC) erzeugt daraus ui_infopage.h mit Ui::InfoPage.         */
+/* ------------------------------------------------------------------ */
+
+QWidget *MainWindow::buildInfoPage()
+{
+    QWidget *page = new QWidget();
+    Ui::InfoPage ui;      /* aus infopage.ui generiert */
+    ui.setupUi(page);     /* baut das in Designer entworfene Layout auf */
+    return page;
+}
+
+/* ------------------------------------------------------------------ */
 /* Zentrale Umschaltung — von Button UND Taste genutzt                 */
 /* ------------------------------------------------------------------ */
 
@@ -795,6 +814,9 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         break;
     case Qt::Key_5:                     /* Update-Seite öffnen */
         showPage(UPDATE_PAGE);
+        break;
+    case Qt::Key_6:                     /* Designer-Info-Seite öffnen */
+        showPage(INFO_PAGE);
         break;
     case Qt::Key_Up:       /* Pfeil hoch = Wagen-Auswahl nach RECHTS */
         if (m_selectedCar < CAR_COUNT - 1) {

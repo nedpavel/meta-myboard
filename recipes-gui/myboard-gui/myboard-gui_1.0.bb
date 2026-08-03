@@ -17,6 +17,7 @@ SRC_URI = " \
     file://src/canreader.h \
     file://src/canopen.cpp \
     file://src/canopen.h \
+    file://src/infopage.ui \
     file://src/CMakeLists.txt \
     file://src/images.qrc \
     file://src/can.qrc \

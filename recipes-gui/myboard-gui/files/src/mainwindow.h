@@ -51,6 +51,7 @@ private:
                            const QString &prosa);  /* Unterseite bauen  */
     QWidget *buildProzesswertPage(); /* Seite 2: Live-CAN-Werte (dekodiert) */
     QWidget *buildUpdatePage();  /* Seite 5: App-Update ab USB-Stick    */
+    QWidget *buildInfoPage();    /* Seite 6: mit Qt Designer (.ui) gebaut */
     void     showPage(int page); /* zentral: Seite + Titel umschalten   */
     void     updateCarSelection(); /* blauer Rand + "X" auf gewählten Wagen */
 
@@ -78,6 +79,7 @@ private:
 
     /* USB-Update-Seite */
     static const int UPDATE_PAGE = 5;  /* Seitenindex der Update-Seite  */
+    static const int INFO_PAGE   = 6;  /* Seitenindex der Designer-Info-Seite */
     QTimer  *m_usbTimer;               /* prüft 1x/s auf USB-Stick       */
     QLabel  *m_jaLabel;                /* "Ja"  (über Taste 1)           */
     QLabel  *m_neinLabel;              /* "Nein" (über Taste 2)          */

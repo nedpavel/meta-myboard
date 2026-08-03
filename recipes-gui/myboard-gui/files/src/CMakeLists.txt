@@ -23,6 +23,7 @@ add_executable(myboard-gui
     canreader.h
     canopen.cpp
     canopen.h
+    infopage.ui
     images.qrc
     can.qrc
 )
