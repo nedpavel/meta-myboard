@@ -108,10 +108,42 @@ int main(int argc, char **argv)
         rc = mvb_put_port(d, la, buf, size);
         printf("put_port -> %d\n", rc);
 
+    } else if (!strcmp(cmd, "msg")) {
+        int n = (argc > 2) ? atoi(argv[2]) : 50;
+        uint8_t buf[MVB_MSG_BLOCK];
+        int k, got = 0;
+
+        rc = mvb_msg_setup(d, 8);
+        printf("mvb_msg_setup(8 Bloecke) -> %d\n", rc);
+        if (rc != MVB_OK) {
+            fprintf(stderr, "Setup fehlgeschlagen — vorher 'mvbtool init' laufen lassen?\n");
+            mvb_close(d);
+            return 1;
+        }
+        mvb_set_level(d, MVB_IL_RUNNING);
+        printf("warte auf Message-Frames (%d Versuche a 100 ms) ...\n", n);
+
+        for (k = 0; k < n; k++) {
+            rc = mvb_msg_recv(d, buf, sizeof(buf));
+            if (rc > 0) {
+                int i;
+                printf("Frame %d (%d Byte): ", ++got, rc);
+                for (i = 0; i < rc; i++)
+                    printf("%02X ", buf[i]);
+                printf("\n");
+            } else if (rc < 0) {
+                fprintf(stderr, "mvb_msg_recv -> %d (QDT-Zeiger ungueltig?)\n", rc);
+                break;
+            }
+            usleep(100000);
+        }
+        printf("empfangen: %d Frames\n", got);
+
     } else {
         fprintf(stderr,
                 "Kommandos: info | init <devaddr> | dump <off> [len] | "
-                "watch <logaddr> <bytes> [n] | put <logaddr> <bytes> <hex..>\n");
+                "watch <logaddr> <bytes> [n] | put <logaddr> <bytes> <hex..> | "
+                "msg [n]\n");
         mvb_close(d);
         return 2;
     }

@@ -114,15 +114,38 @@ int  mvb_get_var(const void *portdata, int portsize_bytes,
 int  mvb_put_var(void *portdata, int portsize_bytes,
                  int bit_off, int bit_size, uint32_t val);
 
-/* --- Message-Daten (Klasse 2) ----------------------------------------- */
-/* Die Message-Ports (MSRC/MSNK) und die Queue Descriptor Table liegen in
-   der Service Area. Diese Funktionen stellen den TM-Zugang bereit; der
-   vollstaendige Link-Layer (Segmentierung, Quittungen) ist noch offen und
-   liefert derzeit MVB_ERR_NOSUP. mvb_msg_ready() zeigt an, ob der MVBC
-   ueberhaupt Klasse-2-Verkehr signalisiert. */
-int  mvb_msg_ready(mvb_dev *d);
+/* --- Message-Daten (Klasse 2), Empfang -------------------------------- */
+/* Der MVBC verwaltet drei Message-Queues (2x senden, 1x empfangen) als
+   verkettete Listen im Traffic-Memory; die Zeiger stehen in der Queue
+   Descriptor Table (QDT) in der Service Area. Ablauf beim Empfang:
+   Der MVBC nimmt sich den naechsten Linked List Record (LLR), legt das
+   32-Byte-Telegramm im zugehoerigen Datenblock ab und schreibt dessen
+   Next-Pointer zurueck in die QDT. Die Software erkennt neuen Empfang
+   also daran, dass der QDT-Zeiger weitergewandert ist — ganz ohne
+   Interrupts, Polling genuegt.
+
+   mvb_msg_setup() legt dafuer einen Ringpuffer aus nblocks LLRs +
+   32-Byte-Bloecken im freien TM-Bereich an und aktiviert den
+   Message-Sink-Port.
+
+   HINWEIS: Geliefert werden die rohen 32-Byte-Frames der Link-Ebene. Das
+   Zusammensetzen laengerer Nachrichten (Segmentierung nach IEC 61375)
+   uebernimmt derzeit die Anwendung. */
+#define MVB_MSG_BLOCK   32    /* Nutzdaten je Frame (16 Worte)           */
+#define MVB_MSG_MAXBLK  16    /* max. Bloecke im Ringpuffer              */
+
+/* Empfangs-Queue aufbauen (nblocks 2..MVB_MSG_MAXBLK). Nur im Config-Level. */
+int  mvb_msg_setup(mvb_dev *d, int nblocks);
+
+/* Anzahl empfangener, noch nicht abgeholter Bloecke (0 = nichts Neues). */
+int  mvb_msg_pending(mvb_dev *d);
+
+/* Naechsten empfangenen Block abholen.
+   Rueckgabe: >0 = gelieferte Bytes, 0 = nichts da, <0 = Fehler. */
+int  mvb_msg_recv(mvb_dev *d, void *buf, int maxlen);
+
+/* Senden: noch nicht implementiert (Transmit-Queue + Segmentierung). */
 int  mvb_msg_send(mvb_dev *d, uint16_t dest, const void *buf, int len);
-int  mvb_msg_recv(mvb_dev *d, uint16_t *src, void *buf, int maxlen);
 
 /* --- Diagnose / Rohzugriff -------------------------------------------- */
 uint16_t mvb_tm_rd(mvb_dev *d, uint32_t byte_off);

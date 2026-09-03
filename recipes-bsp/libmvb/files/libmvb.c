@@ -30,6 +30,19 @@
 #define SA_PP_PCS      (SRV_AREA + 0x200)   /* 32 x 8 Byte                    */
 #define SA_MFS         (SRV_AREA + 0x300)   /* Master Frame Slot              */
 #define SA_QDT         (SRV_AREA + 0x310)   /* Queue Descriptor Table         */
+#define QDT_XQ0        (SA_QDT + 0)         /* Sende-Queue 0 (hohe Prioritaet)*/
+#define QDT_XQ1        (SA_QDT + 2)         /* Sende-Queue 1                  */
+#define QDT_RQ         (SA_QDT + 4)         /* Empfangs-Queue                 */
+
+/* Ablage der Message-Queue: der 1-KB-Block, den TM_LAYOUT_64K zwischen
+   da_pcs und der Service Area als 'free_1' unbenutzt laesst. */
+#define MSGQ_BASE      0xF800
+#define MSGQ_END       0xFC00
+
+/* Queue-Zeiger sind 16 Bit und adressieren in 4-Byte-Schritten:
+   TM-Adresse = (Zeiger << 2) + Queue-Offset (QO im MCR, hier 0). */
+#define PTR_OF(addr)   ((uint16_t)((addr) >> 2))
+#define ADDR_OF(ptr)   ((uint32_t)(ptr) << 2)
 /* SA + 0x380 == 0xFF80 == MVB_REG_SCR (siehe libmvb.h)                       */
 
 /* Physische Ports (Indizes in pp_pcs) */
@@ -53,6 +66,11 @@ struct mvb_dev {
     mvb_config          cfg;
     struct port_entry   ports[MAX_PORTS];
     int                 next_dock;   /* einfacher Dock-Allokator */
+
+    /* Message-Empfangs-Queue (Ringpuffer) */
+    int                 msg_n;       /* Anzahl Bloecke, 0 = nicht eingerichtet */
+    uint32_t            msg_blocks;  /* TM-Offset des ersten Datenblocks       */
+    int                 msg_rd;      /* Leseindex der Software                 */
 };
 
 /* --- 16-bit-Zugriffe auf das TM --------------------------------------- */
@@ -418,31 +436,125 @@ int mvb_put_var(void *portdata, int portsize_bytes,
     return MVB_OK;
 }
 
-/* --- Message-Daten (Klasse 2) ------------------------------------------ */
-/* Die Message-Ports liegen als physische Ports in der Service Area
-   (MSRC = 0x8, MSNK = 0xC); die Queue Descriptor Table steht bei SA_QDT.
-   Der Link-Layer darueber (Segmentierung in 32-Byte-Frames, Quittungen,
-   Queue-Verkettung ueber TM_TYPE_LLR) ist noch nicht implementiert —
-   dafuer fehlt die Festlegung, wo die Queue-Puffer im TM liegen sollen. */
-int mvb_msg_ready(mvb_dev *d)
+/* --- Message-Daten (Klasse 2), Empfang --------------------------------- */
+/* Aufbau im TM (alles im freien 1-KB-Block ab MSGQ_BASE):
+ *
+ *   MSGQ_BASE          LLR[0..n-1]      je 2 Worte: Data-Ptr, Next-Ptr
+ *   blocks_base        Block[0..n-1]    je 32 Byte (16 Worte)
+ *
+ * Die LLRs sind zu einem Ring verkettet. Der MVBC arbeitet ihn ab und
+ * schreibt nach jedem empfangenen Frame den Next-Pointer in QDT_RQ —
+ * daran erkennt die Software, wie weit er gekommen ist.
+ */
+static uint32_t llr_addr(int i)        { return MSGQ_BASE + (uint32_t)i * 4; }
+
+int mvb_msg_setup(mvb_dev *d, int nblocks)
 {
-    uint16_t pcs1;
+    uint32_t blocks_base;
+    int i;
+
+    if (!d || nblocks < 2 || nblocks > MVB_MSG_MAXBLK)
+        return MVB_ERR_PARAM;
+    if (mvb_get_level(d) != MVB_IL_CONFIG)
+        return MVB_ERR_STATE;
+
+    /* Datenbloecke hinter den LLRs, auf 32 Byte ausgerichtet (Vorgabe des
+       Datenblatts: Data-Pointer muessen 16-Wort-ausgerichtet sein). */
+    blocks_base = (MSGQ_BASE + (uint32_t)nblocks * 4 + 31u) & ~31u;
+    if (blocks_base + (uint32_t)nblocks * MVB_MSG_BLOCK > MSGQ_END)
+        return MVB_ERR_SPACE;
+
+    /* Bloecke leeren und LLR-Ring aufbauen */
+    for (i = 0; i < nblocks; i++) {
+        uint32_t blk = blocks_base + (uint32_t)i * MVB_MSG_BLOCK;
+        int w;
+        for (w = 0; w < MVB_MSG_BLOCK / 2; w++)
+            wr(d, blk + (uint32_t)w * 2, 0);
+        wr(d, llr_addr(i) + 0, PTR_OF(blk));                       /* DP */
+        wr(d, llr_addr(i) + 2, PTR_OF(llr_addr((i + 1) % nblocks)));/* NP */
+    }
+
+    /* Message-Sink-Port aktivieren: F-Code 12, SINK, Queue attached (QA). */
+    wr(d, SA_PP_PCS + (uint32_t)PP_MSNK * 8 + 0, 0xC000 | 0x0400 | 0x0004);
+    wr(d, SA_PP_PCS + (uint32_t)PP_MSNK * 8 + 2, 0);
+
+    /* Queue beim MVBC anmelden; Sende-Queues bleiben leer (= nicht vorhanden) */
+    wr(d, QDT_XQ0, 0);
+    wr(d, QDT_XQ1, 0);
+    wr(d, QDT_RQ, PTR_OF(llr_addr(0)));
+
+    d->msg_n      = nblocks;
+    d->msg_blocks = blocks_base;
+    d->msg_rd     = 0;
+    return MVB_OK;
+}
+
+/* Position des MVBC im Ring aus der QDT ableiten; <0 bei ungueltigem Zeiger */
+static int msg_mvbc_index(mvb_dev *d)
+{
+    uint16_t ptr = rd(d, QDT_RQ);
+    uint32_t addr;
+    int idx;
+
+    if (ptr == 0)
+        return -1;                       /* Queue erschoepft/nicht vorhanden */
+    addr = ADDR_OF(ptr);
+    if (addr < MSGQ_BASE || addr >= MSGQ_BASE + (uint32_t)d->msg_n * 4)
+        return -1;                       /* zeigt nicht in unseren Ring */
+    idx = (int)((addr - MSGQ_BASE) / 4);
+    return idx;
+}
+
+int mvb_msg_pending(mvb_dev *d)
+{
+    int idx, diff;
+
     if (!d)
         return MVB_ERR_PARAM;
-    /* PCS Word1 des Message-Sink-Ports: PTD/Statusbits zeigen an, ob der
-       MVBC ueberhaupt Klasse-2-Verkehr annimmt. */
-    pcs1 = rd(d, SA_PP_PCS + (uint32_t)PP_MSNK * 8 + 2);
-    return (pcs1 & 0x0080) ? 1 : 0;         /* PTD = Port temporarily disabled */
+    if (d->msg_n == 0)
+        return MVB_ERR_STATE;
+    idx = msg_mvbc_index(d);
+    if (idx < 0)
+        return MVB_ERR_IO;
+
+    diff = idx - d->msg_rd;
+    if (diff < 0)
+        diff += d->msg_n;
+    return diff;
+}
+
+int mvb_msg_recv(mvb_dev *d, void *buf, int maxlen)
+{
+    uint8_t *out = (uint8_t *)buf;
+    uint32_t blk;
+    int n, i;
+
+    if (!d || !buf || maxlen <= 0)
+        return MVB_ERR_PARAM;
+    if (d->msg_n == 0)
+        return MVB_ERR_STATE;
+
+    n = mvb_msg_pending(d);
+    if (n < 0)
+        return n;
+    if (n == 0)
+        return 0;                        /* nichts Neues */
+
+    if (maxlen > MVB_MSG_BLOCK)
+        maxlen = MVB_MSG_BLOCK;
+    blk = d->msg_blocks + (uint32_t)d->msg_rd * MVB_MSG_BLOCK;
+    for (i = 0; i < maxlen / 2; i++) {
+        uint16_t w = rd(d, blk + (uint32_t)i * 2);
+        out[2 * i]     = (uint8_t)(w & 0xFF);
+        out[2 * i + 1] = (uint8_t)(w >> 8);
+    }
+
+    d->msg_rd = (d->msg_rd + 1) % d->msg_n;
+    return maxlen;
 }
 
 int mvb_msg_send(mvb_dev *d, uint16_t dest, const void *buf, int len)
 {
     (void)d; (void)dest; (void)buf; (void)len;
-    return MVB_ERR_NOSUP;
-}
-
-int mvb_msg_recv(mvb_dev *d, uint16_t *src, void *buf, int maxlen)
-{
-    (void)d; (void)src; (void)buf; (void)maxlen;
-    return MVB_ERR_NOSUP;
+    return MVB_ERR_NOSUP;                /* Transmit-Queue noch offen */
 }
