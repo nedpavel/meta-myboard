@@ -38,6 +38,7 @@ extern "C" {
 #define MVB_ERR_NOPORT  -4   /* Port nicht konfiguriert                  */
 #define MVB_ERR_SPACE   -5   /* kein freier Dock/Port-Index mehr         */
 #define MVB_ERR_NOSUP   -6   /* Funktion (noch) nicht unterstuetzt       */
+#define MVB_ERR_BUSY    -7   /* Sende-Queue voll                         */
 
 /* --- Port-Richtung ---------------------------------------------------- */
 #define MVB_SINK         0   /* Port empfaengt vom Bus                    */
@@ -132,11 +133,14 @@ int  mvb_put_var(void *portdata, int portsize_bytes,
    Zusammensetzen laengerer Nachrichten (Segmentierung nach IEC 61375)
    uebernimmt derzeit die Anwendung. */
 #define MVB_MSG_BLOCK   32    /* Nutzdaten je Frame (16 Worte)           */
-#define MVB_MSG_MAXBLK  16    /* max. Bloecke im Ringpuffer              */
+#define MVB_MSG_MAXBLK  12    /* max. Bloecke je Queue (Sende + Empfang) */
 
-/* Empfangs-Queue aufbauen (nblocks 2..MVB_MSG_MAXBLK). Nur im Config-Level. */
+/* Sende- UND Empfangs-Queue aufbauen (nblocks 2..MVB_MSG_MAXBLK).
+   Nur im Config-Level. Legt beide Ringe im freien TM-Bereich an und
+   aktiviert die Message-Ports MSNK (Empfang) und MSRC (Senden). */
 int  mvb_msg_setup(mvb_dev *d, int nblocks);
 
+/* --- Empfang --- */
 /* Anzahl empfangener, noch nicht abgeholter Bloecke (0 = nichts Neues). */
 int  mvb_msg_pending(mvb_dev *d);
 
@@ -144,8 +148,19 @@ int  mvb_msg_pending(mvb_dev *d);
    Rueckgabe: >0 = gelieferte Bytes, 0 = nichts da, <0 = Fehler. */
 int  mvb_msg_recv(mvb_dev *d, void *buf, int maxlen);
 
-/* Senden: noch nicht implementiert (Transmit-Queue + Segmentierung). */
-int  mvb_msg_send(mvb_dev *d, uint16_t dest, const void *buf, int len);
+/* --- Senden --- */
+/* Einen Frame (bis MVB_MSG_BLOCK Byte) in die Sende-Queue 0 stellen.
+   Der MVBC holt ihn selbstaendig ab, sobald der Bus-Master Message-Daten
+   anfordert. Rueckgabe: MVB_OK, MVB_ERR_BUSY (Queue voll) oder Fehler.
+
+   Anders als beim Empfang ist die Sende-Queue linear terminiert: der
+   MVBC laeuft bis zu einem Eintrag mit Data-Pointer 0 und haelt dort an.
+   Deshalb wird ein Eintrag erst durch das Setzen des Data-Pointers
+   "scharf" gestellt — die Nutzdaten stehen vorher schon im TM. */
+int  mvb_msg_send(mvb_dev *d, const void *buf, int len);
+
+/* Noch nicht gesendete (vom MVBC noch nicht abgeholte) Frames. */
+int  mvb_msg_send_pending(mvb_dev *d);
 
 /* --- Diagnose / Rohzugriff -------------------------------------------- */
 uint16_t mvb_tm_rd(mvb_dev *d, uint32_t byte_off);

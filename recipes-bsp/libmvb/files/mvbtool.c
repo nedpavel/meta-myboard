@@ -139,11 +139,52 @@ int main(int argc, char **argv)
         }
         printf("empfangen: %d Frames\n", got);
 
+    } else if (!strcmp(cmd, "send")) {
+        uint8_t buf[MVB_MSG_BLOCK];
+        int n, k;
+
+        memset(buf, 0, sizeof(buf));
+        for (n = 0; (2 + n) < argc && n < MVB_MSG_BLOCK; n++)
+            buf[n] = (uint8_t)strtoul(argv[2 + n], 0, 16);
+        if (n == 0) {                      /* Vorgabe-Testmuster */
+            for (n = 0; n < 8; n++)
+                buf[n] = (uint8_t)(0xA0 + n);
+        }
+
+        rc = mvb_msg_setup(d, 8);
+        printf("mvb_msg_setup(8 Bloecke) -> %d\n", rc);
+        if (rc != MVB_OK) {
+            fprintf(stderr, "Setup fehlgeschlagen — vorher 'mvbtool init'?\n");
+            mvb_close(d);
+            return 1;
+        }
+        mvb_set_level(d, MVB_IL_RUNNING);
+
+        printf("sende %d Byte:", n);
+        for (k = 0; k < n; k++)
+            printf(" %02X", buf[k]);
+        printf("\n");
+
+        rc = mvb_msg_send(d, buf, n);
+        printf("mvb_msg_send -> %d %s\n", rc,
+               rc == MVB_OK ? "(in Queue gestellt)" : "");
+        if (rc != MVB_OK) { mvb_close(d); return 1; }
+
+        /* warten, bis der MVBC den Frame abgeholt hat */
+        for (k = 0; k < 30; k++) {
+            int p = mvb_msg_send_pending(d);
+            if (p == 0) { printf("vom MVBC abgeholt und gesendet.\n"); break; }
+            if (p < 0)  { printf("send_pending -> %d\n", p); break; }
+            usleep(100000);
+        }
+        if (k == 30)
+            printf("noch nicht abgeholt — fordert der Bus-Master Message-Daten an?\n");
+
     } else {
         fprintf(stderr,
                 "Kommandos: info | init <devaddr> | dump <off> [len] | "
                 "watch <logaddr> <bytes> [n] | put <logaddr> <bytes> <hex..> | "
-                "msg [n]\n");
+                "msg [n] | send [hex..]\n");
         mvb_close(d);
         return 2;
     }

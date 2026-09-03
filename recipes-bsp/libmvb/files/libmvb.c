@@ -34,10 +34,13 @@
 #define QDT_XQ1        (SA_QDT + 2)         /* Sende-Queue 1                  */
 #define QDT_RQ         (SA_QDT + 4)         /* Empfangs-Queue                 */
 
-/* Ablage der Message-Queue: der 1-KB-Block, den TM_LAYOUT_64K zwischen
-   da_pcs und der Service Area als 'free_1' unbenutzt laesst. */
-#define MSGQ_BASE      0xF800
-#define MSGQ_END       0xFC00
+/* Ablage der Message-Queues: der 1-KB-Block, den TM_LAYOUT_64K zwischen
+   da_pcs und der Service Area als 'free_1' unbenutzt laesst. Er wird
+   haelftig geteilt — vorne Empfang, hinten Senden. */
+#define MSGQ_RX_BASE   0xF800
+#define MSGQ_RX_END    0xFA00
+#define MSGQ_TX_BASE   0xFA00
+#define MSGQ_TX_END    0xFC00
 
 /* Queue-Zeiger sind 16 Bit und adressieren in 4-Byte-Schritten:
    TM-Adresse = (Zeiger << 2) + Queue-Offset (QO im MCR, hier 0). */
@@ -67,10 +70,13 @@ struct mvb_dev {
     struct port_entry   ports[MAX_PORTS];
     int                 next_dock;   /* einfacher Dock-Allokator */
 
-    /* Message-Empfangs-Queue (Ringpuffer) */
-    int                 msg_n;       /* Anzahl Bloecke, 0 = nicht eingerichtet */
-    uint32_t            msg_blocks;  /* TM-Offset des ersten Datenblocks       */
-    int                 msg_rd;      /* Leseindex der Software                 */
+    /* Message-Queues (je ein Ring fuer Empfang und Senden) */
+    int                 msg_n;       /* Bloecke je Queue, 0 = nicht eingerichtet */
+    uint32_t            rx_blocks;   /* TM-Offset des ersten Empfangsblocks      */
+    int                 msg_rd;      /* Leseindex der Software (Empfang)         */
+    uint32_t            tx_blocks;   /* TM-Offset des ersten Sendeblocks         */
+    int                 tx_wr;       /* Schreibindex der Software (Senden)       */
+    int                 tx_tail;     /* bereits zurueckgeholte Sendeeintraege    */
 };
 
 /* --- 16-bit-Zugriffe auf das TM --------------------------------------- */
@@ -446,11 +452,19 @@ int mvb_put_var(void *portdata, int portsize_bytes,
  * schreibt nach jedem empfangenen Frame den Next-Pointer in QDT_RQ —
  * daran erkennt die Software, wie weit er gekommen ist.
  */
-static uint32_t llr_addr(int i)        { return MSGQ_BASE + (uint32_t)i * 4; }
+static uint32_t rx_llr(int i) { return MSGQ_RX_BASE + (uint32_t)i * 4; }
+static uint32_t tx_llr(int i) { return MSGQ_TX_BASE + (uint32_t)i * 4; }
+
+/* Datenbloecke hinter die LLRs legen, 32-Byte-ausgerichtet (Datenblatt:
+   Data-Pointer muessen 16-Wort-ausgerichtet sein). */
+static uint32_t blocks_of(uint32_t base, int n)
+{
+    return (base + (uint32_t)n * 4 + 31u) & ~31u;
+}
 
 int mvb_msg_setup(mvb_dev *d, int nblocks)
 {
-    uint32_t blocks_base;
+    uint32_t rxb, txb;
     int i;
 
     if (!d || nblocks < 2 || nblocks > MVB_MSG_MAXBLK)
@@ -458,51 +472,62 @@ int mvb_msg_setup(mvb_dev *d, int nblocks)
     if (mvb_get_level(d) != MVB_IL_CONFIG)
         return MVB_ERR_STATE;
 
-    /* Datenbloecke hinter den LLRs, auf 32 Byte ausgerichtet (Vorgabe des
-       Datenblatts: Data-Pointer muessen 16-Wort-ausgerichtet sein). */
-    blocks_base = (MSGQ_BASE + (uint32_t)nblocks * 4 + 31u) & ~31u;
-    if (blocks_base + (uint32_t)nblocks * MVB_MSG_BLOCK > MSGQ_END)
+    rxb = blocks_of(MSGQ_RX_BASE, nblocks);
+    txb = blocks_of(MSGQ_TX_BASE, nblocks);
+    if (rxb + (uint32_t)nblocks * MVB_MSG_BLOCK > MSGQ_RX_END ||
+        txb + (uint32_t)nblocks * MVB_MSG_BLOCK > MSGQ_TX_END)
         return MVB_ERR_SPACE;
 
-    /* Bloecke leeren und LLR-Ring aufbauen */
     for (i = 0; i < nblocks; i++) {
-        uint32_t blk = blocks_base + (uint32_t)i * MVB_MSG_BLOCK;
+        uint32_t rblk = rxb + (uint32_t)i * MVB_MSG_BLOCK;
+        uint32_t tblk = txb + (uint32_t)i * MVB_MSG_BLOCK;
         int w;
-        for (w = 0; w < MVB_MSG_BLOCK / 2; w++)
-            wr(d, blk + (uint32_t)w * 2, 0);
-        wr(d, llr_addr(i) + 0, PTR_OF(blk));                       /* DP */
-        wr(d, llr_addr(i) + 2, PTR_OF(llr_addr((i + 1) % nblocks)));/* NP */
+        for (w = 0; w < MVB_MSG_BLOCK / 2; w++) {
+            wr(d, rblk + (uint32_t)w * 2, 0);
+            wr(d, tblk + (uint32_t)w * 2, 0);
+        }
+        /* Empfang: Data-Pointer gesetzt -> der MVBC darf hineinschreiben */
+        wr(d, rx_llr(i) + 0, PTR_OF(rblk));
+        wr(d, rx_llr(i) + 2, PTR_OF(rx_llr((i + 1) % nblocks)));
+        /* Senden: Data-Pointer 0 = Queue-Ende, der MVBC haelt hier an */
+        wr(d, tx_llr(i) + 0, 0);
+        wr(d, tx_llr(i) + 2, PTR_OF(tx_llr((i + 1) % nblocks)));
     }
 
-    /* Message-Sink-Port aktivieren: F-Code 12, SINK, Queue attached (QA). */
+    /* Message-Ports aktivieren (F-Code 12 + Queue attached):
+       MSNK = Empfang (SINK-Bit), MSRC = Senden (SRC-Bit). */
     wr(d, SA_PP_PCS + (uint32_t)PP_MSNK * 8 + 0, 0xC000 | 0x0400 | 0x0004);
     wr(d, SA_PP_PCS + (uint32_t)PP_MSNK * 8 + 2, 0);
+    wr(d, SA_PP_PCS + (uint32_t)PP_MSRC * 8 + 0, 0xC000 | 0x0800 | 0x0004);
+    wr(d, SA_PP_PCS + (uint32_t)PP_MSRC * 8 + 2, 0);
 
-    /* Queue beim MVBC anmelden; Sende-Queues bleiben leer (= nicht vorhanden) */
-    wr(d, QDT_XQ0, 0);
+    /* Queues anmelden. Sende-Queue 1 (niedrige Prioritaet) bleibt ungenutzt. */
+    wr(d, QDT_XQ0, PTR_OF(tx_llr(0)));
     wr(d, QDT_XQ1, 0);
-    wr(d, QDT_RQ, PTR_OF(llr_addr(0)));
+    wr(d, QDT_RQ,  PTR_OF(rx_llr(0)));
 
-    d->msg_n      = nblocks;
-    d->msg_blocks = blocks_base;
-    d->msg_rd     = 0;
+    d->msg_n     = nblocks;
+    d->rx_blocks = rxb;
+    d->msg_rd    = 0;
+    d->tx_blocks = txb;
+    d->tx_wr     = 0;
+    d->tx_tail   = 0;
     return MVB_OK;
 }
 
-/* Position des MVBC im Ring aus der QDT ableiten; <0 bei ungueltigem Zeiger */
-static int msg_mvbc_index(mvb_dev *d)
+/* Position des MVBC im jeweiligen Ring aus der QDT ableiten;
+   <0 bei ungueltigem Zeiger (Queue leer/erschoepft oder fremde Adresse). */
+static int qdt_index(mvb_dev *d, uint32_t qdt_off, uint32_t base)
 {
-    uint16_t ptr = rd(d, QDT_RQ);
+    uint16_t ptr = rd(d, qdt_off);
     uint32_t addr;
-    int idx;
 
     if (ptr == 0)
-        return -1;                       /* Queue erschoepft/nicht vorhanden */
+        return -1;
     addr = ADDR_OF(ptr);
-    if (addr < MSGQ_BASE || addr >= MSGQ_BASE + (uint32_t)d->msg_n * 4)
-        return -1;                       /* zeigt nicht in unseren Ring */
-    idx = (int)((addr - MSGQ_BASE) / 4);
-    return idx;
+    if (addr < base || addr >= base + (uint32_t)d->msg_n * 4)
+        return -1;
+    return (int)((addr - base) / 4);
 }
 
 int mvb_msg_pending(mvb_dev *d)
@@ -513,7 +538,7 @@ int mvb_msg_pending(mvb_dev *d)
         return MVB_ERR_PARAM;
     if (d->msg_n == 0)
         return MVB_ERR_STATE;
-    idx = msg_mvbc_index(d);
+    idx = qdt_index(d, QDT_RQ, MSGQ_RX_BASE);
     if (idx < 0)
         return MVB_ERR_IO;
 
@@ -542,7 +567,7 @@ int mvb_msg_recv(mvb_dev *d, void *buf, int maxlen)
 
     if (maxlen > MVB_MSG_BLOCK)
         maxlen = MVB_MSG_BLOCK;
-    blk = d->msg_blocks + (uint32_t)d->msg_rd * MVB_MSG_BLOCK;
+    blk = d->rx_blocks + (uint32_t)d->msg_rd * MVB_MSG_BLOCK;
     for (i = 0; i < maxlen / 2; i++) {
         uint16_t w = rd(d, blk + (uint32_t)i * 2);
         out[2 * i]     = (uint8_t)(w & 0xFF);
@@ -553,8 +578,64 @@ int mvb_msg_recv(mvb_dev *d, void *buf, int maxlen)
     return maxlen;
 }
 
-int mvb_msg_send(mvb_dev *d, uint16_t dest, const void *buf, int len)
+int mvb_msg_send_pending(mvb_dev *d)
 {
-    (void)d; (void)dest; (void)buf; (void)len;
-    return MVB_ERR_NOSUP;                /* Transmit-Queue noch offen */
+    int idx, diff;
+
+    if (!d)
+        return MVB_ERR_PARAM;
+    if (d->msg_n == 0)
+        return MVB_ERR_STATE;
+    idx = qdt_index(d, QDT_XQ0, MSGQ_TX_BASE);
+    if (idx < 0)
+        return MVB_ERR_IO;
+
+    diff = d->tx_wr - idx;
+    if (diff < 0)
+        diff += d->msg_n;
+    return diff;
+}
+
+int mvb_msg_send(mvb_dev *d, const void *buf, int len)
+{
+    uint8_t frame[MVB_MSG_BLOCK];
+    uint32_t blk;
+    int idx, pend, i;
+
+    if (!d || !buf || len <= 0 || len > MVB_MSG_BLOCK)
+        return MVB_ERR_PARAM;
+    if (d->msg_n == 0)
+        return MVB_ERR_STATE;
+
+    idx = qdt_index(d, QDT_XQ0, MSGQ_TX_BASE);
+    if (idx < 0)
+        return MVB_ERR_IO;
+
+    /* Gesendete Eintraege zurueckholen: alles zwischen tx_tail und der
+       aktuellen MVBC-Position ist raus. Data-Pointer wieder auf 0, sonst
+       wuerde der Ring beim naechsten Umlauf erneut senden. */
+    while (d->tx_tail != idx) {
+        wr(d, tx_llr(d->tx_tail) + 0, 0);
+        d->tx_tail = (d->tx_tail + 1) % d->msg_n;
+    }
+
+    pend = d->tx_wr - idx;
+    if (pend < 0)
+        pend += d->msg_n;
+    if (pend >= d->msg_n - 1)
+        return MVB_ERR_BUSY;              /* Ring voll, MVBC kommt nicht nach */
+
+    /* Nutzdaten auf volle Blockgroesse auffuellen und ins TM schreiben */
+    memset(frame, 0, sizeof(frame));
+    memcpy(frame, buf, (size_t)len);
+    blk = d->tx_blocks + (uint32_t)d->tx_wr * MVB_MSG_BLOCK;
+    for (i = 0; i < MVB_MSG_BLOCK / 2; i++)
+        wr(d, blk + (uint32_t)i * 2,
+           (uint16_t)(frame[2 * i] | ((uint16_t)frame[2 * i + 1] << 8)));
+
+    /* Data-Pointer ZULETZT setzen — das stellt den Eintrag scharf, erst
+       danach darf der MVBC ihn sehen. */
+    wr(d, tx_llr(d->tx_wr) + 0, PTR_OF(blk));
+    d->tx_wr = (d->tx_wr + 1) % d->msg_n;
+    return MVB_OK;
 }
