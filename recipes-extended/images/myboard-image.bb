@@ -33,6 +33,8 @@ IMAGE_INSTALL:append = " \
     xorg-conf-myboard \
     "
 IMAGE_INSTALL:append = " udev-rules-myboard"
+# MVB: Kernel-Treiber (mappt das 64-KB-Traffic-Memory) + Userspace-Lib/Tool
+IMAGE_INSTALL:append = " pixymvbip libmvb"
 IMAGE_INSTALL:append = " nfs-utils"
 IMAGE_INSTALL:append = " nfs-devmount"
 IMAGE_INSTALL:append = " timesync-myboard"
