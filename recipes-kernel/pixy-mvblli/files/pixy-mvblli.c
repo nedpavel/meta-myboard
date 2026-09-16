@@ -908,13 +908,19 @@ static int mvb_init_board(struct mvblli_dev *d)
 {
 	int ret;
 
+	/*
+	 * Ab hier haengt ein Interruptdienst im Board-Treiber, der auf
+	 * Speicher dieses Moduls zeigt. Jeder Fehlerausgang muss ihn wieder
+	 * abmelden - sonst ruft der Board-Treiber nach einem rmmod in
+	 * freigegebenen Code.
+	 */
 	ret = mvblli_attach_board(d);
 	if (ret)
 		return ret;
 
 	ret = mvblli_detect_tm(d);
 	if (ret)
-		return ret;
+		goto err_detach;
 
 	d->ts_id = d->brd_id;
 	d->waitstates = 0;
@@ -925,37 +931,33 @@ static int mvb_init_board(struct mvblli_dev *d)
 
 	ret = mvb_config(d);
 	if (ret)
-		return ret;
+		goto err_detach;
 
 	ret = mvb_hardw_config(d);
 	if (ret)
-		return ret;
+		goto err_detach;
 
 	ret = mvb_set_device_address(d, 0);
 	if (ret)
-		return ret;
+		goto err_detach;
 
 	d->all_tacks = kcalloc(TM_PORT_COUNT, sizeof(u16), GFP_KERNEL);
-	if (!d->all_tacks)
-		return -ENOMEM;
+	if (!d->all_tacks) {
+		ret = -ENOMEM;
+		goto err_detach;
+	}
 
 	d->rcv_elems = MVBLLI_RCV_RING_ELEMS;
 	d->rcv_ring = kcalloc(d->rcv_elems, MVB_MSG_FRAME_SIZE, GFP_KERNEL);
 	if (!d->rcv_ring) {
-		kfree(d->all_tacks);
-		d->all_tacks = NULL;
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_free;
 	}
 	d->rcv_filled = d->rcv_rd = d->rcv_wr = 0;
 
 	ret = mvb_md_q_init(d);
-	if (ret) {
-		kfree(d->rcv_ring);
-		kfree(d->all_tacks);
-		d->rcv_ring = NULL;
-		d->all_tacks = NULL;
-		return ret;
-	}
+	if (ret)
+		goto err_free;
 
 	memset(&d->status, 0, sizeof(d->status));
 	scnprintf(d->status.hw_version, sizeof(d->status.hw_version),
@@ -969,6 +971,15 @@ static int mvb_init_board(struct mvblli_dev *d)
 		d->brd_id, d->status.hw_version);
 
 	return 0;
+
+err_free:
+	kfree(d->rcv_ring);
+	d->rcv_ring = NULL;
+	kfree(d->all_tacks);
+	d->all_tacks = NULL;
+err_detach:
+	mvblli_detach_board(d);
+	return ret;
 }
 
 static void mvb_deinit_board(struct mvblli_dev *d)
