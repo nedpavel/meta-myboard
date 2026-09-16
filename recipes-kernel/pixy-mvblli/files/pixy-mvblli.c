@@ -409,8 +409,14 @@ static int mvb_config(struct mvblli_dev *d)
 	sa_w16(d, SA_PP_PCS + TM_PP_MSNK * 8, 0x1402);
 	sa_w16(d, SA_PP_PCS + TM_PP_MSNK * 8 + 2, 0);
 
-	/* Markierung, die den Initialisierungslauf ueberleben muss */
-	sa_w16(d, SA_PP_DATA + TM_PP_EFS * 64, 0xa55a);
+	/*
+	 * Schleifentest: die Marke wird in die Message-Quelle gelegt und
+	 * die Message-Senke geleert. Im Testmodus kopiert der MVBC sie
+	 * waehrend des Initialisierungslaufs hinueber - kommt sie dort an,
+	 * arbeiten Controller und Traffic Memory zusammen.
+	 */
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_MSRC, 0), 0xa55a);
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_MSNK, 1), 0);
 	sa_w16(d, SA_MFS, 0);
 
 	sa_w16(d, MVBC_SCR, d->waitstates | 0x84fe);
@@ -424,12 +430,12 @@ static int mvb_config(struct mvblli_dev *d)
 			break;
 	}
 
-	marker = sa_r16(d, SA_PP_DATA + TM_PP_EFS * 64);
+	marker = sa_r16(d, SA_PP_DATA + tm_dock_offset(TM_PP_MSNK, 1));
 	mvb_wait(d, 2000);
 	sa_w16(d, MVBC_SCR, scr);
 
 	if (marker != 0xa55a) {
-		pr_err(DRV_NAME ": traffic memory self test failed (0x%04x)\n",
+		pr_err(DRV_NAME ": MVBC loopback self test failed (0x%04x)\n",
 		       marker);
 		return -EIO;
 	}
@@ -658,21 +664,27 @@ static int mvb_sndp(struct mvblli_dev *d, u16 dd, int control, const u16 *packet
 	tm_w16(d, cur_off, buf_p16);		/* Puffer einhaengen */
 	*cur_p16 = nxt_p16;
 
-	/* Ereignisframe ausloesen, Prioritaet waehlt den Port */
+	/*
+	 * Ereignisframe ausloesen. Welcher der beiden Quellports benutzt
+	 * wird, entscheidet die per MD_CONF gesetzte Queue-Prioritaet, nicht
+	 * die Prioritaet des einzelnen Frames. Geschrieben wird in die
+	 * gerade nicht sichtbare Seite, danach schaltet VP um.
+	 */
 	{
+		bool use_ef1 = (s16)d->q_tq_priority < 0;
 		u16 ev = (own & 0xfff) | 0xc000;
-		u32 pcs = SA_PP_PCS + (control ? TM_PP_EF1 : TM_PP_EF0) * 8;
-		u32 dat = SA_PP_DATA + (control ? TM_PP_EF1 : TM_PP_EF0) * 64;
+		u16 pp = use_ef1 ? TM_PP_EF1 : TM_PP_EF0;
+		u32 pcs = SA_PP_PCS + pp * 8;
 		u16 w1 = sa_r16(d, pcs + 2);
 
 		if (!(w1 & TM_PCS_VP_MSK)) {
-			sa_w16(d, dat + 32, ev);
+			sa_w16(d, SA_PP_DATA + tm_dock_offset(pp, 1), ev);
 			sa_w16(d, pcs + 2, w1 | TM_PCS_VP_MSK);
 		} else {
-			sa_w16(d, dat, ev);
+			sa_w16(d, SA_PP_DATA + tm_dock_offset(pp, 0), ev);
 			sa_w16(d, pcs + 2, w1 & ~TM_PCS_VP_MSK);
 		}
-		sa_w16(d, MVBC_MR2, control ? 0x2000 : 0x1000);
+		sa_w16(d, MVBC_MR, use_ef1 ? 0x2000 : 0x1000);
 	}
 
 	return 0;
@@ -1314,7 +1326,10 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_DSW:
-		v16 = sa_r16(d, SA_PP_DATA + TM_PP_FC15 * 64);
+		v16 = sa_r16(d, SA_PP_DATA +
+			     tm_dock_offset(TM_PP_FC15,
+					    (sa_r16(d, SA_PP_PCS + TM_PP_FC15 * 8 + 2)
+					     & TM_PCS_VP_MSK) ? 1 : 0));
 		if (put_user(v16, (u16 __user *)uarg))
 			ret = -EFAULT;
 		break;
@@ -1324,10 +1339,11 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 			ret = -EFAULT;
 		} else {
 			u32 pcs = SA_PP_PCS + TM_PP_FC15 * 8;
-			u32 dat = SA_PP_DATA + TM_PP_FC15 * 64;
 			u16 w1 = sa_r16(d, pcs + 2);
 
-			sa_w16(d, dat + ((w1 & TM_PCS_VP_MSK) ? 0 : 32),
+			sa_w16(d, SA_PP_DATA +
+			       tm_dock_offset(TM_PP_FC15,
+					      (w1 & TM_PCS_VP_MSK) ? 0 : 1),
 			       (u16)v32);
 			sa_w16(d, pcs + 2, w1 ^ TM_PCS_VP_MSK);
 		}
