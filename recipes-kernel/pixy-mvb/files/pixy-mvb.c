@@ -769,8 +769,7 @@ static int pixy_mvb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	brd = pixy_mvb_claim_slot(pdev);
 	if (!brd) {
-		dev_err(dev, "Exceeded maximum number of MVB/PC104 boards. "
-			     "Cannot initialize device\n");
+		dev_err(dev, "Exceeded maximum number of boards\n");
 		err = -ENODEV;
 		goto err_regions;
 	}
