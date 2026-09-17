@@ -36,6 +36,8 @@ typedef uint32_t __u32;
 #define MKDEV(ma, mi)		(((ma) << 20) | (mi))
 #define MAJOR(d)		((d) >> 20)
 #define MINOR(d)		((d) & 0xfffff)
+#define iminor(i)		0
+#define cpu_relax()		do { } while (0)
 
 #define pr_info(fmt, ...)	fprintf(stderr, "[info ] " fmt, ##__VA_ARGS__)
 #define pr_warn(fmt, ...)	fprintf(stderr, "[warn ] " fmt, ##__VA_ARGS__)

@@ -567,6 +567,85 @@ static void test_pp_offsets(void)
 	       tm_dock_offset(213, 1));
 }
 
+/* ---------------------------------------------------------- Test 9 */
+/*
+ * mvb_hardw_config: das Antwortfenster muss im SCR landen, ohne die
+ * uebrigen Bits anzufassen, und der Zweileitungsbetrieb muss SLM im DR
+ * loeschen. Zusaetzlich muss der Leitungszustand im Device Status Word
+ * ankommen. Sollwert ist der am Geraet gemessene Registerstand.
+ */
+static void test_hardw_config(void)
+{
+	const u32 pcs1 = SA_PP_PCS + TM_PP_FC15 * 8 + 2;
+	u16 scr, dr, dsw;
+
+	printf("\n--- Test 9: Antwortfenster und Leitungsbetrieb ---\n");
+
+	dev.configured = 1;
+	drvdata.dev[0] = dev;		/* mvb_set_laa_rld laeuft ueber drvdata */
+
+	/* Ausgangslage: gemessener Stand mit TMO_21US und gesetztem SLM */
+	sa_w16(&drvdata.dev[0], MVBC_SCR, 0x83c7);
+	sa_w16(&drvdata.dev[0], MVBC_DR, 0x150d);
+	sa_w16(&drvdata.dev[0], pcs1, 0);
+
+	check(mvb_hardw_config(&drvdata.dev[0], MVB_LINE_BOTH, 1) == 0,
+	      "mvb_hardw_config(BOTH, 1) schlug fehl");
+
+	scr = sa_r16(&drvdata.dev[0], MVBC_SCR);
+	dr  = sa_r16(&drvdata.dev[0], MVBC_DR);
+
+	check(scr == 0x87c7, "SCR ist 0x%04x statt 0x87C7", scr);
+	check((scr & TM_SCR_TMO_MASK) == TM_SCR_TMO_43US,
+	      "TMO-Feld ist 0x%04x statt TMO_43US", scr & TM_SCR_TMO_MASK);
+	check((dr & TM_DR_SLM) == 0, "SLM nicht geloescht, DR = 0x%04x", dr);
+	check(dr == 0x150c, "DR ist 0x%04x statt 0x150C", dr);
+	printf("  SCR 0x83C7 -> 0x%04x (TMO_43US), DR 0x150D -> 0x%04x\n",
+	       scr, dr);
+
+	/*
+	 * DR 0x150C traegt LAA (Bit 3) und das gespeicherte RLD (Bit 12).
+	 * auto_reset_rld = 0, also kommt RLD aus Bit 12 - beide Bits muessen
+	 * im DSW stehen.
+	 */
+	dsw = sa_r16(&drvdata.dev[0],
+		     SA_PP_DATA + tm_dock_offset(TM_PP_FC15,
+			(sa_r16(&drvdata.dev[0], pcs1) & TM_PCS_VP_MSK) ? 1 : 0));
+	check((dsw & (MVB_DSW_LAA | MVB_DSW_RLD)) ==
+	      (MVB_DSW_LAA | MVB_DSW_RLD),
+	      "DSW ist 0x%04x, LAA/RLD fehlen", dsw);
+	printf("  Device Status Word 0x%04x (LAA + RLD gesetzt)\n", dsw);
+
+	/* auto_reset_rld = 1 nimmt RLD aus DR Bit 2 - das ist hier 1 */
+	drvdata.dev[0].auto_reset_rld = 1;
+	mvb_set_laa_rld();
+	dsw = sa_r16(&drvdata.dev[0],
+		     SA_PP_DATA + tm_dock_offset(TM_PP_FC15,
+			(sa_r16(&drvdata.dev[0], pcs1) & TM_PCS_VP_MSK) ? 1 : 0));
+	check((dsw & MVB_DSW_RLD) == MVB_DSW_RLD,
+	      "RLD aus DR Bit 2 fehlt, DSW = 0x%04x", dsw);
+
+	/* Beide Seiten des doppelt gepufferten Ports muessen gleich sein */
+	check(sa_r16(&drvdata.dev[0], SA_PP_DATA + tm_dock_offset(TM_PP_FC15, 0)) ==
+	      sa_r16(&drvdata.dev[0], SA_PP_DATA + tm_dock_offset(TM_PP_FC15, 1)),
+	      "die beiden DSW-Seiten tragen verschiedene Werte");
+	printf("  beide Seiten des DSW-Ports gleich\n");
+
+	/* treply_config > 3 wird abgelehnt, das SCR bleibt unberuehrt */
+	scr = sa_r16(&drvdata.dev[0], MVBC_SCR);
+	check(mvb_hardw_config(&drvdata.dev[0], MVB_LINE_BOTH, 4) != 0,
+	      "treply_config = 4 wurde nicht abgelehnt");
+	check(sa_r16(&drvdata.dev[0], MVBC_SCR) == scr,
+	      "SCR wurde trotz Ablehnung veraendert");
+
+	/* unbekannter Leitungsbetrieb wird ebenfalls abgelehnt */
+	check(mvb_hardw_config(&drvdata.dev[0], 7, 1) != 0,
+	      "line_config = 7 wurde nicht abgelehnt");
+
+	drvdata.dev[0].configured = 0;
+	dev.configured = 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -590,6 +669,7 @@ int main(int argc, char **argv)
 	test_pd_roundtrip();
 	test_md_send();
 	test_md_receive();
+	test_hardw_config();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;

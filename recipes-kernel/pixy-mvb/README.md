@@ -156,8 +156,18 @@ diff <(grep -A40 'MVBC-Register' /root/snap-stufe1/summary.txt) \
      <(grep -A40 'MVBC-Register' /root/mvbsnap-referenz/summary.txt)
 ```
 
-`SCR`, `MCR`, `DR`, `STSR`, `DAOR`, `DAOK` und `TCR` müssen wieder die
-Werte von vorher zeigen, und `la_pit` wieder 74 Einträge.
+Solange noch kein `open()` gelaufen ist, prüft der Vergleich den
+**Lesepfad**: `MCR`, `DR`, `STSR`, `DAOR`, `DAOK`, `TCR` und die 74
+`la_pit`-Einträge müssen unverändert dastehen. Nur `SCR` und `IMR0`/`IMR1`
+weichen ab, weil das Schließen durch `extApp` den Controller gestoppt hat
+(`SCR` auf IL = CONFIG, Masken auf 0).
+
+Danach mit dem **originalen** LLI ein `open()` ausführen und erneut
+aufnehmen — das ist der Sollwert für Stufe 2 und die einzige Prüfung des
+**Schreibpfads**. Erwartet: `SCR` mit gesetztem TMO-Feld für 43 µs,
+`MCR` mit `mcm = 3`, `la_pit` komplett null, `DAOR = 0x0000`,
+`DAOK = 0x0094`, die drei QDT-Einträge neu eingehängt, `STSR` **nicht**
+`0x10DB` (ohne Anwendung läuft kein `PD_CONF`).
 
 ### Stufe 2 — beide Module aus dem Nachbau
 
@@ -224,6 +234,122 @@ reboot
 
 Es wurde nichts im Dateisystem verändert, das Original wird ganz normal
 wieder geladen.
+
+## Gegenlesen gegen das Dekompilat
+
+Beide Module wurden Funktion für Funktion gegen das Ghidra-Dekompilat der
+Originale gehalten. Was dabei gefunden und behoben wurde, in der
+Reihenfolge der Tragweite:
+
+### 1. Service Area liegt während der Initialisierung woanders
+
+`mvb_config` im Original adressiert den gesamten Registersatz über
+**`TM + 0x3C00`** — den Grundplatz der Service Area — und schiebt
+`p_sa` erst nach dem Schreiben von `MCR` an den zur Speichergröße
+passenden Platz (`TM + 0xFC00` bei `mcm = 3`). Der MVBC benutzt bis
+dahin seine Einschaltbelegung. Deshalb schreibt das Original `SCR`
+eingangs auch an *jeden* in Frage kommenden Ort.
+
+Der Nachbau hat von Anfang an über `0xFC00` gearbeitet. Auf der echten
+Karte wären damit sämtliche Initialisierungszugriffe ins Leere gegangen
+und der Schleifentest hätte fehlgeschlagen — **Stufe 2 wäre gescheitert**.
+
+### 2. `mvb_hardw_config` war unvollständig
+
+Es fehlten das TMO-Feld im `SCR` (43 µs Antwortfenster), das Löschen von
+`SLM` im `DR` für Zweileitungsbetrieb und `mvb_set_laa_rld()`. Statt
+dessen wurden `STSR` und `TCR` geschrieben, was das Original dort gar
+nicht tut. Neu dazugekommen sind `mvb_set_device_status_word()`,
+`mvb_set_laa_rld()` und `mvb_reset_rlds()`.
+
+Damit ist auch die offene Frage nach `TCR = 0x0022` beantwortet: das LLI
+schreibt `TCR` **nie** — außer Bit `TA2` beim Warten. `RS1|RS2` ist die
+Einschaltbelegung des Controllers.
+
+### 3. Der Oberbautreiber meldet sich selbst an
+
+Das originale LLI sucht beim Laden `/dev/mvb0..2` ab und ruft für jede
+Karte, die sich öffnen lässt, sofort `mvb_add_board()` auf; das
+Abonnement beim Board-Treiber deckt nur *spätere* Ereignisse ab. Der
+originale Board-Treiber meldet beim Abonnieren folglich **nichts** über
+bereits vorhandene Karten.
+
+Der Nachbau hatte es umgekehrt: der Board-Treiber meldete sofort, das LLI
+verließ sich darauf. Das koppelte beide Module aneinander — genau das,
+was die paarweise Mischprobe unmöglich gemacht hätte. Beide Seiten sind
+jetzt auf das Verhalten des Originals umgestellt.
+
+### 4. `WRITE_CONTROL` war weitgehend falsch
+
+`mvb_ctrl.t_ignore` ist eine **Zeitangabe in Mikrosekunden**, keine
+Feldnummer; sie wird über Schwellen auf das TMO-Feld abgebildet
+(1…31 → 21 µs, 32…52 → 43 µs, 53…74 → 64 µs, 75…255 → 83 µs, ≥ 256
+lässt den Wert stehen). Die Kommandobits `sla`/`slb` wählen den
+Leitungsbetrieb, `cla`/`clb` setzen die Fehlerzähler zurück. Nichts
+davon war umgesetzt.
+
+### 5. `WRITE_DSW` trägt eine Maske im oberen Wort
+
+Das `uint32_t`-Argument ist `Maske << 16 | Wert`; nur die maskierten Bits
+werden verändert. Der Nachbau hat das obere Wort verworfen und den
+ganzen Status überschrieben.
+
+### 6. Fehlerzähler je Leitung
+
+`SA + 0x3D0` und `SA + 0x3D4` sind die Fehlerzähler für Leitung A und B.
+`READ_STATS` hat sie bisher hart auf null gemeldet.
+
+### 7. `IVR0`/`IVR1` statt `ISR0`/`ISR1`
+
+`mvb_config` leert die Interrupt-**Vektor**register, nicht die
+Statusregister. Der Nachbau hatte die falschen beiden erwischt.
+
+### 8. `mvb_wait` benutzt den Zähler des MVBC
+
+Das Original wartet über `TR2`/`TC2`/`TCR.TA2`, nicht über die
+Kernel-Uhr; ein Zählwert entspricht acht Schritten. `mvb_wait(2000)`
+sind also 16000 Controllertakte, nicht 2 ms. Der Nachbau hat
+`usleep_range()` benutzt und damit potenziell deutlich zu kurz gewartet.
+Einzige bewusste Abweichung: eine Zählschranke gegen ein Festhängen,
+falls der Zähler nicht läuft.
+
+### 9. Fehlercodes und Zustandsprüfungen
+
+| Stelle | Original | Nachbau vorher |
+|---|---|---|
+| `read()` ohne `MVB_GO` | `ENETDOWN` | `ENOTCONN` bei fehlendem `has_pd` |
+| `write()` ohne `private_data` | `ENETDOWN` | `ENODEV` |
+| `START` ohne Geräteadresse | `EINVAL` | `EPERM` bei fehlendem `has_pd` |
+| `STOP` bei gestopptem Controller | `ENETDOWN` | `EPERM` |
+| `RETRIGGER` auf MVBC02D | `EINVAL` | stillschweigend `0` |
+| `REC_CONF` / `REC_DEL` | `EPERM` | `ENOSYS` |
+| `MD_NSDB` / `BA_NSDB` | `EINVAL` | `ENOSYS` |
+| `HWINIT`, `WRITE_DEV_ADDR` bei laufendem Controller | `EFAULT` | keine Prüfung |
+| `MD_CONF` bei laufendem Controller | `EALREADY` | keine Prüfung |
+| `open()`, Initialisierung schlägt fehl | `EBADF` | `ENODEV` |
+| `arg == NULL` | `EINVAL` | `EFAULT` |
+| fehlgeschlagenes `copy_to_user` | `EINVAL` | `EFAULT` |
+| Abonnement voll / unbekannt | `EFAULT` | `ENOMEM` / `ENXIO` |
+
+### 10. Kleinigkeiten
+
+`has_md` kommt aus `MD_CONF`, nicht aus der Initialisierung.
+`READ_STATS` liefert `line_config` und `t_ignore` aus dem gespeicherten
+Status, nicht aus `media_type` und dem `SCR`. `mvb_set_device_address`
+prüft die Adresse zurück. `cdev_add` registriert 255 Minor je Karte.
+`mvb_config` legt zusätzlich `EFS`, `FC8` und die Anfangsbelegung des
+Device Status Word (`0x0082`) an.
+
+### Unverändert bestätigt
+
+Alle 22 ioctl-Nummern beider Module stimmen mit den gemessenen Werten des
+Dekompilats überein, ebenso die Größen von `PixyMvbBoardCoreID` (16 B),
+`PixyMvbBoardGPIO` (32 B), `PixyMvbModuleVerStr` (128 B) und
+`PixyMvbBoardUpperDrvSubscribe` (36 B = 9 Doppelwörter). `DAOK = 0x0094`
+ist als Konstante des Originals belegt; die am Gerät gemessenen `0x00FF`
+stammen also nicht aus dem Treiber. Dock-Adressierung, Index-Vergabe,
+Wächterelement, Link_Header und die `STSR`-Berechnung waren bereits
+richtig.
 
 ## Bekannte bewusste Eigenheiten
 

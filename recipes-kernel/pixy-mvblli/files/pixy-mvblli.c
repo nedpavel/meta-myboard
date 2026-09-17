@@ -96,6 +96,9 @@ struct mvblli_dev {
 	u16 mvb_addr;
 	int media_type;			/* 0 = ESD, sonst EMD */
 	u16 waitstates;
+	int configured;			/* mvb_config() ist durchgelaufen */
+	u16 line_config;		/* MVB_LINE_A / _B / _BOTH */
+	u16 treply_config;		/* TMO-Feld im SCR, 0..3    */
 
 	/* Konfiguration des Traffic Store (HWINIT) */
 	u8 ownership;
@@ -297,9 +300,34 @@ static int apd_put_port(struct mvblli_dev *d, u16 port, const u16 *data,
 
 /* --------------------------------------------------- MVBC-Grundfunktionen */
 
-static void mvb_wait(struct mvblli_dev *d, unsigned int usec)
+/*
+ * Warten mit dem Zaehler 2 des MVBC, nicht mit der Kernel-Uhr. Das ist
+ * Absicht: die Wartezeiten in mvb_config() beziehen sich auf den Takt des
+ * Controllers, nicht auf Mikrosekunden. Ein Wert von 1 entspricht acht
+ * Zaehlerschritten.
+ *
+ * Einziger Unterschied zum Original ist die Zaehlschranke - das Original
+ * dreht hier ohne Abbruchbedingung. Solange der Zaehler laeuft, aendert
+ * sie nichts; laeuft er nicht, haengt der Kernel damit nicht fest.
+ */
+static void mvb_wait(struct mvblli_dev *d, u16 time)
 {
-	usleep_range(usec, usec + usec / 4 + 1);
+	unsigned int guard = 1000000;
+	u16 target;
+
+	if (time >= 0x2000)
+		return;
+
+	target = (u16)(0xffff - 8 * time);
+
+	sa_w16(d, MVBC_TR2, 0xffff);
+	sa_w16(d, MVBC_TC2, 0xffff);
+	sa_w16(d, MVBC_TCR, sa_r16(d, MVBC_TCR) | TM_TCR_TA2);
+
+	while (guard-- && sa_r16(d, MVBC_TC2) > target)
+		cpu_relax();
+
+	sa_w16(d, MVBC_TCR, sa_r16(d, MVBC_TCR) & ~TM_TCR_TA2);
 }
 
 static int mvb_set_device_address(struct mvblli_dev *d, u16 addr)
@@ -309,6 +337,11 @@ static int mvb_set_device_address(struct mvblli_dev *d, u16 addr)
 
 	sa_w16(d, MVBC_DAOR, addr);
 	sa_w16(d, MVBC_DAOK, TM_DAOK_ENABLE);
+
+	/* Das Original prueft die Adresse zurueck und meldet Abweichungen. */
+	if (sa_r16(d, MVBC_DAOR) != addr)
+		return -EIO;
+
 	d->mvb_addr = addr;
 	d->status.mvb_addr = addr;
 
@@ -317,7 +350,107 @@ static int mvb_set_device_address(struct mvblli_dev *d, u16 addr)
 
 static u16 mvb_get_device_address(struct mvblli_dev *d)
 {
-	return sa_r16(d, MVBC_DAOR) & 0xfff;
+	return sa_r16(d, MVBC_DAOR);
+}
+
+/*
+ * Device Status Word. Der Port FC15 ist doppelt gepuffert: geschrieben
+ * wird die gerade nicht sichtbare Seite, danach legt VP auf sie um und
+ * die andere Seite wird nachgezogen, damit beide denselben Stand tragen.
+ * Die doppelte VP-Schreibung ist aus dem Original uebernommen.
+ */
+static void mvb_set_device_status_word(struct mvblli_dev *d, u16 mask, u16 value)
+{
+	const u32 pcs1 = SA_PP_PCS + TM_PP_FC15 * 8 + 2;
+	unsigned int vp = (sa_r16(d, pcs1) & TM_PCS_VP_MSK) ? 1 : 0;
+	u32 dst = SA_PP_DATA + tm_dock_offset(TM_PP_FC15, vp ^ 1);
+	u32 oth = SA_PP_DATA + tm_dock_offset(TM_PP_FC15, vp);
+	u16 v;
+
+	v = (value & mask) | (sa_r16(d, dst) & ~mask);
+	sa_w16(d, dst, v);
+
+	if (vp)
+		sa_w16(d, pcs1, sa_r16(d, pcs1) & ~TM_PCS_VP_MSK);
+	else
+		sa_w16(d, pcs1, sa_r16(d, pcs1) | TM_PCS_VP_MSK);
+
+	sa_w16(d, oth, v);
+
+	if (vp)
+		sa_w16(d, pcs1, sa_r16(d, pcs1) & ~TM_PCS_VP_MSK);
+	else
+		sa_w16(d, pcs1, sa_r16(d, pcs1) | TM_PCS_VP_MSK);
+}
+
+/*
+ * Spiegelt Leitungszustand und Stoerungsmeldung aus dem Decoder-Register
+ * in das Device Status Word. Wie im Original ueber alle konfigurierten
+ * Traffic Stores, jeder mit seinem eigenen DR.
+ */
+static void mvb_set_laa_rld(void)
+{
+	int i;
+
+	for (i = 0; i < MVBLLI_MAX_DEV; i++) {
+		struct mvblli_dev *d = &drvdata.dev[i];
+		u16 dr, laa, rld;
+
+		if (!d->configured)
+			continue;
+
+		dr  = sa_r16(d, MVBC_DR);
+		laa = (dr << 4) & MVB_DSW_LAA;		/* DR Bit 3  -> DSW Bit 7 */
+
+		if (d->auto_reset_rld)
+			rld = (dr << 4) & MVB_DSW_RLD;	/* DR Bit 2  -> DSW Bit 6 */
+		else
+			rld = (dr >> 6) & MVB_DSW_RLD;	/* DR Bit 12 -> DSW Bit 6 */
+
+		mvb_set_device_status_word(d, MVB_DSW_LAA | MVB_DSW_RLD,
+					   laa | rld);
+	}
+}
+
+static void mvb_reset_rlds(struct mvblli_dev *d)
+{
+	sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) & ~TM_DR_RLD_LATCH);
+	mvb_set_laa_rld();
+}
+
+/*
+ * Die vier Zaehler des MVBC. Lesen und Loeschen laufen im Original ueber
+ * dieselbe Funktion mvb_handle_counter(); hier sind es zwei, weil das
+ * lesbarer ist und das Verhalten nicht beruehrt.
+ */
+enum mvb_counter {
+	MVB_CNT_FRAMES = 1,
+	MVB_CNT_ERRORS,
+	MVB_CNT_ERRORS_A,
+	MVB_CNT_ERRORS_B,
+};
+
+static u16 mvb_read_counter(struct mvblli_dev *d, enum mvb_counter which)
+{
+	switch (which) {
+	case MVB_CNT_FRAMES:	return sa_r16(d, MVBC_FC);
+	case MVB_CNT_ERRORS:	return sa_r16(d, MVBC_EC);
+	case MVB_CNT_ERRORS_A:	return sa_r16(d, MVBC_ECA);
+	case MVB_CNT_ERRORS_B:	return sa_r16(d, MVBC_ECB);
+	}
+
+	return 0;
+}
+
+static void mvb_clear_counters(struct mvblli_dev *d, bool errors,
+			       bool line_a, bool line_b)
+{
+	if (errors)
+		sa_w16(d, MVBC_EC, 0);
+	if (line_a)
+		sa_w16(d, MVBC_ECA, 0);
+	if (line_b)
+		sa_w16(d, MVBC_ECB, 0);
 }
 
 static int mvb_tmo_config(struct mvblli_dev *d, u16 stsr)
@@ -371,14 +504,16 @@ static int mvb_config(struct mvblli_dev *d)
 		return -EINVAL;
 
 	/*
-	 * Der Registersatz liegt je nach Speicherausbau an einer anderen
-	 * Stelle. Solange die Groesse noch nicht feststeht, wird SCR an
-	 * jedem in Frage kommenden Ort beschrieben.
+	 * Entscheidend fuer die ganze Folge: solange MCR nicht programmiert
+	 * ist, liegt die Service Area an ihrem Grundplatz sa_offs[0], egal
+	 * wie gross das Traffic Memory wirklich ist. Erst das Schreiben von
+	 * MCR weiter unten schiebt sie an den zur Groesse passenden Platz.
+	 * Bis dahin laeuft jeder Registerzugriff ueber diese Sondieradresse.
 	 */
-	for (i = 0; i < TM_OFFSET_COUNT; i++)
+	for (i = 0; i <= (u32)d->mcm && i < TM_OFFSET_COUNT; i++)
 		tm_w16(d, sa_offs[i] + MVBC_SCR, d->waitstates | 0x04c0);
 
-	d->p_sa = d->p_tm + sa_offs[d->mcm];
+	d->p_sa = d->p_tm + sa_offs[0];
 
 	ver = sa_r16(d, MVBC_MCR) >> TM_MCR_VERSION_SHIFT;
 	if (ver != MVBC_VER_MVBC02D) {
@@ -398,10 +533,11 @@ static int mvb_config(struct mvblli_dev *d)
 		return -EIO;
 	}
 
+	/* Interruptmasken und Vektorregister leeren (nicht ISR0/ISR1) */
 	sa_w16(d, MVBC_IMR0, 0);
 	sa_w16(d, MVBC_IMR1, 0);
-	sa_w16(d, MVBC_ISR0, 0);
-	sa_w16(d, MVBC_ISR1, 0);
+	sa_w16(d, MVBC_IVR0, 0);
+	sa_w16(d, MVBC_IVR1, 0);
 
 	/* Message-Ports vorbelegen */
 	sa_w16(d, SA_PP_PCS + TM_PP_MSRC * 8, 0x1802);
@@ -417,7 +553,6 @@ static int mvb_config(struct mvblli_dev *d)
 	 */
 	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_MSRC, 0), 0xa55a);
 	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_MSNK, 1), 0);
-	sa_w16(d, SA_MFS, 0);
 
 	sa_w16(d, MVBC_SCR, d->waitstates | 0x84fe);
 	mvb_wait(d, 2000);
@@ -434,23 +569,25 @@ static int mvb_config(struct mvblli_dev *d)
 	mvb_wait(d, 2000);
 	sa_w16(d, MVBC_SCR, scr);
 
-	if (marker != 0xa55a) {
-		pr_err(DRV_NAME ": MVBC loopback self test failed (0x%04x)\n",
-		       marker);
-		return -EIO;
-	}
-
 	/* Leitungsart: EMD schaltet zwei Bits im Decoder-Register */
 	if (d->media_type) {
 		sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) | 0x0020);
 		sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) | 0x4000);
 	}
 
+	if (marker != 0xa55a) {
+		pr_err(DRV_NAME ": MVBC loopback self test failed (0x%04x)\n",
+		       marker);
+		return -EIO;
+	}
+
 	/*
 	 * MCR: nur die unteren Bits beschreiben. 15:11 sind die
-	 * Chipversion und read-only.
+	 * Chipversion und read-only. Ab hier liegt die Service Area an
+	 * ihrem endgueltigen Platz.
 	 */
 	sa_w16(d, MVBC_MCR, d->mcm & TM_MCR_MCM_MASK);
+	d->p_sa = d->p_tm + sa_offs[d->mcm];
 
 	/* Ablagen im Traffic Memory merken und Porttabellen loeschen */
 	d->off_la_pit  = la_pit[d->mcm];
@@ -475,19 +612,99 @@ static int mvb_config(struct mvblli_dev *d)
 	tm_memset16(d, sa_offs[d->mcm] + SA_PP_PCS, 0, 0x80);
 	tm_memset16(d, sa_offs[d->mcm] + SA_PP_DATA, 0, 0x100);
 
-	/* Device Status Report Port */
-	sa_w16(d, SA_PP_PCS + TM_PP_FC15 * 8, 0xf842);
+	/*
+	 * Grundbelegung der physischen Ports. Die Werte sind dem Original
+	 * entnommen und am Geraet wiedergefunden (FC15 = 0xF842).
+	 */
+	sa_w16(d, SA_PP_PCS + TM_PP_FC15 * 8, 0xf842);	/* Device Status  */
+	sa_w16(d, SA_PP_PCS + TM_PP_FC15 * 8 + 2, 0);
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_FC15, 0), 0x0082);
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_FC15, 1), 0x0082);
+
+	sa_w16(d, SA_PP_PCS + TM_PP_EFS * 8, 0x9402);	/* Event Ident.   */
+
+	sa_w16(d, SA_PP_PCS + TM_PP_FC8 * 8, 0x8802);	/* Mastership     */
+	sa_w16(d, SA_PP_PCS + TM_PP_FC8 * 8 + 2, 0);
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_FC8, 0), 0x0a01);
+	sa_w16(d, SA_PP_DATA + tm_dock_offset(TM_PP_FC8, 1), 0x0a01);
+
+	/* entspricht checklist != 0 im Original */
+	d->configured = 1;
 
 	return 0;
 }
 
-static int mvb_hardw_config(struct mvblli_dev *d)
+/*
+ * Setzt das Antwortfenster (TMO) und den Leitungsbetrieb. Aufgerufen wird
+ * es aus mvb_init_board() mit (MVB_LINE_BOTH, 1) - das ergibt TMO_43US und
+ * Zweileitungsbetrieb, genau die Bits des laufenden Herstellerstandes
+ * (SCR = 0x87C7, DR mit geloeschtem SLM).
+ *
+ * STSR und TCR werden hier bewusst NICHT geschrieben: STSR kommt aus
+ * PD_CONF, TCR fasst das Original an dieser Stelle nicht an.
+ */
+static int mvb_hardw_config(struct mvblli_dev *d, u16 line_config,
+			    u16 treply_config)
 {
-	/* Sink-Time-Raster und Timer wie im laufenden Original */
-	sa_w16(d, MVBC_STSR, 0x1000);
-	sa_w16(d, MVBC_TCR, TM_TCR_RS1 | TM_TCR_RS2);
+	int bad = (treply_config > 3);
+	u16 want_laa, scr, dr;
+	int tries;
 
-	return 0;
+	if (treply_config <= 3)
+		sa_w16(d, MVBC_SCR,
+		       ((treply_config << 10) & TM_SCR_TMO_MASK) |
+		       (sa_r16(d, MVBC_SCR) & ~TM_SCR_TMO_MASK));
+
+	/*
+	 * Nur der MVBC02D-Zweig ist nachgebaut; mvb_config() laesst keine
+	 * andere Chipversion durch.
+	 */
+	switch (line_config) {
+	case MVB_LINE_BOTH:
+		sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) & ~TM_DR_SLM);
+		goto out;
+	case MVB_LINE_A:
+		want_laa = TM_DR_LAA;
+		break;
+	case MVB_LINE_B:
+		want_laa = 0;
+		break;
+	default:
+		bad = 1;
+		goto out;
+	}
+
+	/*
+	 * Einleitungsbetrieb: im Testmodus so oft umschalten, bis die
+	 * gewuenschte Leitung aktiv ist, danach Registerstand wieder
+	 * herstellen und SLM setzen.
+	 */
+	scr = sa_r16(d, MVBC_SCR);
+	dr  = sa_r16(d, MVBC_DR);
+
+	sa_w16(d, MVBC_SCR, TM_SCR_IL_TEST);
+	for (tries = 10; tries > 0; tries--) {
+		sa_w16(d, MVBC_DR, TM_DR_LS);
+		sa_w16(d, MVBC_DR, TM_DR_SLM);
+		if (want_laa == (sa_r16(d, MVBC_DR) & TM_DR_LAA))
+			break;
+	}
+	sa_w16(d, MVBC_SCR, scr);
+	sa_w16(d, MVBC_DR, dr | TM_DR_SLM);
+
+	dr = sa_r16(d, MVBC_DR);
+	if (want_laa != (dr & TM_DR_LAA) || !(dr & TM_DR_SLM))
+		bad = 1;
+
+out:
+	d->line_config = line_config;
+	d->treply_config = treply_config;
+	d->status.t_ignore = treply_config;
+	d->status.line_config = line_config;
+
+	mvb_set_laa_rld();
+
+	return bad ? -EIO : 0;
 }
 
 /* ------------------------------------------------- Message-Queues (MD) */
@@ -929,11 +1146,22 @@ static int mvb_init_board(struct mvblli_dev *d)
 	d->q_tq_priority = 0;
 	d->rq_overflow = 0;
 
+	/*
+	 * Der Statusblock wird zuerst geleert; alles Folgende - Geraete-
+	 * adresse, Leitungsbetrieb, Antwortfenster - traegt sich dort ein
+	 * und darf danach nicht mehr ueberschrieben werden.
+	 */
+	memset(&d->status, 0, sizeof(d->status));
+	scnprintf(d->status.hw_version, sizeof(d->status.hw_version),
+		  "MVBC02D %s", d->media_type ? "EMD" : "ESD");
+	strscpy(d->status.sw_version, DRV_VERSION_STR,
+		sizeof(d->status.sw_version));
+
 	ret = mvb_config(d);
 	if (ret)
 		goto err_detach;
 
-	ret = mvb_hardw_config(d);
+	ret = mvb_hardw_config(d, MVB_LINE_BOTH, 1);
 	if (ret)
 		goto err_detach;
 
@@ -959,13 +1187,8 @@ static int mvb_init_board(struct mvblli_dev *d)
 	if (ret)
 		goto err_free;
 
-	memset(&d->status, 0, sizeof(d->status));
-	scnprintf(d->status.hw_version, sizeof(d->status.hw_version),
-		  "MVBC02D %s", d->media_type ? "EMD" : "ESD");
-	strscpy(d->status.sw_version, DRV_VERSION_STR,
-		sizeof(d->status.sw_version));
+	/* has_pd kommt aus PD_CONF, has_md aus MD_CONF - nicht von hier. */
 	d->status.is_init = 1;
-	d->status.has_md = 1;
 
 	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
 		d->brd_id, d->status.hw_version);
@@ -978,6 +1201,7 @@ err_free:
 	kfree(d->all_tacks);
 	d->all_tacks = NULL;
 err_detach:
+	d->configured = 0;
 	mvblli_detach_board(d);
 	return ret;
 }
@@ -991,6 +1215,7 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 	sa_w16(d, MVBC_IMR0, 0);
 	sa_w16(d, MVBC_IMR1, 0);
 
+	d->configured = 0;
 	mvblli_detach_board(d);
 
 	kfree(d->rcv_ring);
@@ -1134,7 +1359,7 @@ static int pixy_mvblli_open(struct inode *inode, struct file *filp)
 		}
 	}
 	if (!d)
-		return -ENODEV;
+		return -EBADF;
 
 	/* exklusiver Zugriff - ein zweites open() bekommt EBUSY */
 	if (test_and_set_bit(MVBLLI_FLAG_BUSY, &d->dev_flags)) {
@@ -1146,7 +1371,7 @@ static int pixy_mvblli_open(struct inode *inode, struct file *filp)
 		ret = mvb_init_board(d);
 		if (ret) {
 			clear_bit(MVBLLI_FLAG_BUSY, &d->dev_flags);
-			return -ENODEV;
+			return -EBADF;
 		}
 	}
 
@@ -1185,8 +1410,9 @@ static ssize_t pixy_mvblli_read(struct file *filp, char __user *data,
 
 	if (!d || !d->status.is_init)
 		return -EINVAL;
-	if (!d->status.has_pd)
-		return -ENOTCONN;
+	/* Gelesen wird erst, wenn der Controller laeuft (MVB_GO). */
+	if (!d->status.is_active)
+		return -ENETDOWN;
 	if (!data || copy_from_user(&kp, data, sizeof(kp)))
 		return -EINVAL;
 
@@ -1253,7 +1479,7 @@ static ssize_t pixy_mvblli_write(struct file *filp, const char __user *data,
 	int control;
 
 	if (!d)
-		return -ENODEV;
+		return -ENETDOWN;
 	if (!data || copy_from_user(&kp, data, sizeof(kp)))
 		return -EINVAL;
 
@@ -1319,21 +1545,30 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	if (_IOC_TYPE(cmd) != PIXY_PIXY_MVBLLI_IOCTL_MAGIC ||
 	    _IOC_NR(cmd) > PIXY_PIXY_MVBLLI_MAX_IOCTL_NR)
 		return -ENOTTY;
+	/*
+	 * Alle ioctls bis auf die beiden ohne Argument brauchen einen
+	 * Zeiger. Das Original faellt bei arg == 0 in den EINVAL-Zweig,
+	 * nicht in EFAULT.
+	 */
+	if (!uarg && cmd != IOCTL_PIXY_MVBLLI_START &&
+	    cmd != IOCTL_PIXY_MVBLLI_STOP &&
+	    cmd != IOCTL_PIXY_MVBLLI_MD_FLUSH_QUEUE)
+		return -EINVAL;
 
 	switch (cmd) {
 	case IOCTL_PIXY_MVBLLI_READ_DEV_ADDR:
 		v16 = mvb_get_device_address(d);
 		if (put_user(v16, (u16 __user *)uarg))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR:
-		if (get_user(v16, (u16 __user *)uarg))
+		if (d->status.is_active || get_user(v16, (u16 __user *)uarg))
 			ret = -EFAULT;
 		else if (v16 > 0xfff)
 			ret = -EINVAL;
 		else
-			ret = mvb_set_device_address(d, v16);
+			ret = mvb_set_device_address(d, v16) ? -EIO : 0;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_DSW:
@@ -1342,56 +1577,68 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 					    (sa_r16(d, SA_PP_PCS + TM_PP_FC15 * 8 + 2)
 					     & TM_PCS_VP_MSK) ? 1 : 0));
 		if (put_user(v16, (u16 __user *)uarg))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 
+	/*
+	 * Das Argument ist bewusst 32 Bit breit: oberes Wort Maske, unteres
+	 * Wort Wert. Nur die maskierten Bits werden veraendert. Wird dabei
+	 * das RLD-Bit angefasst, raeumt das Original im Zweileitungsbetrieb
+	 * zuvor die gespeicherte Stoerungsmeldung weg.
+	 */
 	case IOCTL_PIXY_MVBLLI_WRITE_DSW:
 		if (get_user(v32, (u32 __user *)uarg)) {
 			ret = -EFAULT;
 		} else {
-			u32 pcs = SA_PP_PCS + TM_PP_FC15 * 8;
-			u16 w1 = sa_r16(d, pcs + 2);
+			if ((v32 & MVB_DSW_RLD) &&
+			    d->line_config == MVB_LINE_BOTH)
+				mvb_reset_rlds(d);
 
-			sa_w16(d, SA_PP_DATA +
-			       tm_dock_offset(TM_PP_FC15,
-					      (w1 & TM_PCS_VP_MSK) ? 0 : 1),
-			       (u16)v32);
-			sa_w16(d, pcs + 2, w1 ^ TM_PCS_VP_MSK);
+			mvb_set_device_status_word(d, (u16)(v32 >> 16),
+						   (u16)v32);
 		}
 		break;
 
+	/*
+	 * START verlangt eine gesetzte Geraeteadresse 1..0x1000, nicht etwa
+	 * eine fertige Portkonfiguration - das ist die Bedingung des
+	 * Originals.
+	 */
 	case IOCTL_PIXY_MVBLLI_START:
 		if (d->status.is_active)
 			ret = -EALREADY;
-		else if (!d->status.has_pd)
-			ret = -EPERM;
+		else if ((u16)(d->mvb_addr - 1) >= 0x1000)
+			ret = -EINVAL;
 		else
 			ret = mvb_go(d) ? -EIO : 0;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_STOP:
 		if (!d->status.is_active)
-			ret = -EPERM;
+			ret = -ENETDOWN;
 		else
 			ret = mvb_stop(d) ? -EIO : 0;
 		break;
 
+	/*
+	 * Der Watchdog gehoert zum MVBC1S. Auf dem MVBC02D dieser Karte
+	 * lehnt das Original den Aufruf ab, statt ihn stillschweigend zu
+	 * schlucken.
+	 */
 	case IOCTL_PIXY_MVBLLI_RETRIGGER:
-		/* Watchdog: nicht bestueckt, aber ABI-seitig vorhanden */
+		ret = -EINVAL;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_STATS: {
 		mvb_stat st = d->status;
 
-		st.frames   = sa_r16(d, MVBC_FC);
-		st.errors   = sa_r16(d, MVBC_EC);
-		st.errors_a = 0;
-		st.errors_b = 0;
-		st.mvb_addr = mvb_get_device_address(d);
-		st.t_ignore = (sa_r16(d, MVBC_SCR) & TM_SCR_TMO_MASK) >> 10;
-		st.line_config = d->media_type ? 2 : 1;
+		st.mvb_addr = d->mvb_addr;
+		st.frames   = mvb_read_counter(d, MVB_CNT_FRAMES);
+		st.errors   = mvb_read_counter(d, MVB_CNT_ERRORS);
+		st.errors_a = mvb_read_counter(d, MVB_CNT_ERRORS_A);
+		st.errors_b = mvb_read_counter(d, MVB_CNT_ERRORS_B);
 		if (copy_to_user(uarg, &st, sizeof(st)))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 	}
 
@@ -1405,17 +1652,22 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	case IOCTL_PIXY_MVBLLI_MD_CONF: {
 		PixyMvblliConfigMex mex;
 
-		if (copy_from_user(&mex, uarg, sizeof(mex)))
-			ret = -EFAULT;
-		else
+		if (d->status.is_active) {
+			ret = -EALREADY;
+		} else if (copy_from_user(&mex, uarg, sizeof(mex))) {
+			ret = -EINVAL;
+		} else {
 			d->q_tq_priority = mex.q_tq_priority;
+			d->status.has_md = 1;
+		}
 		break;
 	}
 
 	case IOCTL_PIXY_MVBLLI_HWINIT: {
 		PixyMvblliConfigLpTs ts;
 
-		if (copy_from_user(&ts, uarg, sizeof(ts))) {
+		if (d->status.is_active ||
+		    copy_from_user(&ts, uarg, sizeof(ts))) {
 			ret = -EFAULT;
 			break;
 		}
@@ -1451,7 +1703,7 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		tm.address = (u16 *)d->p_tm;
 		tm.size_id = d->mcm;
 		if (copy_to_user(uarg, &tm, sizeof(tm)))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 	}
 
@@ -1462,24 +1714,85 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	case IOCTL_PIXY_MVBLLI_MD_GET_STATUS:
 		v32 = mvb_md_get_status(d, 0xffff, 0);
 		if (put_user(v32, (u32 __user *)uarg))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 
+	/*
+	 * WRITE_CONTROL fasst drei Dinge zusammen: Geraeteadresse,
+	 * Antwortfenster und Leitungsbetrieb. t_ignore ist dabei eine
+	 * Zeitangabe in Mikrosekunden, keine Feldnummer - sie wird ueber
+	 * Schwellen auf das TMO-Feld abgebildet. Die Kommandobits sind
+	 * big-endian gepackt: aon|aof|spl|tms|sla|slb|cla|clb.
+	 */
 	case IOCTL_PIXY_MVBLLI_WRITE_CONTROL: {
 		mvb_ctrl ctrl;
+		u8 cmd8;
+		u16 treply, line;
+		bool keep_treply = false;
 
 		if (copy_from_user(&ctrl, uarg, sizeof(ctrl))) {
-			ret = -EFAULT;
+			ret = -EINVAL;
 			break;
 		}
-		if (ctrl.dev_addr <= 0xfff)
-			mvb_set_device_address(d, ctrl.dev_addr);
-		if (ctrl.t_ignore < 4) {
-			u16 scr = sa_r16(d, MVBC_SCR);
+		cmd8 = *(u8 *)&ctrl.command;
 
-			sa_w16(d, MVBC_SCR,
-			       (scr & ~TM_SCR_TMO_MASK) |
-			       ((ctrl.t_ignore & 3) << 10));
+		if (ctrl.dev_addr < 0x1000) {
+			if (d->status.is_active) {
+				ret = -EFAULT;
+				break;
+			}
+			if (mvb_set_device_address(d, ctrl.dev_addr)) {
+				ret = -EIO;
+				break;
+			}
+		}
+
+		if (ctrl.t_ignore == 0)
+			treply = 1;
+		else if (ctrl.t_ignore < 0x20)
+			treply = 0;		/* 1..31   us -> 21 us */
+		else if (ctrl.t_ignore < 0x35)
+			treply = 1;		/* 32..52  us -> 43 us */
+		else if (ctrl.t_ignore < 0x4b)
+			treply = 2;		/* 53..74  us -> 64 us */
+		else if (ctrl.t_ignore < 0x100)
+			treply = 3;		/* 75..255 us -> 83 us */
+		else
+			keep_treply = true;	/* unveraendert lassen */
+
+		if (keep_treply)
+			treply = d->treply_config;
+
+		if ((cmd8 & 0x0c) == 0x0c)
+			line = MVB_LINE_BOTH;
+		else if (cmd8 & 0x08)
+			line = MVB_LINE_A;
+		else if (cmd8 & 0x04)
+			line = MVB_LINE_B;
+		else
+			line = d->line_config;
+
+		if (mvb_hardw_config(d, line, treply)) {
+			ret = -EIO;
+			break;
+		}
+		if ((cmd8 & 0x0c) == 0x0c) {
+			sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) | TM_DR_LS);
+			mvb_set_laa_rld();
+		}
+
+		/* cla/clb setzen die Fehlerzaehler zurueck */
+		if ((cmd8 & 3) == 3) {
+			mvb_clear_counters(d, true, true, true);
+			d->status.errors = 0;
+			d->status.errors_a = 0;
+			d->status.errors_b = 0;
+		} else if (cmd8 & 2) {
+			mvb_clear_counters(d, false, true, false);
+			d->status.errors_a = 0;
+		} else if (cmd8 & 1) {
+			mvb_clear_counters(d, false, false, true);
+			d->status.errors_b = 0;
 		}
 		break;
 	}
@@ -1487,26 +1800,39 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	case IOCTL_PIXY_MVBLLI_USERS:
 		v32 = d->users;
 		if (put_user(v32, (u32 __user *)uarg))
-			ret = -EFAULT;
+			ret = -EINVAL;
 		break;
 
 	/*
-	 * Die NSDB-Wege sind im Original vorhanden, werden von diesem
-	 * Geraet aber nachweislich nicht benutzt (STSR und dti belegen
-	 * den PD_CONF-Pfad). Sie melden sich deutlich ab, statt still
+	 * PD_NSDB ist im Original vorhanden, wird von diesem Geraet aber
+	 * nachweislich nicht benutzt (STSR und dti belegen den
+	 * PD_CONF-Pfad). Der Nachbau meldet sich deutlich ab, statt still
 	 * etwas Falsches zu tun.
 	 */
 	case IOCTL_PIXY_MVBLLI_PD_NSDB:
+		if (d->status.is_active) {
+			ret = -EALREADY;
+		} else {
+			pr_warn_once(DRV_NAME
+				     ": NSDB configuration is not implemented\n");
+			ret = -ENOSYS;
+		}
+		break;
+
+	/*
+	 * MD_NSDB und BA_NSDB stehen zwar im Kopf, kommen aber schon im
+	 * Original im ioctl-Verteiler nicht vor und laufen dort in den
+	 * EINVAL-Zweig. Ebenso die Ereignisaufzeichnung, solange kein
+	 * Aufzeichnungspuffer eingerichtet ist - dafuer gibt es EPERM.
+	 */
 	case IOCTL_PIXY_MVBLLI_MD_NSDB:
 	case IOCTL_PIXY_MVBLLI_BA_NSDB:
-		pr_warn_once(DRV_NAME
-			     ": NSDB configuration is not implemented\n");
-		ret = -ENOSYS;
+		ret = -EINVAL;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_REC_CONF:
 	case IOCTL_PIXY_MVBLLI_REC_DEL:
-		ret = -ENOSYS;
+		ret = -EPERM;
 		break;
 
 	default:
@@ -1559,7 +1885,8 @@ static void mvb_add_board(int brd_id, void *arg)
 	cdev_init(&d->cdev, &mvblli_fops);
 	d->cdev.owner = THIS_MODULE;
 
-	ret = cdev_add(&d->cdev, d->devt, 1);
+	/* 255 Minor je Karte, wie im Original - MVBLLI_MINOR_COUNT = 3 * 255 */
+	ret = cdev_add(&d->cdev, d->devt, 0xff);
 	if (ret < 0) {
 		pr_err(DRV_NAME ": cannot add char device\n");
 		return;
@@ -1607,40 +1934,70 @@ static void mvb_remove_board(int brd_id, void *arg)
 	pr_info(DRV_NAME ": /dev/mvblli%d removed\n", brd_id);
 }
 
-static int mvblli_subscribe(bool subscribe)
+/*
+ * Sucht /dev/mvb0..2 ab. Jede Karte, die sich oeffnen laesst, wird sofort
+ * selbst angemeldet; das Abonnement beim Board-Treiber deckt nur die
+ * spaeter hinzukommenden Karten ab. Genau so macht es das Original - und
+ * nur so laeuft dieses Modul auch auf dem originalen Board-Treiber, der
+ * beim Abonnieren nichts ueber bereits vorhandene Karten meldet.
+ */
+static int mvblli_scan_boards(void)
 {
 	struct PixyMvbBoardUpperDrvSubscribe sub;
-	struct file *filp;
-	int ret;
+	bool subscribed = false;
+	char path[16];
+	int i, ret;
 
-	filp = filp_open("/dev/mvb0", O_RDONLY, 0);
-	if (IS_ERR(filp)) {
+	for (i = 0; i < MVBLLI_MAX_DEV; i++) {
+		struct file *filp;
+
+		scnprintf(path, sizeof(path), "/dev/mvb%d", i);
+		filp = filp_open(path, O_RDONLY, 0);
+		if (IS_ERR(filp))
+			continue;
+
+		mvb_add_board(i, NULL);
+
+		if (!subscribed) {
+			memset(&sub, 0, sizeof(sub));
+			sub.add_brd.brd_evnt = mvb_add_board;
+			sub.rm_brd.brd_evnt = mvb_remove_board;
+
+			ret = board_ioctl(filp,
+				IOCTL_PIXY_MVB_BOARD_KSET_DRV_SUBSCRIBE,
+				&sub);
+			if (ret) {
+				pr_err(DRV_NAME
+				       ": cannot subscribe as upper driver\n");
+				filp_close(filp, NULL);
+				return ret;
+			}
+			drvdata.drv_id = sub.drv_id;
+			subscribed = true;
+		}
+
+		filp_close(filp, NULL);
+	}
+
+	if (!subscribed) {
 		pr_err(DRV_NAME ": /dev/mvb0 not available - is pixy-mvb loaded?\n");
 		return -ENODEV;
 	}
 
-	if (subscribe) {
-		memset(&sub, 0, sizeof(sub));
-		sub.add_brd.brd_evnt = mvb_add_board;
-		sub.add_brd.arg = NULL;
-		sub.rm_brd.brd_evnt = mvb_remove_board;
-		sub.rm_brd.arg = NULL;
-		ret = board_ioctl(filp,
-				  IOCTL_PIXY_MVB_BOARD_KSET_DRV_SUBSCRIBE,
-				  &sub);
-		if (!ret)
-			drvdata.drv_id = sub.drv_id;
-	} else {
-		int id = drvdata.drv_id;
+	return 0;
+}
 
-		ret = board_ioctl(filp,
-				  IOCTL_PIXY_MVB_BOARD_KSET_DRV_UNSUBSCRIBE,
-				  &id);
-	}
+static void mvblli_unsubscribe(void)
+{
+	struct file *filp;
+	int id = drvdata.drv_id;
 
+	filp = filp_open("/dev/mvb0", O_RDONLY, 0);
+	if (IS_ERR(filp))
+		return;
+
+	board_ioctl(filp, IOCTL_PIXY_MVB_BOARD_KSET_DRV_UNSUBSCRIBE, &id);
 	filp_close(filp, NULL);
-
-	return ret;
 }
 
 /* ------------------------------------------------------------ module */
@@ -1665,7 +2022,7 @@ static int __init pixy_mvblli_init(void)
 		goto err_chrdev;
 	}
 
-	ret = mvblli_subscribe(true);
+	ret = mvblli_scan_boards();
 	if (ret)
 		goto err_class;
 
@@ -1682,7 +2039,7 @@ static void __exit pixy_mvblli_exit(void)
 {
 	int i;
 
-	mvblli_subscribe(false);
+	mvblli_unsubscribe();
 
 	for (i = 0; i < MVBLLI_MAX_DEV; i++)
 		if (drvdata.dev[i].enable)

@@ -657,7 +657,8 @@ static long pixy_mvb_ioctl(struct file *filp, unsigned int cmd,
 				break;
 		if (i == PIXY_MVB_MAX_UPPER_DRV) {
 			mutex_unlock(&mvbdrvr.lock);
-			ret = -ENOMEM;
+			pr_warn(DRV_NAME ": no free upper driver slot\n");
+			ret = -EFAULT;
 			break;
 		}
 		mvbdrvr.upper[i].info = *sub;
@@ -668,13 +669,12 @@ static long pixy_mvb_ioctl(struct file *filp, unsigned int cmd,
 		pr_info(DRV_NAME ": upper driver %d subscribed\n", i + 1);
 
 		/*
-		 * Bereits vorhandene Karten sofort melden - sonst verpasst
-		 * ein spaeter geladener Oberbautreiber sein Board.
+		 * Bereits vorhandene Karten werden hier bewusst NICHT
+		 * gemeldet - das Original tut es auch nicht. Der Oberbau-
+		 * treiber sucht /dev/mvb0..2 beim Laden selbst ab und
+		 * abonniert nur die spaeteren Ereignisse. Wer hier meldet,
+		 * loest beim originalen LLI eine doppelte Anmeldung aus.
 		 */
-		for (i = 0; i < PIXY_MVB_MAX_BOARDS; i++)
-			if (mvbdrvr.boards[i].enable && sub->add_brd.brd_evnt)
-				sub->add_brd.brd_evnt(mvbdrvr.boards[i].instance,
-						      sub->add_brd.arg);
 		break;
 	}
 
@@ -684,7 +684,7 @@ static long pixy_mvb_ioctl(struct file *filp, unsigned int cmd,
 		if (id < 0 || id >= PIXY_MVB_MAX_UPPER_DRV ||
 		    !mvbdrvr.upper[id].enable) {
 			pr_warn(DRV_NAME ": cannot unsubscribe driver %d\n", id);
-			ret = -ENXIO;
+			ret = -EFAULT;
 			break;
 		}
 		mutex_lock(&mvbdrvr.lock);

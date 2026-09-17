@@ -72,6 +72,8 @@
 #define MVBC_ISR1		(SA_REGS + 0x44)
 #define MVBC_IVR0		(SA_REGS + 0x48)
 #define MVBC_IVR1		(SA_REGS + 0x4c)
+#define MVBC_ECA		(SA_REGS + 0x50)	/* Fehlerzaehler Leitung A */
+#define MVBC_ECB		(SA_REGS + 0x54)	/* Fehlerzaehler Leitung B */
 #define MVBC_DAOR		(SA_REGS + 0x58)
 #define MVBC_DAOK		(SA_REGS + 0x5c)
 #define MVBC_TCR		(SA_REGS + 0x60)
@@ -116,6 +118,22 @@
 #define MVBC_VER_MVBC02C	3
 #define MVBC_VER_MVBC02D	5
 #define MVBC_VER_MVBC1S		6
+
+/* DR - Decoder Register */
+#define TM_DR_SLM		0x0001	/* Single Line Mode                    */
+#define TM_DR_LS		0x0002	/* Leitungsumschaltung anstossen       */
+#define TM_DR_RLD		0x0004	/* Leitungsstoerung, laufender Zustand */
+#define TM_DR_LAA		0x0008	/* Leitung A ist aktiv                 */
+#define TM_DR_RLD_LATCH		0x1000	/* Leitungsstoerung, gespeichert       */
+
+/* Device Status Word, physischer Port FC15 */
+#define MVB_DSW_RLD		0x0040
+#define MVB_DSW_LAA		0x0080
+
+/* Leitungsbetrieb, Argument von mvb_hardw_config() */
+#define MVB_LINE_B		0
+#define MVB_LINE_A		1
+#define MVB_LINE_BOTH		2
 
 /* MR */
 #define TM_MR_BUSY		0x0200
