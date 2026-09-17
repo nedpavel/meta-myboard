@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Schnappschuss des MVB Traffic Memory ueber /dev/mvb0.
 
-Nur lesend. IVR0/IVR1 werden ausgelassen - deren Lesen quittiert
-Interrupts und wuerde einem laufenden Stack Nachrichten stehlen.
+Nur lesend. IVR0/IVR1 werden an jeder Kandidatenadresse ausgelassen -
+deren Lesen quittiert Interrupts und wuerde einem laufenden Stack
+Nachrichten stehlen.
+
+Die Service Area wird nicht geraten, sondern aus dem MCR bestimmt: der
+MVBC verschiebt sie je nach programmiertem mcm. Solange MCR nicht
+geschrieben ist, liegt sie am Grundplatz TM+0x3C00 - deshalb wird der
+Registerblock an allen drei Kandidatenadressen ausgegeben. Bleibt nach
+einem open() nur der Grundplatz belegt, ist die Initialisierung des
+Treibers stehengeblieben.
 
     mvbsnap.py [Zielverzeichnis]
 """
@@ -15,10 +23,14 @@ import sys
 BAR_SIZE = 0x4000000          # 64 MiB
 ISA = 0x2000000               # ISA-Block im BAR
 TM = ISA + 0x40000            # Traffic Memory, 256 KiB bei mcm=3
-SA = TM + 0x0FC00             # Service Area
 REG = 0x380                   # Registerblock, relativ zur Service Area
 IVR0 = 0x3C8                  # NICHT LESEN
 IVR1 = 0x3CC                  # NICHT LESEN
+
+# Lage der Service Area, indiziert mit MCR.mcm
+SA_OFFSETS = (0x03C00, 0x07C00, 0x0FC00, 0x0FC00, 0x0FC00)
+SA_CANDIDATES = (0x03C00, 0x07C00, 0x0FC00)
+MVBC02D = 5                   # MCR >> 11
 
 REGS = {
     0x380: "SCR",  0x384: "MCR",  0x388: "DR",   0x38C: "STSR",
@@ -47,6 +59,30 @@ def dump(mm, path, start, length):
     return length
 
 
+def regblock(mm, sa_off):
+    """Registerblock einer Kandidatenadresse, IVR ausgespart."""
+    lines = []
+    for off in range(REG, 0x400, 4):
+        name = REGS.get(off, "")
+        if off in (IVR0, IVR1):
+            lines.append("SA+0x%03X :  ----  %-5s uebersprungen" % (off, name))
+        else:
+            lines.append("SA+0x%03X :  %04X  %s"
+                         % (off, rd16(mm, TM + sa_off + off), name))
+    return lines
+
+
+def find_sa(mm):
+    """Aktive Service Area aus dem MCR bestimmen."""
+    for cand in SA_CANDIDATES:
+        mcr = rd16(mm, TM + cand + 0x384)
+        if mcr >> 11 != MVBC02D:
+            continue
+        if SA_OFFSETS[mcr & 7] == cand:
+            return cand, mcr
+    return None, None
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     fd = os.open("/dev/mvb0", os.O_RDWR)
@@ -63,13 +99,20 @@ def main():
     n += dump(mm, os.path.join(OUT, "tm_high.bin"), TM + 0x10000, 0x30000)
     print("Traffic Memory gesichert: %d Byte (Registerblock ausgespart)" % n)
 
-    lines = []
-    for off in range(REG, 0x400, 4):
-        name = REGS.get(off, "")
-        if off in (IVR0, IVR1):
-            lines.append("SA+0x%03X :  ----  %-5s uebersprungen" % (off, name))
-        else:
-            lines.append("SA+0x%03X :  %04X  %s" % (off, rd16(mm, SA + off), name))
+    sa_off, mcr = find_sa(mm)
+    if sa_off is None:
+        sa_off = 0x0FC00
+        note = ("Keine gueltige Service Area gefunden - kein MCR mit "
+                "Version MVBC02D und passendem mcm.\n"
+                "Ersatzweise wird TM+0x0FC00 ausgewertet; die Werte "
+                "unten sind dann nicht belastbar.\n")
+        print("WARNUNG: keine gueltige Service Area gefunden")
+    else:
+        note = ("Aktive Service Area: TM+0x%05X   MCR %04X "
+                "(Version %d, mcm %d)\n" % (sa_off, mcr, mcr >> 11, mcr & 7))
+        print("aktive Service Area: TM+0x%05X (mcm %d)" % (sa_off, mcr & 7))
+
+    SA = TM + sa_off
 
     ports = [(p, rd16(mm, TM + p * 2)) for p in range(4096)]
     ports = [(p, v) for p, v in ports if v]
@@ -77,14 +120,24 @@ def main():
     qdt = tuple(rd16(mm, SA + o) for o in (0x310, 0x312, 0x314))
 
     with open(os.path.join(OUT, "summary.txt"), "w") as f:
-        f.write("MVBC-Register\n-------------\n")
-        f.write("\n".join(lines))
+        f.write(note)
+        f.write("\nMVBC-Register\n-------------\n")
+        f.write("\n".join(regblock(mm, sa_off)))
         f.write("\n\nQDT  xmit0=%04X  xmit1=%04X  rcve=%04X\n" % qdt)
         f.write("MFS  %04X\n" % rd16(mm, SA + 0x300))
         f.write("\nBelegte PIT-Eintraege: %d\n" % len(ports))
         f.write("Port   Dock-Index\n")
         for p, v in ports:
             f.write("%5d   %5d  (0x%04X)\n" % (p, v, v))
+
+        # Alle Kandidatenadressen, damit eine steckengebliebene
+        # Initialisierung sichtbar wird.
+        for cand in SA_CANDIDATES:
+            f.write("\n\nRegisterblock an TM+0x%05X%s\n"
+                    % (cand, "   <-- aktiv" if cand == sa_off else ""))
+            f.write("-" * 40 + "\n")
+            f.write("\n".join(regblock(mm, cand)))
+            f.write("\n")
 
     mm.close()
     print("belegte Ports: %d" % len(ports))
