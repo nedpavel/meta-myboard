@@ -115,6 +115,7 @@ PORTS = [
     (101, 32, 1),
 ]
 WRITE_PORT, WRITE_SIZE = 491, 4
+DISABLE_PORT_ADDR = 101          # wird abgeschaltet, danach nicht mehr lesbar
 
 TEST_ADDR = 240          # die eigene Adresse des Geraets
 
@@ -171,8 +172,15 @@ def errname(n):
     return "errno %d" % n
 
 
+STOP_AFTER = None
+
+
 def call(log, name, fn):
     """Fuehrt fn aus, protokolliert Ergebnis oder errno."""
+    if STOP_AFTER is not None and log.step >= STOP_AFTER:
+        log.step += 1
+        log.line("%02d %-22s uebersprungen (--stop-after)" % (log.step, name))
+        return log.step, None
     try:
         ret = fn()
         return log.result(name, "" if ret is None else repr(ret), None), ret
@@ -283,7 +291,10 @@ def run(outdir, allow_md, go):
     call(log, "READ_DEV_ADDR", lambda: io(IOC["READ_DEV_ADDR"], b2, True))
     log.line("     Adresse nachher: 0x%04X" % struct.unpack("<H", b2)[0])
 
-    hw = bytearray(struct.pack("<QBBHHB x", 0, 0, 0, 0, 0, 0))
+    # pb_mwd, ownership, ts_type, prt_addr_max, prt_indx_max, auto_reset_rld
+    # Lauter Nullen lehnt das Original mit EIO ab - die Grenzen muessen
+    # gesetzt sein.
+    hw = bytearray(struct.pack("<QBBHHB x", 0, 0, 0, 0xFFF, 0xFFF, 0))
     call(log, "HWINIT", lambda: io(IOC["HWINIT"], hw, True))
     snapshot(mm, outdir, log.step, "hwinit")
 
@@ -365,7 +376,7 @@ def run(outdir, allow_md, go):
 
     call(log, "DISABLE_PORT",
          lambda: io(IOC["DISABLE_PORT"],
-                    bytearray(struct.pack("<H", PORTS[-1][0])), True))
+                    bytearray(struct.pack("<H", DISABLE_PORT_ADDR)), True))
     snapshot(mm, outdir, log.step, "disable")
 
     # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
@@ -394,13 +405,16 @@ def run(outdir, allow_md, go):
         for round_ in range(3):
             time.sleep(20)
             r = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
-                 for o in (0x390, 0x394, 0x3C4, 0x3B0)]
-            log.line("     +%2ds  FC %04X  EC %04X  ISR1 %04X  IPR0 %04X"
-                     % ((round_ + 1) * 20, r[0], r[1], r[2], r[3]))
+                 for o in (0x390, 0x394, 0x3C0, 0x3C4, 0x3B0, 0x3B4)]
+            log.line("     +%2ds  FC %04X EC %04X  ISR0 %04X ISR1 %04X  "
+                     "IPR0 %04X IPR1 %04X"
+                     % ((round_ + 1) * 20, r[0], r[1], r[2], r[3], r[4], r[5]))
 
             for a_, sz, t in PORTS:
                 if t != 1:
                     continue
+                if a_ == DISABLE_PORT_ADDR:
+                    continue        # vorher per DISABLE_PORT abgeschaltet
                 buf = mvb_port(1, a_)
                 try:
                     pd_read(fd, buf, sz)
@@ -534,6 +548,10 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
+        global STOP_AFTER
+        for i, a_ in enumerate(sys.argv):
+            if a_ == "--stop-after":
+                STOP_AFTER = int(sys.argv[i + 1])
         run(sys.argv[2], "--md" in sys.argv, "--go" in sys.argv)
     elif len(sys.argv) == 4 and sys.argv[1] == "compare":
         sys.exit(1 if compare(sys.argv[2], sys.argv[3]) else 0)
