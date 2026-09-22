@@ -104,18 +104,35 @@ IOC = {
 # NSDB-Wege bewusst nicht nach und meldet sich dort ab.
 KNOWN_DIFF = {"PD_NSDB"}
 
-# Portliste fuer PD_CONF - deckt alle Groessenklassen ab.
-# (Adresse, Groesse, Typ: 1 = Senke, 2 = Quelle)
+# Portliste fuer PD_CONF. (Adresse, Groesse in Byte, Typ: 1 = Senke,
+# 2 = Quelle)
+#
+# Die Senken stammen aus der Busbeschreibung des Laborbusses:
+#
+#   $DEVICE VMA1-P VMA1 02H  RP2B ; V-Messanlage
+#    $MEMBER VMA1 PRJ TEST64/4  60   -> 4 Ports zu 64 Bit ab Port  60
+#   $DEVICE TVCU1 VCU1 02EH VCU  ; Diagnoserechner
+#    $MEMBER DDA1 PRJ TEST32/8 470   -> 8 Ports zu 32 Bit ab Port 470
+#
+# 64 Bit sind 8 Byte, 32 Bit sind 4 Byte. Nur auf diesen Adressen ist
+# ueberhaupt Verkehr zu erwarten; auf allem anderen bleibt tack null und
+# freshness steht auf 65535.
 PORTS = [
-    (491,  4, 2),
-    (192, 32, 1),
-    (290, 16, 1),
-    (138,  8, 1),
-    (100,  2, 1),
-    (101, 32, 1),
+    (60,   8, 1),   # VMA1, TEST64/4
+    (61,   8, 1),
+    (62,   8, 1),
+    (63,   8, 1),
+    (470,  4, 1),   # VCU1 Diagnoserechner, TEST32/8
+    (471,  4, 1),
+    (472,  4, 1),
+    (473,  4, 1),
+    (491,  4, 2),   # eigene Quelle fuer den Schreibtest
+    (900, 32, 1),   # nur fuer die Groessenklassen des Allokators
+    (901, 16, 1),
+    (902,  2, 1),
 ]
 WRITE_PORT, WRITE_SIZE = 491, 4
-DISABLE_PORT_ADDR = 101          # wird abgeschaltet, danach nicht mehr lesbar
+DISABLE_PORT_ADDR = 902          # wird abgeschaltet, danach nicht mehr lesbar
 
 TEST_ADDR = 240          # die eigene Adresse des Geraets
 
@@ -420,8 +437,9 @@ def run(outdir, allow_md, go):
                     pd_read(fd, buf, sz)
                     data = bytes(buf[4:4 + min(sz, 8)]).hex()
                     fresh = struct.unpack_from("<H", buf, 36)[0]
-                    log.line("       Port %4d  %-16s  freshness %5d"
-                             % (a_, data, fresh))
+                    log.line("       Port %4d  %-16s  freshness %5d%s"
+                             % (a_, data, fresh,
+                                "   <-- EMPFANGEN" if fresh < 0xFFFF else ""))
                 except OSError as e:
                     log.line("       Port %4d  %s" % (a_, errname(e.errno)))
 
