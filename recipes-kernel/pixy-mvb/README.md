@@ -80,160 +80,32 @@ kollidieren die Modulnamen.
 
 ## Auf dem Gerät testen
 
-> **Vorher lesen.** Das Image auf dem Gerät wurde nicht selbst gebaut.
-> Die Originalmodule unter `/usr/lib/modules/5.10.16.rt30.pixy-2/extra/`
-> werden **nie** überschrieben. Eigene Module liegen unter `/root` und
-> werden mit `insmod` geladen. Rückweg ist in jedem Fall ein Reboot.
+Der vollständige Ablauf steht in **[`TESTPLAN.md`](TESTPLAN.md)** — vom
+`vermagic`-Vergleich über die Referenzaufnahme bis zum Abnahmekriterium,
+in der Reihenfolge, in der er ausgeführt werden muss. Er ist so gebaut,
+dass er mit einem einzigen Neustart auskommt.
+
+Die drei Dinge, die man vorher wissen muss:
+
+> **Das Image auf dem Gerät wurde nicht selbst gebaut.** Die
+> Originalmodule unter `/usr/lib/modules/5.10.16.rt30.pixy-2/extra/`
+> werden nie überschrieben; der Nachbau liegt unter `/root/mvb-new` und
+> wird mit `insmod` geladen. Rückweg ist ein Neustart.
 >
-> `session-1.scope` (`target` + `extApp`) lässt sich stoppen, aber nicht
-> wieder starten. Jeder Test kostet also einen Reboot. Deshalb in der
-> unten stehenden Reihenfolge arbeiten und pro Reboot so viel wie möglich
-> abhaken.
+> **`systemctl stop session-1.scope` ist nicht umkehrbar** — `target`
+> und `extApp` starten ohne Neustart nicht wieder.
+>
+> **`IVR0`/`IVR1` niemals von Hand lesen**, solange ein Stack läuft: das
+> quittiert Interrupts und stiehlt sie dem LLI.
 
-### Vorbereitung
+Der Aufbau in Kurzform:
 
-```sh
-# Originale sichern (nur lesen, nicht verschieben)
-mkdir -p /root/mvb-orig
-cp /usr/lib/modules/5.10.16.rt30.pixy-2/extra/pixy-mvb.ko.xz     /root/mvb-orig/
-cp /usr/lib/modules/5.10.16.rt30.pixy-2/extra/pixy-mvblli.ko.xz  /root/mvb-orig/
-
-# Nachbau daneben legen
-mkdir -p /root/mvb-new
-# pixy-mvb.ko und pixy-mvblli.ko hierher kopieren
-
-# Original entpacken, damit es mit insmod geladen werden kann
-cd /root/mvb-orig && unxz -k pixy-mvb.ko.xz && unxz -k pixy-mvblli.ko.xz
-```
-
-### Stufe 1 — eigener Board-Treiber unter dem **originalen** LLI
-
-Das ist das beste Prüfgestell, das es gibt: das Original-LLI koppelt über
-ioctl und merkt nicht, wer darunter liegt. Läuft der Stack damit an, ist
-die gesamte `K*`-ABI korrekt.
-
-```sh
-systemctl stop session-1.scope        # ab hier kein Rückweg ohne Reboot
-rmmod pixy_mvblli
-rmmod pixy_mvb
-
-insmod /root/mvb-new/pixy-mvb.ko
-insmod /root/mvb-orig/pixy-mvblli.ko
-
-dmesg | tail -30
-ls -l /dev/mvb0 /dev/mvblli0
-```
-
-Erwartet im `dmesg`:
-
-```
-pixy-mvb v3.0.0 - Pixy-1000 MVB/PC104 Extension Board Driver
-pixy-mvb 0000:..:...: CoreID magic 'PIXY' (0x50495859), BAR0 67108864 bytes
-pixy-mvb 0000:..:...: MVB Extension Board detected in bus slot ..., Fw version code ...
-pixy-mvb 0000:..:...: Created device entry /dev/mvb0
-pixy-mvb 0000:..:...: Configuring single MSI interrupt...
-pixy-mvb 0000:..:...: Set irq #... for MSI vector 0
-```
-
-und vom Original-LLI die gewohnte Meldung, dass `/dev/mvblli0` angelegt
-und der Controller initialisiert wurde.
-
-Prüfpunkte:
-
-```sh
-cat /sys/class/pixy-mvb/mvb0/board_type        # MVB
-cat /sys/class/pixy-mvb/mvb0/connector_class   # ESD oder EMD
-cat /sys/class/pixy-mvb/mvb0/fw_version        # dieselbe Zahl wie vorher
-cat /sys/class/pixy-mvb/mvb0/controller_class
-```
-
-Dann den Registersatz gegen die Referenzmessung halten — mit dem
-Dump-Skript aus `tools/`:
-
-```sh
-python3 /root/mvbsnap.py /root/snap-stufe1
-diff <(grep -A40 'MVBC-Register' /root/snap-stufe1/summary.txt) \
-     <(grep -A40 'MVBC-Register' /root/mvbsnap-referenz/summary.txt)
-```
-
-Solange noch kein `open()` gelaufen ist, prüft der Vergleich den
-**Lesepfad**: `MCR`, `DR`, `STSR`, `DAOR`, `DAOK`, `TCR` und die 74
-`la_pit`-Einträge müssen unverändert dastehen. Nur `SCR` und `IMR0`/`IMR1`
-weichen ab, weil das Schließen durch `extApp` den Controller gestoppt hat
-(`SCR` auf IL = CONFIG, Masken auf 0).
-
-Danach mit dem **originalen** LLI ein `open()` ausführen und erneut
-aufnehmen — das ist der Sollwert für Stufe 2 und die einzige Prüfung des
-**Schreibpfads**. Erwartet: `SCR` mit gesetztem TMO-Feld für 43 µs,
-`MCR` mit `mcm = 3`, `la_pit` komplett null, `DAOR = 0x0000`,
-`DAOK = 0x0094`, die drei QDT-Einträge neu eingehängt, `STSR` **nicht**
-`0x10DB` (ohne Anwendung läuft kein `PD_CONF`).
-
-### Stufe 2 — beide Module aus dem Nachbau
-
-```sh
-rmmod pixy_mvblli
-rmmod pixy_mvb
-
-insmod /root/mvb-new/pixy-mvb.ko
-insmod /root/mvb-new/pixy-mvblli.ko
-dmesg | tail -20
-```
-
-Erwartet zusätzlich:
-
-```
-pixy-mvblli v3.0.0 - MVB Link Layer Interface
-pixy-mvblli: /dev/mvblli0 attached to board 0
-```
-
-Jetzt muss `open()` den Controller hochfahren:
-
-```sh
-python3 - <<'PY'
-import os
-fd = os.open("/dev/mvblli0", os.O_RDWR)
-print("offen")
-input("Enter zum Schliessen")
-os.close(fd)
-PY
-```
-
-Während der Datei-Deskriptor offen ist, in einer zweiten Sitzung:
-
-```sh
-dmesg | tail -5      # "traffic memory 256 KiB (mcm=3) at ISA+0x40000"
-                     # "controller 0 initialized (MVBC02D ...)"
-python3 /root/mvbsnap.py /root/snap-stufe2
-```
-
-Ein zweites `open()` muss `EBUSY` liefern — das ist die Exklusivität des
-Originals:
-
-```sh
-python3 -c "import os; os.open('/dev/mvblli0', os.O_RDWR)"
-# OSError: [Errno 16] Device or resource busy
-```
-
-### Stufe 3 — mit der Originalanwendung
-
-Erst nachdem Stufe 2 durch ist. Ein Reboot stellt den Herstellerstand
-wieder her; danach die eigenen Module laden **bevor** `session-1.scope`
-startet, oder die Anwendung von Hand starten.
-
-```sh
-mvb_pd_tool ...            # Prozessdaten lesen
-mvb_messagedata_tool ...   # Message-Daten gegen ein zweites Gerät
-```
-
-### Zurück zum Original
-
-```sh
-reboot
-```
-
-Es wurde nichts im Dateisystem verändert, das Original wird ganz normal
-wieder geladen.
+| Stufe | Konstellation | prüft |
+|---|---|---|
+| 0 | Herstellerstand läuft | Referenzaufnahme `snap0` |
+| 1 | **Nachbau-Board** + Original-LLI | `K*`-ABI, Lese- und Schreibpfad; `snap2` ist der Sollwert |
+| 2 | Nachbau + Nachbau | `diff snap2 snap3` muss leer sein |
+| 3 | mit der Originalanwendung, eigener Neustart | echter Busverkehr, nur am Prüfgerät |
 
 ## Gegenlesen gegen das Dekompilat
 
