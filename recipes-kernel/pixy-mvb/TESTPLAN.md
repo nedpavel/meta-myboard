@@ -238,35 +238,6 @@ Controllerzustand wie das Original.** Das ist das Abnahmekriterium.
 
 ---
 
-## Was Stufe 2 nicht prüfen kann
-
-**Der Interruptpfad.** Ohne Anwendung bleibt der Controller nach dem
-`open()` im Zustand `IL = CONFIG`; `MVB_GO` wird nirgends aufgerufen und
-wäre auch gar nicht möglich, weil `START` eine gesetzte Geräteadresse
-verlangt und die ohne `WRITE_DEV_ADDR` null bleibt. Ein gestoppter MVBC
-verarbeitet keine Frames:
-
-| Quelle | warum sie nicht auslöst |
-|---|---|
-| `DTI1`/`DTI2` | Sink-Time-Überwachung braucht `STSR`, das kommt aus `PD_CONF` |
-| `FEV` | die Zähler laufen nicht, also kein Überlauf |
-| `RQE` | es werden keine Message-Daten empfangen |
-
-**Null Interrupts sind in dieser Aufstellung also das erwartete
-Ergebnis, kein Befund** — für den Nachbau wie für das Original.
-Geprüft wird in Stufe 2 die Konfiguration des Controllers, nicht sein
-Betrieb.
-
-Entsprechend sind auch `FC` und `EC` in den Abzügen nicht aussagekräftig.
-Bei gestopptem Controller stehen sie auf Werten, die sich über Minuten
-nicht ändern und beim nächsten Lauf wiederkehren. Unterschiede dort sind
-kein Hinweis auf einen Treiberfehler.
-
-Wer den Interruptpfad wirklich prüfen will, braucht einen laufenden
-Controller — also Stufe 3, oder von Hand `WRITE_DEV_ADDR`, `PD_CONF` und
-`START`. **Beides bringt das Gerät auf den Bus** und gehört nur aufs
-Prüfgerät.
-
 ## Wenn Stufe 2 scheitert
 
 Die drei Abbruchmeldungen des LLI und was sie bedeuten:
