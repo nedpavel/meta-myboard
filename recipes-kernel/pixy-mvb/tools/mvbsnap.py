@@ -19,6 +19,7 @@ import mmap
 import os
 import struct
 import sys
+import time
 
 BAR_SIZE = 0x4000000          # 64 MiB
 ISA = 0x2000000               # ISA-Block im BAR
@@ -72,6 +73,30 @@ def regblock(mm, sa_off):
     return lines
 
 
+def loaded_modules():
+    """Welche Treiber waren beim Abzug geladen? Ohne das laesst sich
+    hinterher nicht mehr sagen, welche Aufnahme wozu gehoert."""
+    lines = []
+    try:
+        with open("/proc/modules") as f:
+            mods = [l.split() for l in f if l.startswith("pixy")]
+    except OSError:
+        return ["  /proc/modules nicht lesbar"]
+
+    for m in sorted(mods):
+        name = m[0]
+        info = []
+        for attr in ("version", "srcversion"):
+            try:
+                with open("/sys/module/%s/%s" % (name, attr)) as f:
+                    info.append("%s %s" % (attr, f.read().strip()))
+            except OSError:
+                pass
+        lines.append("  %-16s %8s Byte   %s"
+                     % (name, m[1], ", ".join(info) if info else "-"))
+    return lines or ["  kein pixy-Modul geladen"]
+
+
 def find_sa(mm):
     """Aktive Service Area aus dem MCR bestimmen."""
     for cand in SA_CANDIDATES:
@@ -119,7 +144,14 @@ def main():
 
     qdt = tuple(rd16(mm, SA + o) for o in (0x310, 0x312, 0x314))
 
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    mods = loaded_modules()
+
     with open(os.path.join(OUT, "summary.txt"), "w") as f:
+        f.write("Aufgenommen: %s\n" % stamp)
+        f.write("Geladene Treiber:\n")
+        f.write("\n".join(mods))
+        f.write("\n\n")
         f.write(note)
         f.write("\nMVBC-Register\n-------------\n")
         f.write("\n".join(regblock(mm, sa_off)))
@@ -130,14 +162,19 @@ def main():
         for p, v in ports:
             f.write("%5d   %5d  (0x%04X)\n" % (p, v, v))
 
-        # Alle Kandidatenadressen, damit eine steckengebliebene
-        # Initialisierung sichtbar wird.
+    # Die Kandidatenadressen stehen in einer eigenen Datei. Nur an einer
+    # davon liegen wirklich Register; die anderen zeigen gewoehnlichen
+    # Speicherinhalt, der sich staendig aendert. In summary.txt wuerde
+    # das jeden Vergleich unbrauchbar machen.
+    with open(os.path.join(OUT, "candidates.txt"), "w") as f:
+        f.write("Aufgenommen: %s\n\n" % stamp)
         for cand in SA_CANDIDATES:
-            f.write("\n\nRegisterblock an TM+0x%05X%s\n"
-                    % (cand, "   <-- aktiv" if cand == sa_off else ""))
-            f.write("-" * 40 + "\n")
+            f.write("Registerblock an TM+0x%05X%s\n"
+                    % (cand, "   <-- aktiv" if cand == sa_off else
+                       "   (inaktiv, Inhalt ist kein Registersatz)"))
+            f.write("-" * 52 + "\n")
             f.write("\n".join(regblock(mm, cand)))
-            f.write("\n")
+            f.write("\n\n")
 
     mm.close()
     print("belegte Ports: %d" % len(ports))
