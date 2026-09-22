@@ -15,10 +15,18 @@ geprueft - und zwar bis aufs Byte, nicht nur an 32 Registern.
     mvbdiff.py run     <Verzeichnis>
     mvbdiff.py compare <VerzeichnisA> <VerzeichnisB>
 
-Der Controller wird dabei NICHT gestartet: kein MVB_GO, kein
-Busverkehr. Das Senden von Message-Daten ist gesondert zu erlauben:
+Ohne weitere Angabe wird der Controller NICHT gestartet: kein MVB_GO,
+nichts geht auf den Bus, alles Geschriebene bleibt im Traffic Memory.
+Zwei Schalter gehen darueber hinaus und gehoeren nur an einen Bus, an
+dem das erlaubt ist:
 
-    mvbdiff.py run <Verzeichnis> --md
+    --md    Message-Daten senden
+    --go    Controller starten (MVB_GO), Prozessdaten im Betrieb lesen,
+            Zaehler und Interrupts ueber drei Minuten beobachten
+
+Mit --go veraendert der laufende Bus den Traffic Memory staendig. Der
+Vergleich der Abzuege ist dann nicht mehr aussagekraeftig - dort zaehlt
+das Protokoll: Rueckgaben, gelesene Daten, freshness, Zaehlerstaende.
 """
 
 import errno as E
@@ -28,6 +36,7 @@ import mmap
 import os
 import struct
 import sys
+import time
 
 DEV = "/dev/mvblli0"
 BOARD = "/dev/mvb0"
@@ -110,6 +119,24 @@ WRITE_PORT, WRITE_SIZE = 491, 4
 TEST_ADDR = 240          # die eigene Adresse des Geraets
 
 
+def mvb_port(typ, port):
+    """Container von read()/write(): 38 Byte, type und port vorbelegt."""
+    b = bytearray(38)
+    struct.pack_into("<HH", b, 0, typ, port)
+    return b
+
+
+def pd_write(fd, buf, size):
+    """Der Treiber liest immer die vollen 38 Byte, als Laenge sieht er
+    aber die Portgroesse. Das geht nur mit einem Ausschnitt ueber einem
+    ausreichend grossen Puffer."""
+    return os.writev(fd, [memoryview(buf)[:size]])
+
+
+def pd_read(fd, buf, size):
+    return os.readv(fd, [memoryview(buf)[:size]])
+
+
 def sig(req):
     """fcntl.ioctl will die Nummer vorzeichenbehaftet."""
     return req - (1 << 32) if req >= (1 << 31) else req
@@ -190,7 +217,7 @@ def modules():
 
 
 # ---------------------------------------------------------------- Ablauf
-def run(outdir, allow_md):
+def run(outdir, allow_md, go):
     os.makedirs(outdir, exist_ok=True)
     log = Log(os.path.join(outdir, "log.txt"))
 
@@ -213,7 +240,7 @@ def run(outdir, allow_md):
     il = scr & 3
     log.line("SCR 0x%04X, IL = %d (%s)"
              % (scr, il, ("RESET", "CONFIG", "TEST", "RUNNING")[il]))
-    if il == 3:
+    if il == 3 and not go:
         os.close(fd)
         log.line("ABBRUCH: der Controller laeuft. Dieses Skript schreibt "
                  "in Portpuffer und Register und darf das nur bei "
@@ -315,24 +342,21 @@ def run(outdir, allow_md):
 
     # Prozessdaten schreiben: zweimal, damit die Seitenumschaltung sichtbar wird
     for n, pat in ((1, 0xA5), (2, 0x5A)):
-        port = bytearray(38)
-        struct.pack_into("<HH", port, 0, 1, WRITE_PORT)
+        port = mvb_port(1, WRITE_PORT)
         for i in range(WRITE_SIZE // 2):
             struct.pack_into("<H", port, 4 + i * 2, pat << 8 | pat)
         call(log, "write() PD #%d" % n,
-             lambda p=port: os.write(fd, bytes(p)[:WRITE_SIZE + 4]))
+             lambda p=port: pd_write(fd, p, WRITE_SIZE))
         snapshot(mm, outdir, log.step, "writepd%d" % n)
 
-    rd = bytearray(38)
-    struct.pack_into("<HH", rd, 0, 1, WRITE_PORT)
-    call(log, "read() PD", lambda: os.read(fd, WRITE_SIZE))
+    rd = mvb_port(1, WRITE_PORT)
+    st, _ = call(log, "read() PD", lambda: pd_read(fd, rd, WRITE_SIZE))
 
     if allow_md:
-        md = bytearray(38)
-        struct.pack_into("<HH", md, 0, 3, 6)
+        md = mvb_port(3, 6)
         for i in range(2, 16):
             struct.pack_into("<H", md, 4 + i * 2, 0x1234)
-        call(log, "write() MD", lambda: os.write(fd, bytes(md)))
+        call(log, "write() MD", lambda: pd_write(fd, md, 32))
         snapshot(mm, outdir, log.step, "writemd")
         call(log, "MD_FLUSH_QUEUE", lambda: io(IOC["MD_FLUSH_QUEUE"]))
         snapshot(mm, outdir, log.step, "mdflush")
@@ -343,6 +367,73 @@ def run(outdir, allow_md):
          lambda: io(IOC["DISABLE_PORT"],
                     bytearray(struct.pack("<H", PORTS[-1][0])), True))
     snapshot(mm, outdir, log.step, "disable")
+
+    # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
+    if go:
+        log.line("\n--- Betrieb (MVB_GO) ---")
+        ok, _ = call(log, "START", lambda: io(IOC["START"]))
+        snapshot(mm, outdir, log.step, "started")
+
+        def counters():
+            out = {}
+            for f in sorted(glob.glob(
+                    "/sys/module/pixy_mvb*/parameters/dbg_*")):
+                try:
+                    with open(f) as h:
+                        out[f.split("/")[3] + "/" + os.path.basename(f)] = \
+                            h.read().strip()
+                except OSError:
+                    pass
+            return out
+
+        c0 = counters()
+        r0 = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
+              for o in (0x390, 0x394)]
+        log.line("     FC %04X  EC %04X" % tuple(r0))
+
+        for round_ in range(3):
+            time.sleep(20)
+            r = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
+                 for o in (0x390, 0x394, 0x3C4, 0x3B0)]
+            log.line("     +%2ds  FC %04X  EC %04X  ISR1 %04X  IPR0 %04X"
+                     % ((round_ + 1) * 20, r[0], r[1], r[2], r[3]))
+
+            for a_, sz, t in PORTS:
+                if t != 1:
+                    continue
+                buf = mvb_port(1, a_)
+                try:
+                    pd_read(fd, buf, sz)
+                    data = bytes(buf[4:4 + min(sz, 8)]).hex()
+                    fresh = struct.unpack_from("<H", buf, 36)[0]
+                    log.line("       Port %4d  %-16s  freshness %5d"
+                             % (a_, data, fresh))
+                except OSError as e:
+                    log.line("       Port %4d  %s" % (a_, errname(e.errno)))
+
+        c1 = counters()
+        log.line("     Zaehler:")
+        for k in sorted(set(c0) | set(c1)):
+            if c0.get(k) != c1.get(k):
+                log.line("       %-36s %s -> %s"
+                         % (k, c0.get(k, "-"), c1.get(k, "-")))
+        if c0 == c1:
+            log.line("       unveraendert - keine Interrupts im Betrieb")
+
+        st2 = bytearray(0x64)
+        call(log, "READ_STATS (Betrieb)",
+             lambda: io(IOC["READ_STATS"], st2, True))
+        log.line("     frames %u errors %u a %u b %u"
+                 % struct.unpack_from("<4I", st2, 0x10))
+
+        g2 = bytearray(4)
+        call(log, "MD_GET_STATUS (Betrieb)",
+             lambda: io(IOC["MD_GET_STATUS"], g2, True))
+        log.line("     status 0x%08X" % struct.unpack("<I", g2)[0])
+
+        snapshot(mm, outdir, log.step, "running")
+        call(log, "STOP", lambda: io(IOC["STOP"]))
+        snapshot(mm, outdir, log.step, "stopped")
 
     # ---- Exklusivitaet ----
     log.line("\n--- Exklusivitaet ---")
@@ -443,7 +534,7 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        run(sys.argv[2], "--md" in sys.argv)
+        run(sys.argv[2], "--md" in sys.argv, "--go" in sys.argv)
     elif len(sys.argv) == 4 and sys.argv[1] == "compare":
         sys.exit(1 if compare(sys.argv[2], sys.argv[3]) else 0)
     else:
