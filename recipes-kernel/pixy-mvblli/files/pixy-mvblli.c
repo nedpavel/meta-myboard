@@ -131,6 +131,7 @@ struct mvblli_dev {
 	u16 tmo_shift;			/* Schiebeweite fuer mvb_port.freshness */
 	u16 *all_tacks;			/* Sink-Time-Schwelle je Portadresse */
 	u16 int_mask[2];		/* Spiegel von IMR0 / IMR1 */
+	bool irq_attached;		/* Dienst ist beim Board-Treiber eingetragen */
 	u32 debug_overflows;		/* nur Statistik, wie im Original */
 
 	mvb_stat status;
@@ -1150,17 +1151,44 @@ static int mvblli_attach_board(struct mvblli_dev *d)
 		ret = -ENODEV;
 		goto out;
 	}
+	d->irq_attached = true;
 
 out:
 	filp_close(filp, NULL);
 	return ret;
 }
 
+/*
+ * Meldet den Interruptdienst beim Board-Treiber ab.
+ *
+ * Heikel ist der Zeitpunkt: release() laeuft beim Prozessende aus
+ * __fput heraus, und dort hat der Kernel den Dateisystemkontext von
+ * current bereits abgeraeumt. filp_open() greift dann ins Leere und
+ * nagelt die Maschine fest - kein Abbruch, kein Oops im Log, nur ein
+ * haengender Prozess, der auch einen reboot nicht mehr zulaesst.
+ *
+ * Das Original prueft an genau dieser Stelle ein Feld von current und
+ * ueberspringt das Abmelden, wenn es null ist. Welches der beiden es
+ * genau prueft, liess sich nicht aufloesen; geprueft werden deshalb
+ * beide. Die Richtung stimmt in jedem Fall: im Zweifel nicht abmelden.
+ *
+ * Bleibt der Dienst dabei eingetragen, holt irq_attached das beim
+ * Entladen nach - dort ist der Kontext wieder in Ordnung.
+ */
 static void mvblli_detach_board(struct mvblli_dev *d)
 {
 	struct PixyMvbBoardIrqServer srv;
 	char path[24];
 	struct file *filp;
+
+	if (!d->irq_attached)
+		return;
+
+	if (!current->fs || !current->files) {
+		pr_info(DRV_NAME
+			": deferring irq server removal (task is exiting)\n");
+		return;
+	}
 
 	snprintf(path, sizeof(path), "/dev/mvb%d", d->brd_id);
 	filp = filp_open(path, O_RDONLY, 0);
@@ -1171,7 +1199,8 @@ static void mvblli_detach_board(struct mvblli_dev *d)
 	srv.arg = d;
 	srv.irq_vect_id = (d->irq_vnum > 1) ? 1 : 0;
 	srv.remove = 1;
-	board_ioctl(filp, IOCTL_PIXY_MVB_BOARD_KSET_IRQ_SERVER, &srv);
+	if (!board_ioctl(filp, IOCTL_PIXY_MVB_BOARD_KSET_IRQ_SERVER, &srv))
+		d->irq_attached = false;
 
 	filp_close(filp, NULL);
 }
@@ -2099,6 +2128,13 @@ static void mvb_remove_board(int brd_id, void *arg)
 
 	if (d->status.is_init)
 		mvb_deinit_board(d);
+
+	/*
+	 * Falls release() das Abmelden ueberspringen musste, weil der
+	 * Prozess gerade beendet wurde, wird es hier nachgeholt - rmmod
+	 * laeuft in einem intakten Kontext.
+	 */
+	mvblli_detach_board(d);
 
 	if (d->sysdev) {
 		device_destroy(drvdata.cls, d->devt);

@@ -15,6 +15,7 @@
 #include <stdarg.h>
 
 u8 fake_tm[FAKE_TM_SIZE];
+struct fake_task fake_current = { (void *)1, (void *)1 };
 unsigned long fake_io_writes;
 
 #include "../recipes-kernel/pixy-mvblli/files/pixy-mvblli.c"

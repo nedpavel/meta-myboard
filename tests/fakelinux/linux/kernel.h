@@ -36,6 +36,11 @@ typedef uint32_t __u32;
 #define MKDEV(ma, mi)		(((ma) << 20) | (mi))
 #define MAJOR(d)		((d) >> 20)
 #define MINOR(d)		((d) & 0xfffff)
+/* Minimaler Ersatz fuer current: im Abspielwerk ist der Kontext immer gueltig */
+struct fake_task { void *fs; void *files; };
+extern struct fake_task fake_current;
+#define current			(&fake_current)
+
 #define iminor(i)		0
 #define cpu_relax()		do { } while (0)
 
