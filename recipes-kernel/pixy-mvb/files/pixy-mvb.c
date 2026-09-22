@@ -38,6 +38,21 @@
 #define DRV_VERSION_STR \
 	"pixy-mvb v3.0.0 - Pixy-1000 MVB/PC104 Extension Board Driver"
 
+/*
+ * Diagnosezaehler, lesbar unter /sys/module/pixy_mvb/parameters/.
+ * Sie beantworten, ob ueberhaupt ein MSI ankommt und ob er einem
+ * eingetragenen Dienst zugeordnet wird.
+ */
+static int dbg_hardirq;		/* Aufrufe des Interrupthandlers   */
+static int dbg_dispatch;	/* Aufrufe eingetragener Dienste   */
+static int dbg_nomatch;		/* Interrupt ohne passenden Vektor */
+static int dbg_registered;	/* Dienste am zuletzt getroffenen Vektor */
+
+module_param(dbg_hardirq, int, 0444);
+module_param(dbg_dispatch, int, 0444);
+module_param(dbg_nomatch, int, 0444);
+module_param(dbg_registered, int, 0444);
+
 #define PIXY_MVB_VENDOR_ID	0x1204
 #define PIXY_MVB_DEVICE_ID	0xEC30
 
@@ -304,7 +319,9 @@ static irqreturn_t pixy_mvb_irq_handler(int irq, void *dev_id)
 {
 	struct pixy_mvb_board *brd = dev_id;
 	unsigned long flags;
-	int i, j;
+	int i, j, matched = 0;
+
+	dbg_hardirq++;
 
 	spin_lock_irqsave(&brd->irq_lock, flags);
 	for (i = 0; i < brd->irq_vnum; i++) {
@@ -312,12 +329,19 @@ static irqreturn_t pixy_mvb_irq_handler(int irq, void *dev_id)
 
 		if (v->irq != irq)
 			continue;
+		matched = 1;
+		dbg_registered = v->act_nr_funcs;
 		for (j = 0; j < v->act_nr_funcs; j++)
-			if (v->func[j])
+			if (v->func[j]) {
+				dbg_dispatch++;
 				v->func[j](v->arg[j]);
+			}
 		break;
 	}
 	spin_unlock_irqrestore(&brd->irq_lock, flags);
+
+	if (!matched)
+		dbg_nomatch++;
 
 	return IRQ_HANDLED;
 }
