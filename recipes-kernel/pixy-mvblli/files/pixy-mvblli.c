@@ -1842,6 +1842,21 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 			d->prt_addr_max = ts.prt_addr_max;
 		if (ts.prt_indx_max)
 			d->prt_indx_max = ts.prt_indx_max;
+
+		/*
+		 * Zaehler auf null, in Hardware wie im Statusblock. Das
+		 * Original macht das hier und sonst nur noch im
+		 * PD_NSDB-Pfad; ohne Anwendung fasst sie also niemand an.
+		 * Ein gesaettigter Framezaehler bleibt dann stehen und FEV
+		 * meldet sich nie wieder - genau der Zustand, in dem die
+		 * Karte beim Geraetetest hing.
+		 */
+		sa_w16(d, MVBC_FC, 0);
+		mvb_clear_counters(d, true, true, true);
+		d->status.frames = 0;
+		d->status.errors = 0;
+		d->status.errors_a = 0;
+		d->status.errors_b = 0;
 		break;
 	}
 
