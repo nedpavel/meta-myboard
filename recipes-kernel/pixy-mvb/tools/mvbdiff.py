@@ -113,6 +113,7 @@ KNOWN_DIFF = {"PD_NSDB"}
 # Groesse ergibt sich aus dem hoechsten belegten Signaloffset,
 # aufgerundet auf die naechste zulaessige MVB-Groesse:
 #
+#   181  BIT bei 2 (MP-NPanMiddle)    ->  4 Byte, alle 64 ms
 #   460  AR8 bei 0                    ->  8 Byte, alle 64 ms
 #   461  BOOLEAN1 bei 6               ->  8 Byte, alle 128 ms
 #   462  BIT bei 12                   -> 16 Byte, alle 256 ms
@@ -129,6 +130,7 @@ KNOWN_DIFF = {"PD_NSDB"}
 # empfaengt nichts - ohne Fehlermeldung. Mit --ports datei laesst sich
 # die Liste ohne neues Skript austauschen (je Zeile "Adresse Groesse Typ").
 PORTS = [
+    (181,  4, 1),   # FLG1N, IN-XMVBLifeSFLG1 - Lebenszeichen, zaehlt hoch
     (460,  8, 1),
     (461,  8, 1),
     (462, 16, 1),
@@ -142,6 +144,15 @@ PORTS = [
     (491,  4, 2),   # eigene Quelle fuer den Schreibtest
     (902,  2, 1),   # nur fuer die kleinste Groessenklasse des Allokators
 ]
+# Ports, deren Inhalt sich staendig aendern muss. Ein gleichbleibender
+# Wert waere hier verdaechtig, ein wechselnder ist der eigentliche Beleg,
+# dass wirklich empfangen wird und nicht nur einmal etwas dastand.
+LIFESIGN = {
+    181: "IN-XMVBLifeSFLG1",
+    460: "NC-XTimeDate",
+    471: "DDA1-XMVBLifeSig",
+}
+
 WRITE_PORT, WRITE_SIZE = 491, 4
 DISABLE_PORT_ADDR = 902          # wird abgeschaltet, danach nicht mehr lesbar
 
@@ -425,6 +436,8 @@ def run(outdir, allow_md, go):
                     pass
             return out
 
+        seen = {}          # Port -> zuletzt gelesene Daten
+        changed = set()
         c0 = counters()
         r0 = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
               for o in (0x390, 0x394)]
@@ -446,13 +459,34 @@ def run(outdir, allow_md, go):
                 buf = mvb_port(1, a_)
                 try:
                     pd_read(fd, buf, sz)
-                    data = bytes(buf[4:4 + min(sz, 8)]).hex()
+                    raw = bytes(buf[4:4 + sz])
+                    data = raw[:8].hex()
                     fresh = struct.unpack_from("<H", buf, 36)[0]
-                    log.line("       Port %4d  %-16s  freshness %5d%s"
-                             % (a_, data, fresh,
-                                "   <-- EMPFANGEN" if fresh < 0xFFFF else ""))
+
+                    mark = ""
+                    if fresh < 0xFFFF:
+                        mark = "   <-- EMPFANGEN"
+                    if a_ in seen and seen[a_] != raw:
+                        changed.add(a_)
+                        mark += "  WERT WECHSELT"
+                    seen[a_] = raw
+
+                    log.line("       Port %4d %-18s %-16s  fresh %5d%s"
+                             % (a_, LIFESIGN.get(a_, ""), data, fresh, mark))
                 except OSError as e:
                     log.line("       Port %4d  %s" % (a_, errname(e.errno)))
+
+        log.line("     Lebenszeichen:")
+        for a_, nm in sorted(LIFESIGN.items()):
+            if a_ not in [q[0] for q in PORTS]:
+                continue
+            if a_ in changed:
+                log.line("       Port %4d %-18s wechselt - EMPFANG BELEGT"
+                         % (a_, nm))
+            elif a_ in seen:
+                log.line("       Port %4d %-18s unveraendert" % (a_, nm))
+            else:
+                log.line("       Port %4d %-18s nicht gelesen" % (a_, nm))
 
         c1 = counters()
         log.line("     Zaehler:")
