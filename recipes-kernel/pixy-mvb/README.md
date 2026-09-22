@@ -299,6 +299,21 @@ ganzen Status überschrieben.
 `SA + 0x3D0` und `SA + 0x3D4` sind die Fehlerzähler für Leitung A und B.
 `READ_STATS` hat sie bisher hart auf null gemeldet.
 
+> **Die Namen `MVBC_ECA`/`MVBC_ECB` sind unsere, nicht die des
+> Herstellers.** `mvbc.h` führt genau diesen Bereich als reserviert:
+>
+> ```c
+> VOL TM_TYPE_WORD    dmy__50[4];    /* INT_REGS + 0x50 … 0x56 */
+> VOL TM_TYPE_WORD    daor;          /* INT_REGS + 0x58        */
+> ```
+>
+> Der Herstellertreiber liest dort aber in `mvb_handle_counter()` die
+> beiden Zähler (`+0x50` lesen = Typ 3, `+0x54` lesen = Typ 4, dazu die
+> Löschpfade 0, 5, 6 und 7). Der MVBC02D implementiert an dieser Stelle
+> also mehr, als der allgemeine Header dokumentiert. Der Treiber ist die
+> belastbarere Quelle dafür, was der Chip kann — aber wer nur `mvbc.h`
+> liest, findet die beiden Register nicht.
+
 ### 7. `IVR0`/`IVR1` statt `ISR0`/`ISR1`
 
 `mvb_config` leert die Interrupt-**Vektor**register, nicht die
@@ -350,6 +365,52 @@ ist als Konstante des Originals belegt; die am Gerät gemessenen `0x00FF`
 stammen also nicht aus dem Treiber. Dock-Adressierung, Index-Vergabe,
 Wächterelement, Link_Header und die `STSR`-Berechnung waren bereits
 richtig.
+
+### Zugriffsbreite auf den Traffic Store — nachgezählt
+
+Die ganze Nachbildung steht und fällt damit, dass der Traffic Store
+**ausschließlich 16 Bit breit** angesprochen wird. Beide Dekompilate
+wurden deshalb vollständig nach MMIO-Zugriffsfunktionen durchsucht:
+
+| | `pixy-mvb` | `pixy-mvblli` |
+|---|---|---|
+| `ioread16` | 3 | 0 |
+| `ioread32` | 41 | **1** |
+| `iowrite32` | 24 | 0 |
+| `ioread8/64`, `iowrite8/16/64`, `memcpy_fromio/toio`, `readl/writel/readw/writew` | 0 | 0 |
+
+Kein einziger Treffer liegt im TM-Pfad:
+
+* Die 65 Zugriffe in `pixy-mvb` verteilen sich restlos auf den
+  CoreID-Block (`priv+0x2F8`) und den GPIO-Block (`priv+0x300`).
+  `mmapISAaddr` wird berechnet, über `KGET_PISA` herausgegeben und
+  **in keiner Breite jemals dereferenziert** — der Board-Treiber fasst
+  den Traffic Store gar nicht an.
+* Der einzige Zugriff in `pixy-mvblli` steht in `mvb_init_board` direkt
+  nach `KGET_PGPIO` und liest das GPIO-DAT-Register, um Bit 0
+  (`MVB_PC104n`) zu prüfen. Ebenfalls nicht der Traffic Store.
+
+`pixy-mvblli` hat darüber hinaus **auch keine** `ioread16`/`iowrite16`:
+der Traffic Store wird dort über einfache `volatile uint16_t *`
+angesprochen, so wie `mvbc.h` es vorgibt. Auf x86 erzeugt das dieselben
+16-Bit-Zugriffe wie unsere `ioread16`/`iowrite16` — die Breite stimmt
+überein, nur der Weg dahin ist ein anderer.
+
+`mvbc.h` bestätigt das von der Typseite: für den Traffic Store gibt es
+genau `TM_TYPE_BYTE` (`unsigned char`), `TM_TYPE_WORD` (`unsigned short`)
+und `TM_TYPE_RWORD` (`volatile unsigned short`) — 94 Verwendungen von
+`TM_TYPE_WORD`, 15 von `TM_TYPE_BYTE`, **keinen einzigen 32-Bit-Typ**.
+
+Zwei Stellen laden zum Fehlschluss ein und sind beide entschärft:
+
+* Das 4-Byte-Raster der Register ist unter `#pragma pack(2)` als
+  Registerwort **plus ausdrückliches Füllwort** ausgeschrieben
+  (`scr; dmy__02; mcr; dmy__06; …`) — zwei 16-Bit-Plätze, kein
+  32-Bit-Register.
+* Die Bitfeld-Unionen deklarieren ihre Felder als `unsigned int x : 1`,
+  das Datenglied der Union ist aber `TM_TYPE_WORD w`. Das Objekt ist
+  16 Bit breit; der `unsigned int` ist nur die Speicherklasse des
+  Bitfelds.
 
 ## Bekannte bewusste Eigenheiten
 
