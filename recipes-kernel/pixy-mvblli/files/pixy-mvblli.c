@@ -62,6 +62,27 @@ module_param(mvb_irq, int, 0444);
 MODULE_PARM_DESC(mvb_irq,
 	"0 = Message-Daten werden gepollt (Vorgabe), >0 = Interruptbetrieb");
 
+/*
+ * Diagnosezaehler, lesbar unter /sys/module/pixy_mvblli/parameters/.
+ * Sie kosten nichts und beantworten die Frage, ob der Interruptdienst
+ * ueberhaupt laeuft und was das Vektorregister meldet.
+ */
+static int dbg_irq;		/* Aufrufe des Interruptdienstes   */
+static int dbg_dti1;		/* dispatchte Quelle DTI1          */
+static int dbg_dti2;		/* dispatchte Quelle DTI2          */
+static int dbg_fev;		/* dispatchte Quelle FEV           */
+static int dbg_rqe;		/* dispatchte Quelle RQE           */
+static int dbg_other;		/* gemeldete, aber unbekannte Nr.  */
+static int dbg_last_other = -1;	/* zuletzt gesehene unbekannte Nr. */
+
+module_param(dbg_irq, int, 0444);
+module_param(dbg_dti1, int, 0444);
+module_param(dbg_dti2, int, 0444);
+module_param(dbg_fev, int, 0444);
+module_param(dbg_rqe, int, 0444);
+module_param(dbg_other, int, 0444);
+module_param(dbg_last_other, int, 0444);
+
 struct mvblli_dev {
 	int brd_id;
 	int enable;
@@ -998,19 +1019,25 @@ static void mvb_run_int_handler(struct mvblli_dev *d, unsigned int nr)
 	switch (nr) {
 	case MVB_INT_DTI1:
 		/* daran haengt im Original das Wecken des Messengers */
+		dbg_dti1++;
 		mvb_md_dispatcher(d);
 		wake_up_interruptible(&d->wait_poll);
 		break;
 	case MVB_INT_DTI2:
+		dbg_dti2++;
 		mvb_set_laa_rld();
 		break;
 	case MVB_INT_FEV:
+		dbg_fev++;
 		mvb_fev_handler(d);
 		break;
 	case MVB_INT_RQE:
+		dbg_rqe++;
 		d->debug_overflows++;
 		break;
 	default:
+		dbg_other++;
+		dbg_last_other = (int)nr;
 		break;
 	}
 }
@@ -1048,6 +1075,8 @@ static void mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
 static void mvblli_irq_server(void *arg)
 {
 	struct mvblli_dev *d = arg;
+
+	dbg_irq++;
 
 	if (!d->enable || !d->status.is_init)
 		return;
@@ -1302,13 +1331,19 @@ static int mvb_init_board(struct mvblli_dev *d)
 	 * mvb_md_init (Empfang, Ueberlauf); fuer das Ergebnis im Register
 	 * ist die Reihenfolge ohne Belang.
 	 */
+	/*
+	 * Muss vor dem Freigeben der Masken stehen: der Interruptdienst
+	 * steigt bei is_init == 0 sofort wieder aus, und zwischen dem
+	 * ersten freigegebenen Bit und dieser Zeile koennte schon eine
+	 * Meldung eintreffen - die waere dann unquittiert liegengeblieben.
+	 * has_pd kommt aus PD_CONF, has_md aus MD_CONF, nicht von hier.
+	 */
+	d->status.is_init = 1;
+
 	mvb_int_connect(d, MVB_INT_FEV);
 	mvb_int_connect(d, MVB_INT_DTI2);
 	mvb_int_connect(d, MVB_INT_DTI1);
 	mvb_int_connect(d, MVB_INT_RQE);
-
-	/* has_pd kommt aus PD_CONF, has_md aus MD_CONF - nicht von hier. */
-	d->status.is_init = 1;
 
 	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
 		d->brd_id, d->status.hw_version);
