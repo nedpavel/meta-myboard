@@ -109,6 +109,8 @@ struct mvblli_dev {
 
 	u16 tmo_shift;			/* Schiebeweite fuer mvb_port.freshness */
 	u16 *all_tacks;			/* Sink-Time-Schwelle je Portadresse */
+	u16 int_mask[2];		/* Spiegel von IMR0 / IMR1 */
+	u32 debug_overflows;		/* nur Statistik, wie im Original */
 
 	mvb_stat status;
 
@@ -416,6 +418,28 @@ static void mvb_reset_rlds(struct mvblli_dev *d)
 {
 	sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) & ~TM_DR_RLD_LATCH);
 	mvb_set_laa_rld();
+}
+
+/*
+ * Interruptquellen des MVBC. Die Nummer ist zugleich die Bitstelle:
+ * 0..15 stehen in IMR0/ISR0, 16..31 in IMR1/ISR1. Die vier hier
+ * angeschlossenen Quellen ergeben genau die am Geraet gemessenen
+ * Maskenwerte IMR0 = 0x0003 und IMR1 = 0x0880.
+ */
+#define MVB_INT_MD_RECEIVED	0	/* IMR0 Bit 0  - Message eingetroffen */
+#define MVB_INT_DTI2		1	/* IMR0 Bit 1  - Deadline Timer 2     */
+#define MVB_INT_FEV		23	/* IMR1 Bit 7  - Zaehler laufen ueber */
+#define MVB_INT_RQ_OVERFLOW	27	/* IMR1 Bit 11 - Empfangsqueue voll   */
+
+#define MVB_INT_BIT(nr)		((u16)(1u << ((nr) & 0xf)))
+
+static void mvb_int_connect(struct mvblli_dev *d, unsigned int nr)
+{
+	u32 reg = (nr < 16) ? MVBC_IMR0 : MVBC_IMR1;
+	u16 bit = MVB_INT_BIT(nr);
+
+	d->int_mask[nr >> 4] |= bit;
+	sa_w16(d, reg, sa_r16(d, reg) | bit);
 }
 
 /*
@@ -763,12 +787,14 @@ static int mvb_md_q_init(struct mvblli_dev *d)
 
 	/* Message-Quelle und -Senke scharf schalten */
 	sa_w16(d, SA_PP_PCS + TM_PP_MSRC * 8, 0xc81c);
-	msnk = 0xc404;
-	if (mvb_irq > 0)
-		msnk |= 0x20;
-	sa_w16(d, SA_PP_PCS + TM_PP_MSNK * 8, msnk);
 
-	d->status.has_md = 1;
+	/*
+	 * Bit 5 der Message-Senke meldet den Eingang per Interrupt. Am
+	 * Geraet gemessen traegt MSNK 0xC424, das Bit ist also gesetzt -
+	 * unabhaengig davon, ob read() und poll() zusaetzlich pollen.
+	 */
+	msnk = 0xc404 | 0x20;
+	sa_w16(d, SA_PP_PCS + TM_PP_MSNK * 8, msnk);
 
 	return 0;
 }
@@ -941,6 +967,32 @@ static u32 mvb_md_get_status(struct mvblli_dev *d, u16 selector, u16 reset)
 
 /* --------------------------------------------------------- Interrupt */
 
+/*
+ * FEV meldet, dass die 16-Bit-Zaehler des MVBC ueberzulaufen drohen. Das
+ * Original traegt sie dann in die 32-Bit-Zaehler des Statusblocks nach
+ * und leert die Hardware. Laeuft dabei auch der Softwarezaehler ueber,
+ * werden alle vier zurueckgesetzt.
+ */
+static void mvb_fev_handler(struct mvblli_dev *d)
+{
+	u32 old = d->status.frames;
+
+	d->status.frames   += mvb_read_counter(d, MVB_CNT_FRAMES);
+	d->status.errors   += mvb_read_counter(d, MVB_CNT_ERRORS);
+	d->status.errors_a += mvb_read_counter(d, MVB_CNT_ERRORS_A);
+	d->status.errors_b += mvb_read_counter(d, MVB_CNT_ERRORS_B);
+
+	sa_w16(d, MVBC_FC, 0);
+	mvb_clear_counters(d, true, true, true);
+
+	if (d->status.frames < old) {
+		d->status.frames = 0;
+		d->status.errors = 0;
+		d->status.errors_a = 0;
+		d->status.errors_b = 0;
+	}
+}
+
 static void mvblli_irq_server(void *arg)
 {
 	struct mvblli_dev *d = arg;
@@ -949,8 +1001,9 @@ static void mvblli_irq_server(void *arg)
 	if (!d->enable || !d->status.is_init)
 		return;
 
-	isr0 = sa_r16(d, MVBC_ISR0);
-	isr1 = sa_r16(d, MVBC_ISR1);
+	/* Nur die selbst angeschlossenen Quellen beachten */
+	isr0 = sa_r16(d, MVBC_ISR0) & d->int_mask[0];
+	isr1 = sa_r16(d, MVBC_ISR1) & d->int_mask[1];
 
 	/* Quittieren durch Zurueckschreiben der gemeldeten Bits */
 	if (isr0)
@@ -958,12 +1011,16 @@ static void mvblli_irq_server(void *arg)
 	if (isr1)
 		sa_w16(d, MVBC_ISR1, isr1);
 
-	if (isr1 & 0x0800)		/* RQE: Empfangsqueue hat etwas */
+	if (isr0 & MVB_INT_BIT(MVB_INT_MD_RECEIVED)) {
 		mvb_md_dispatcher(d);
-	if (isr1 & 0x0400)		/* RQC/Overflow */
-		d->rq_overflow |= 4;
-
-	wake_up_interruptible(&d->wait_poll);
+		wake_up_interruptible(&d->wait_poll);
+	}
+	if (isr0 & MVB_INT_BIT(MVB_INT_DTI2))
+		mvb_set_laa_rld();
+	if (isr1 & MVB_INT_BIT(MVB_INT_FEV))
+		mvb_fev_handler(d);
+	if (isr1 & MVB_INT_BIT(MVB_INT_RQ_OVERFLOW))
+		d->debug_overflows++;
 }
 
 /* -------------------------------------------- Anbindung an pixy-mvb */
@@ -1140,7 +1197,14 @@ static int mvb_init_board(struct mvblli_dev *d)
 		goto err_detach;
 
 	d->ts_id = d->brd_id;
-	d->waitstates = 0;
+	/*
+	 * WS-Feld im SCR. Am Geraet gemessen: das Original schreibt
+	 * SCR = 0x87C5 und an der Sondieradresse 0x07C0 - beide tragen
+	 * 0x0300, also drei Wartezyklen fuer den Zugriff auf das
+	 * Traffic Memory. Mit 0 laeuft der Controller zu schnell und
+	 * der Fehlerzaehler steigt.
+	 */
+	d->waitstates = TM_SCR_WS_3;
 	d->prt_addr_max = TM_PORT_COUNT - 1;
 	d->prt_indx_max = 0xfff;
 	d->q_tq_priority = 0;
@@ -1187,6 +1251,28 @@ static int mvb_init_board(struct mvblli_dev *d)
 	if (ret)
 		goto err_free;
 
+	/*
+	 * Das untere Byte des BCR traegt die Interruptnummer, in beiden
+	 * Halbbytes. Bei mvb_irq = 0 schreibt das eine Null - genau der
+	 * gemessene Stand BCR = 0x2600.
+	 */
+	iowrite16(((u16)mvb_irq & 0xf) | (((u16)mvb_irq << 4) & 0xf0) |
+		  (ioread16(d->pisa + ISA_BCR) & 0xff00),
+		  d->pisa + ISA_BCR);
+
+	/*
+	 * Erst jetzt die Interruptquellen freigeben - vorher steht der
+	 * Empfangsring nicht. Die vier Anschluesse ergeben zusammen
+	 * IMR0 = 0x0003 und IMR1 = 0x0880, genau den gemessenen Stand.
+	 * Das Original verteilt sie auf mvb_init_board (FEV, DTI2) und
+	 * mvb_md_init (Empfang, Ueberlauf); fuer das Ergebnis im Register
+	 * ist die Reihenfolge ohne Belang.
+	 */
+	mvb_int_connect(d, MVB_INT_FEV);
+	mvb_int_connect(d, MVB_INT_DTI2);
+	mvb_int_connect(d, MVB_INT_MD_RECEIVED);
+	mvb_int_connect(d, MVB_INT_RQ_OVERFLOW);
+
 	/* has_pd kommt aus PD_CONF, has_md aus MD_CONF - nicht von hier. */
 	d->status.is_init = 1;
 
@@ -1214,6 +1300,8 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 	mvb_stop(d);
 	sa_w16(d, MVBC_IMR0, 0);
 	sa_w16(d, MVBC_IMR1, 0);
+	d->int_mask[0] = 0;
+	d->int_mask[1] = 0;
 
 	d->configured = 0;
 	mvblli_detach_board(d);
@@ -1632,11 +1720,18 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	case IOCTL_PIXY_MVBLLI_READ_STATS: {
 		mvb_stat st = d->status;
 
-		st.mvb_addr = d->mvb_addr;
-		st.frames   = mvb_read_counter(d, MVB_CNT_FRAMES);
-		st.errors   = mvb_read_counter(d, MVB_CNT_ERRORS);
-		st.errors_a = mvb_read_counter(d, MVB_CNT_ERRORS_A);
-		st.errors_b = mvb_read_counter(d, MVB_CNT_ERRORS_B);
+		/*
+		 * Die Zaehler im Statusblock tragen die Summe aller bereits
+		 * abgeschlossenen Ueberlaufperioden (mvb_fev_handler); dazu
+		 * kommt der laufende Stand der Hardware. Der gespeicherte
+		 * Wert bleibt dabei unberuehrt, sonst wuerde zyklisches
+		 * Abfragen doppelt zaehlen.
+		 */
+		st.mvb_addr  = d->mvb_addr;
+		st.frames   += mvb_read_counter(d, MVB_CNT_FRAMES);
+		st.errors   += mvb_read_counter(d, MVB_CNT_ERRORS);
+		st.errors_a += mvb_read_counter(d, MVB_CNT_ERRORS_A);
+		st.errors_b += mvb_read_counter(d, MVB_CNT_ERRORS_B);
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			ret = -EINVAL;
 		break;

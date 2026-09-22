@@ -646,6 +646,82 @@ static void test_hardw_config(void)
 	dev.configured = 0;
 }
 
+/* --------------------------------------------------------- Test 10 */
+/*
+ * Die vier Interruptquellen muessen zusammen genau die am Geraet
+ * gemessenen Masken ergeben. Dazu die Wartezyklen im SCR, die der
+ * Vergleich gegen den Originaltreiber aufgedeckt hat.
+ */
+static void test_interrupts(void)
+{
+	printf("\n--- Test 10: Interruptmasken und Wartezyklen ---\n");
+
+	dev.int_mask[0] = 0;
+	dev.int_mask[1] = 0;
+	sa_w16(&dev, MVBC_IMR0, 0);
+	sa_w16(&dev, MVBC_IMR1, 0);
+
+	mvb_int_connect(&dev, MVB_INT_FEV);
+	mvb_int_connect(&dev, MVB_INT_DTI2);
+	mvb_int_connect(&dev, MVB_INT_MD_RECEIVED);
+	mvb_int_connect(&dev, MVB_INT_RQ_OVERFLOW);
+
+	check(sa_r16(&dev, MVBC_IMR0) == 0x0003,
+	      "IMR0 ist 0x%04x statt 0x0003", sa_r16(&dev, MVBC_IMR0));
+	check(sa_r16(&dev, MVBC_IMR1) == 0x0880,
+	      "IMR1 ist 0x%04x statt 0x0880", sa_r16(&dev, MVBC_IMR1));
+	check(dev.int_mask[0] == 0x0003 && dev.int_mask[1] == 0x0880,
+	      "Maskenspiegel stimmt nicht mit den Registern ueberein");
+	printf("  IMR0 0x%04x, IMR1 0x%04x (gemessen 0x0003 / 0x0880)\n",
+	       sa_r16(&dev, MVBC_IMR0), sa_r16(&dev, MVBC_IMR1));
+
+	/* Bitzuordnung einzeln, damit ein Zahlendreher auffaellt */
+	check(MVB_INT_BIT(MVB_INT_MD_RECEIVED) == 0x0001, "Empfang != IMR0 Bit 0");
+	check(MVB_INT_BIT(MVB_INT_DTI2)        == 0x0002, "DTI2 != IMR0 Bit 1");
+	check(MVB_INT_BIT(MVB_INT_FEV)         == 0x0080, "FEV != IMR1 Bit 7");
+	check(MVB_INT_BIT(MVB_INT_RQ_OVERFLOW) == 0x0800, "Ueberlauf != IMR1 Bit 11");
+
+	/* Wartezyklen: das SCR-Feld muss 0x0300 tragen */
+	check(TM_SCR_WS_3 == 0x0300, "TM_SCR_WS_3 ist nicht 0x0300");
+	check((TM_SCR_WS_3 | 0x84c5) == 0x87c5,
+	      "SCR aus Wartezyklen und Grundwert ergibt nicht 0x87C5");
+	check((TM_SCR_WS_3 | 0x04c0) == 0x07c0,
+	      "SCR an der Sondieradresse ergibt nicht 0x07C0");
+	printf("  SCR aktiv 0x%04x, Sondieradresse 0x%04x\n",
+	       TM_SCR_WS_3 | 0x84c5, TM_SCR_WS_3 | 0x04c0);
+
+	/*
+	 * Zaehleruebertrag: FEV traegt die Hardwarestaende in den
+	 * Statusblock nach und leert die Hardware.
+	 */
+	memset(&dev.status, 0, sizeof(dev.status));
+	dev.status.frames = 100;
+	sa_w16(&dev, MVBC_FC,  7);
+	sa_w16(&dev, MVBC_EC,  5);
+	sa_w16(&dev, MVBC_ECA, 3);
+	sa_w16(&dev, MVBC_ECB, 1);
+	mvb_fev_handler(&dev);
+
+	check(dev.status.frames == 107, "frames ist %u statt 107",
+	      dev.status.frames);
+	check(dev.status.errors == 5 && dev.status.errors_a == 3 &&
+	      dev.status.errors_b == 1, "Fehlerzaehler falsch uebernommen");
+	check(sa_r16(&dev, MVBC_FC) == 0 && sa_r16(&dev, MVBC_EC) == 0 &&
+	      sa_r16(&dev, MVBC_ECA) == 0 && sa_r16(&dev, MVBC_ECB) == 0,
+	      "Hardwarezaehler wurden nicht geleert");
+	printf("  Uebertrag 100+7 = %u, Hardware geleert\n", dev.status.frames);
+
+	/* Ueberlauf des Softwarezaehlers setzt alle vier zurueck */
+	dev.status.frames = 0xffffffffu;
+	sa_w16(&dev, MVBC_FC, 2);
+	mvb_fev_handler(&dev);
+	check(dev.status.frames == 0 && dev.status.errors == 0,
+	      "Ueberlauf setzt die Zaehler nicht zurueck");
+	printf("  Ueberlauf setzt alle vier Zaehler zurueck\n");
+
+	memset(&dev.status, 0, sizeof(dev.status));
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -670,6 +746,7 @@ int main(int argc, char **argv)
 	test_md_send();
 	test_md_receive();
 	test_hardw_config();
+	test_interrupts();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;
