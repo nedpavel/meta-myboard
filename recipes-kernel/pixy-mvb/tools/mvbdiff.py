@@ -107,29 +107,40 @@ KNOWN_DIFF = {"PD_NSDB"}
 # Portliste fuer PD_CONF. (Adresse, Groesse in Byte, Typ: 1 = Senke,
 # 2 = Quelle)
 #
-# Die Senken stammen aus der Busbeschreibung des Laborbusses:
+# Aus DIA1.TXT und DDA1.TXT, alle Telegramme mit $SINKMEMB IDU2 - das
+# ist dieses Geraet. Die vierte Spalte des $TELEGRAM ist die Zykluszeit
+# in Millisekunden (64, 128, 256, 1024), nicht die Portgroesse. Die
+# Groesse ergibt sich aus dem hoechsten belegten Signaloffset,
+# aufgerundet auf die naechste zulaessige MVB-Groesse:
 #
-#   $DEVICE VMA1-P VMA1 02H  RP2B ; V-Messanlage
-#    $MEMBER VMA1 PRJ TEST64/4  60   -> 4 Ports zu 64 Bit ab Port  60
-#   $DEVICE TVCU1 VCU1 02EH VCU  ; Diagnoserechner
-#    $MEMBER DDA1 PRJ TEST32/8 470   -> 8 Ports zu 32 Bit ab Port 470
+#   460  AR8 bei 0                    ->  8 Byte, alle 64 ms
+#   461  BOOLEAN1 bei 6               ->  8 Byte, alle 128 ms
+#   462  BIT bei 12                   -> 16 Byte, alle 256 ms
+#   471  BIT bei 6                    ->  8 Byte, alle 64 ms
+#   472  ANALOG bei 30                -> 32 Byte, alle 1024 ms
+#   473  CARD8 bei 15                 -> 16 Byte, alle 1024 ms
+#   474  CARD32 bei 28                -> 32 Byte, alle 1024 ms
+#   475  CARD32 bei 28                -> 32 Byte, alle 1024 ms
+#   476  CARD16 bei 30                -> 32 Byte, alle 1024 ms
+#   477  ANALOG bei 22                -> 32 Byte, alle 1024 ms
 #
-# 64 Bit sind 8 Byte, 32 Bit sind 4 Byte. Nur auf diesen Adressen ist
-# ueberhaupt Verkehr zu erwarten; auf allem anderen bleibt tack null und
-# freshness steht auf 65535.
+# Die Groesse muss stimmen: der F-Code steckt im MVB-Frame, und eine
+# Senke nimmt nur Frames mit passendem F-Code an. Wer hier danebenliegt,
+# empfaengt nichts - ohne Fehlermeldung. Mit --ports datei laesst sich
+# die Liste ohne neues Skript austauschen (je Zeile "Adresse Groesse Typ").
 PORTS = [
-    (60,   8, 1),   # VMA1, TEST64/4
-    (61,   8, 1),
-    (62,   8, 1),
-    (63,   8, 1),
-    (470,  4, 1),   # VCU1 Diagnoserechner, TEST32/8
-    (471,  4, 1),
-    (472,  4, 1),
-    (473,  4, 1),
+    (460,  8, 1),
+    (461,  8, 1),
+    (462, 16, 1),
+    (471,  8, 1),
+    (472, 32, 1),
+    (473, 16, 1),
+    (474, 32, 1),
+    (475, 32, 1),
+    (476, 32, 1),
+    (477, 32, 1),
     (491,  4, 2),   # eigene Quelle fuer den Schreibtest
-    (900, 32, 1),   # nur fuer die Groessenklassen des Allokators
-    (901, 16, 1),
-    (902,  2, 1),
+    (902,  2, 1),   # nur fuer die kleinste Groessenklasse des Allokators
 ]
 WRITE_PORT, WRITE_SIZE = 491, 4
 DISABLE_PORT_ADDR = 902          # wird abgeschaltet, danach nicht mehr lesbar
@@ -566,10 +577,25 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        global STOP_AFTER
+        global STOP_AFTER, PORTS, WRITE_PORT, WRITE_SIZE, DISABLE_PORT_ADDR
         for i, a_ in enumerate(sys.argv):
             if a_ == "--stop-after":
                 STOP_AFTER = int(sys.argv[i + 1])
+            if a_ == "--ports":
+                lst = []
+                for ln in open(sys.argv[i + 1]):
+                    ln = ln.split("#")[0].split()
+                    if len(ln) == 3:
+                        lst.append(tuple(int(x) for x in ln))
+                if not lst:
+                    print("--ports: keine brauchbare Zeile gefunden")
+                    sys.exit(2)
+                PORTS = lst
+                src = [q for q in PORTS if q[2] == 2]
+                if src:
+                    WRITE_PORT, WRITE_SIZE = src[0][0], src[0][1]
+                DISABLE_PORT_ADDR = PORTS[-1][0]
+                print("Portliste aus %s: %d Ports" % (sys.argv[i + 1], len(PORTS)))
         run(sys.argv[2], "--md" in sys.argv, "--go" in sys.argv)
     elif len(sys.argv) == 4 and sys.argv[1] == "compare":
         sys.exit(1 if compare(sys.argv[2], sys.argv[3]) else 0)
