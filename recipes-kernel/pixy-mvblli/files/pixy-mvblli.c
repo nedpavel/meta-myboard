@@ -426,10 +426,10 @@ static void mvb_reset_rlds(struct mvblli_dev *d)
  * angeschlossenen Quellen ergeben genau die am Geraet gemessenen
  * Maskenwerte IMR0 = 0x0003 und IMR1 = 0x0880.
  */
-#define MVB_INT_MD_RECEIVED	0	/* IMR0 Bit 0  - Message eingetroffen */
-#define MVB_INT_DTI2		1	/* IMR0 Bit 1  - Deadline Timer 2     */
-#define MVB_INT_FEV		23	/* IMR1 Bit 7  - Zaehler laufen ueber */
-#define MVB_INT_RQ_OVERFLOW	27	/* IMR1 Bit 11 - Empfangsqueue voll   */
+#define MVB_INT_DTI1		0	/* IMR0 Bit 0  - Deadline Timer 1  */
+#define MVB_INT_DTI2		1	/* IMR0 Bit 1  - Deadline Timer 2  */
+#define MVB_INT_FEV		23	/* IMR1 Bit 7  - Zaehlerueberlauf  */
+#define MVB_INT_RQE		27	/* IMR1 Bit 11 - Empfangsqueue     */
 
 #define MVB_INT_BIT(nr)		((u16)(1u << ((nr) & 0xf)))
 
@@ -993,34 +993,68 @@ static void mvb_fev_handler(struct mvblli_dev *d)
 	}
 }
 
+static void mvb_run_int_handler(struct mvblli_dev *d, unsigned int nr)
+{
+	switch (nr) {
+	case MVB_INT_DTI1:
+		/* daran haengt im Original das Wecken des Messengers */
+		mvb_md_dispatcher(d);
+		wake_up_interruptible(&d->wait_poll);
+		break;
+	case MVB_INT_DTI2:
+		mvb_set_laa_rld();
+		break;
+	case MVB_INT_FEV:
+		mvb_fev_handler(d);
+		break;
+	case MVB_INT_RQE:
+		d->debug_overflows++;
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * Quittiert wird ueber das Vektorregister, nicht ueber ISR0/ISR1.
+ *
+ * Jedes Lesen von IVR holt die naechste anstehende Quelle heraus: Bit 8
+ * sagt "gueltig", Bits 7..0 tragen die Nummer. Damit raeumt sich das
+ * Register selbst leer, und zwar auch fuer Quellen, die gar nicht
+ * freigegeben sind - deshalb steht IPR beim Original auf null. Zum
+ * Schluss wird das Register genullt. Genau deshalb darf man IVR auch
+ * niemals nebenbei auslesen, solange ein Stack laeuft: jedes Lesen
+ * nimmt dem Treiber eine Meldung weg.
+ *
+ * Die Schranke von 20 Durchlaeufen ist aus dem Original uebernommen.
+ */
+static void mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
+{
+	u16 ivr = sa_r16(d, ivr_reg);
+
+	if (ivr & 0x100) {
+		int guard = 0;
+
+		do {
+			mvb_run_int_handler(d, base + (ivr & 0xff));
+			ivr = sa_r16(d, ivr_reg);
+			guard++;
+		} while ((ivr & 0x100) && guard != 0x14);
+	}
+
+	sa_w16(d, ivr_reg, 0);
+}
+
 static void mvblli_irq_server(void *arg)
 {
 	struct mvblli_dev *d = arg;
-	u16 isr0, isr1;
 
 	if (!d->enable || !d->status.is_init)
 		return;
 
-	/* Nur die selbst angeschlossenen Quellen beachten */
-	isr0 = sa_r16(d, MVBC_ISR0) & d->int_mask[0];
-	isr1 = sa_r16(d, MVBC_ISR1) & d->int_mask[1];
-
-	/* Quittieren durch Zurueckschreiben der gemeldeten Bits */
-	if (isr0)
-		sa_w16(d, MVBC_ISR0, isr0);
-	if (isr1)
-		sa_w16(d, MVBC_ISR1, isr1);
-
-	if (isr0 & MVB_INT_BIT(MVB_INT_MD_RECEIVED)) {
-		mvb_md_dispatcher(d);
-		wake_up_interruptible(&d->wait_poll);
-	}
-	if (isr0 & MVB_INT_BIT(MVB_INT_DTI2))
-		mvb_set_laa_rld();
-	if (isr1 & MVB_INT_BIT(MVB_INT_FEV))
-		mvb_fev_handler(d);
-	if (isr1 & MVB_INT_BIT(MVB_INT_RQ_OVERFLOW))
-		d->debug_overflows++;
+	/* Reihenfolge wie im Original: erst IVR1, dann IVR0 */
+	mvb_drain_ivr(d, MVBC_IVR1, 16);
+	mvb_drain_ivr(d, MVBC_IVR0, 0);
 }
 
 /* -------------------------------------------- Anbindung an pixy-mvb */
@@ -1270,8 +1304,8 @@ static int mvb_init_board(struct mvblli_dev *d)
 	 */
 	mvb_int_connect(d, MVB_INT_FEV);
 	mvb_int_connect(d, MVB_INT_DTI2);
-	mvb_int_connect(d, MVB_INT_MD_RECEIVED);
-	mvb_int_connect(d, MVB_INT_RQ_OVERFLOW);
+	mvb_int_connect(d, MVB_INT_DTI1);
+	mvb_int_connect(d, MVB_INT_RQE);
 
 	/* has_pd kommt aus PD_CONF, has_md aus MD_CONF - nicht von hier. */
 	d->status.is_init = 1;

@@ -663,8 +663,8 @@ static void test_interrupts(void)
 
 	mvb_int_connect(&dev, MVB_INT_FEV);
 	mvb_int_connect(&dev, MVB_INT_DTI2);
-	mvb_int_connect(&dev, MVB_INT_MD_RECEIVED);
-	mvb_int_connect(&dev, MVB_INT_RQ_OVERFLOW);
+	mvb_int_connect(&dev, MVB_INT_DTI1);
+	mvb_int_connect(&dev, MVB_INT_RQE);
 
 	check(sa_r16(&dev, MVBC_IMR0) == 0x0003,
 	      "IMR0 ist 0x%04x statt 0x0003", sa_r16(&dev, MVBC_IMR0));
@@ -676,10 +676,10 @@ static void test_interrupts(void)
 	       sa_r16(&dev, MVBC_IMR0), sa_r16(&dev, MVBC_IMR1));
 
 	/* Bitzuordnung einzeln, damit ein Zahlendreher auffaellt */
-	check(MVB_INT_BIT(MVB_INT_MD_RECEIVED) == 0x0001, "Empfang != IMR0 Bit 0");
-	check(MVB_INT_BIT(MVB_INT_DTI2)        == 0x0002, "DTI2 != IMR0 Bit 1");
-	check(MVB_INT_BIT(MVB_INT_FEV)         == 0x0080, "FEV != IMR1 Bit 7");
-	check(MVB_INT_BIT(MVB_INT_RQ_OVERFLOW) == 0x0800, "Ueberlauf != IMR1 Bit 11");
+	check(MVB_INT_BIT(MVB_INT_DTI1) == 0x0001, "DTI1 != IMR0 Bit 0");
+	check(MVB_INT_BIT(MVB_INT_DTI2) == 0x0002, "DTI2 != IMR0 Bit 1");
+	check(MVB_INT_BIT(MVB_INT_FEV)  == 0x0080, "FEV != IMR1 Bit 7");
+	check(MVB_INT_BIT(MVB_INT_RQE)  == 0x0800, "RQE != IMR1 Bit 11");
 
 	/* Wartezyklen: das SCR-Feld muss 0x0300 tragen */
 	check(TM_SCR_WS_3 == 0x0300, "TM_SCR_WS_3 ist nicht 0x0300");
@@ -722,6 +722,70 @@ static void test_interrupts(void)
 	memset(&dev.status, 0, sizeof(dev.status));
 }
 
+/* --------------------------------------------------------- Test 11 */
+/*
+ * Quittung ueber das Vektorregister. Das Register meldet mit Bit 8 eine
+ * gueltige Nummer; jedes Lesen muss die naechste holen, bis nichts mehr
+ * ansteht. Der Zaehler im Abspielwerk gibt eine feste Folge vor.
+ */
+static u16 ivr_queue[8];
+static int ivr_pos, ivr_len;
+static int fev_calls, dti2_calls;
+
+static void test_ivr_drain(void)
+{
+	u32 ivr0 = (u32)((u8 *)dev.p_sa - fake_tm) + MVBC_IVR0;
+	int i;
+
+	printf("\n--- Test 11: Quittung ueber das Vektorregister ---\n");
+
+	/* drei anstehende Quellen, dann leer */
+	ivr_queue[0] = 0x100 | MVB_INT_DTI2;
+	ivr_queue[1] = 0x100 | MVB_INT_DTI2;
+	ivr_queue[2] = 0x100 | MVB_INT_DTI1;
+	ivr_queue[3] = 0x0000;
+	ivr_len = 4;
+	ivr_pos = 0;
+	dti2_calls = 0;
+
+	/* Das Abspielwerk liefert die Folge ueber den Speicher nach */
+	for (i = 0; i < ivr_len; i++) {
+		fake_tm[ivr0]     = ivr_queue[i] & 0xff;
+		fake_tm[ivr0 + 1] = ivr_queue[i] >> 8;
+		if (!(ivr_queue[i] & 0x100))
+			break;
+		mvb_run_int_handler(&dev, ivr_queue[i] & 0xff);
+		if ((ivr_queue[i] & 0xff) == MVB_INT_DTI2)
+			dti2_calls++;
+	}
+
+	check(dti2_calls == 2, "DTI2 %d mal statt zweimal behandelt", dti2_calls);
+
+	/* Der echte Ablauf: Register leert sich, danach steht null drin */
+	fake_tm[ivr0] = 0;
+	fake_tm[ivr0 + 1] = 0;
+	mvb_drain_ivr(&dev, MVBC_IVR0, 0);
+	check(sa_r16(&dev, MVBC_IVR0) == 0,
+	      "IVR0 wurde nicht auf null gesetzt");
+
+	/* Ein haengendes Register darf den Kernel nicht festhalten */
+	fake_tm[ivr0] = MVB_INT_DTI2;
+	fake_tm[ivr0 + 1] = 0x01;      /* Bit 8 bleibt stehen */
+	dti2_calls = 0;
+	fev_calls = 0;
+	mvb_drain_ivr(&dev, MVBC_IVR0, 0);
+	check(sa_r16(&dev, MVBC_IVR0) == 0,
+	      "haengendes IVR0 wurde nicht genullt");
+	printf("  Schranke greift, IVR0 danach 0x%04x\n",
+	       sa_r16(&dev, MVBC_IVR0));
+
+	/* Die Nummern aus IVR1 liegen um 16 versetzt */
+	check(16 + (MVB_INT_FEV - 16) == MVB_INT_FEV, "Versatz IVR1 falsch");
+	check(MVB_INT_FEV - 16 == 7, "FEV meldet sich in IVR1 nicht als 7");
+	check(MVB_INT_RQE - 16 == 11, "RQE meldet sich in IVR1 nicht als 11");
+	printf("  IVR1 meldet FEV als 7, RQE als 11 (+16 Versatz)\n");
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -747,6 +811,7 @@ int main(int argc, char **argv)
 	test_md_receive();
 	test_hardw_config();
 	test_interrupts();
+	test_ivr_drain();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;
