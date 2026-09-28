@@ -33,8 +33,12 @@ IMAGE_INSTALL:append = " \
     xorg-conf-myboard \
     "
 IMAGE_INSTALL:append = " udev-rules-myboard"
-# MVB: Kernel-Treiber (mappt das 64-KB-Traffic-Memory) + Userspace-Lib/Tool
-IMAGE_INSTALL:append = " pixymvbip libmvb"
+# MVB vorerst deaktiviert (Zielgeraet Pixy 1000 ohne MVB-Nutzung).
+# Die Rezepte bleiben im Layer erhalten — zum Reaktivieren genuegt es,
+# die folgende Zeile wieder einzukommentieren. Achtung: der Treiber
+# pixymvbip ist auf die LPC/ISA-Anbindung des INC-100 ausgelegt; das
+# Pixy 1000 bindet MVB ueber den PCIe-Interface-Converter an.
+# IMAGE_INSTALL:append = " pixymvbip libmvb"
 IMAGE_INSTALL:append = " nfs-utils"
 IMAGE_INSTALL:append = " nfs-devmount"
 IMAGE_INSTALL:append = " timesync-myboard"
