@@ -64,10 +64,17 @@
 #define MD_RQ_OFFSET		0x0a0a0
 #define MD_RQ_LLRS		0xde
 
-static int mvb_irq;
-module_param(mvb_irq, int, 0444);
-MODULE_PARM_DESC(mvb_irq,
-	"0 = Message-Daten werden gepollt (Vorgabe), >0 = Interruptbetrieb");
+/*
+ * Wie im Original: Parametername "irq", Vorgabe 7. Der Wert landet als
+ * ISA-Interruptnummer im BCR; groesser 0 heisst ausserdem, dass
+ * empfangene Messages per Interrupt (DTI1) abgeholt werden und read()
+ * bzw. poll() den Empfangsdispatcher nicht selbst aufrufen. Ein
+ * "options pixy_mvblli irq=..." fuer das Original muss auch hier laden.
+ */
+static int mvb_irq = 7;
+module_param_named(irq, mvb_irq, int, 0444);
+MODULE_PARM_DESC(irq,
+	"ISA-Interrupt des MVBC; 0 = Message-Daten werden gepollt (Vorgabe 7)");
 
 /*
  * Diagnosezaehler, lesbar unter /sys/module/pixy_mvblli/parameters/.
@@ -157,6 +164,13 @@ struct mvblli_dev {
 	int rcv_elems, rcv_filled, rcv_rd, rcv_wr;
 	spinlock_t md_lock;
 	wait_queue_head_t wait_poll;
+	/*
+	 * Empfangsmeldungen fuer poll(), beide modulo 16 wie im Original:
+	 * der DTI1-Pfad zaehlt dispatched hoch, poll() zieht signaled nach
+	 * und meldet je Schritt einmal "lesbar".
+	 */
+	int md_rcv_irq_dispatched;
+	int md_rcv_irq_signaled;
 
 	struct mutex lock;
 };
@@ -838,11 +852,13 @@ static int mvb_md_q_init(struct mvblli_dev *d)
 	sa_w16(d, SA_PP_PCS + TM_PP_MSRC * 8, 0xc81c);
 
 	/*
-	 * Bit 5 der Message-Senke meldet den Eingang per Interrupt. Am
-	 * Geraet gemessen traegt MSNK 0xC424, das Bit ist also gesetzt -
-	 * unabhaengig davon, ob read() und poll() zusaetzlich pollen.
+	 * Bit 5 der Message-Senke meldet den Eingang per Interrupt (DTI1).
+	 * Das Original setzt es nur im Interruptbetrieb; mit der Vorgabe
+	 * irq = 7 ergibt das die gemessenen 0xC424.
 	 */
-	msnk = 0xc404 | 0x20;
+	msnk = 0xc404;
+	if (mvb_irq > 0)
+		msnk |= 0x20;
 	sa_w16(d, SA_PP_PCS + TM_PP_MSNK * 8, msnk);
 
 	return 0;
@@ -858,9 +874,10 @@ static void mvb_md_store(struct mvblli_dev *d, u32 data_off)
 	if (d->rcv_filled >= d->rcv_elems) {
 		/*
 		 * Ring voll: das Frame wird stillschweigend verworfen.
-		 * Das Original verhaelt sich genauso - kein Fehler, kein Log.
+		 * Das Original verhaelt sich genauso - kein Fehler, kein Log,
+		 * und auch kein Statusbit: rq_overflow wird dort nirgends
+		 * gesetzt, nur geloescht.
 		 */
-		d->rq_overflow |= 4;
 		spin_unlock_irqrestore(&d->md_lock, flags);
 		return;
 	}
@@ -876,35 +893,33 @@ static void mvb_md_store(struct mvblli_dev *d, u32 data_off)
 }
 
 /*
- * Holt alle vom Controller abgelegten Frames aus dem Empfangsring des
- * Traffic Memory. Der Waechter wandert dabei mit.
+ * Holt EIN vom Controller abgelegtes Frame aus dem Empfangsring des
+ * Traffic Memory - wie mvb_md_dispatcher im Original, das keine
+ * Schleife hat. Im Pollbetrieb holt also jedes read() hoechstens ein
+ * Frame ab, im Interruptbetrieb jede DTI1-Meldung eines. Was nicht
+ * abgeholt ist, bleibt im Ring des Controllers. Der Waechter wandert
+ * dabei mit.
  */
 static void mvb_md_dispatcher(struct mvblli_dev *d)
 {
-	int guard = MD_RQ_LLRS + 1;
+	u32 cur = p16_to_off(d->p16_rq);
+	u16 nxt_p16 = tm_r16(d, cur + 2);
+	u32 nxt;
+	u16 buf_p16;
 
-	while (guard--) {
-		u32 cur = p16_to_off(d->p16_rq);
-		u16 nxt_p16 = tm_r16(d, cur + 2);
-		u32 nxt;
-		u16 buf_p16;
+	if (sa_r16(d, SA_QDT + 4) == nxt_p16)
+		return;				/* nichts abzuholen */
 
-		if (sa_r16(d, SA_QDT + 4) == nxt_p16)
-			break;			/* nichts abzuholen */
+	nxt = p16_to_off(nxt_p16);
+	buf_p16 = tm_r16(d, nxt);
 
-		nxt = p16_to_off(nxt_p16);
-		buf_p16 = tm_r16(d, nxt);
-		if (!buf_p16)
-			break;
+	/* Link_Header pruefen: nur TCN-RTP-Frames (PT = 1000b) */
+	if ((tm_r16(d, p16_to_off(buf_p16) + 2) & 0xf0) == 0x80)
+		mvb_md_store(d, p16_to_off(buf_p16));
 
-		/* Link_Header pruefen: nur TCN-RTP-Frames (PT = 1000b) */
-		if ((tm_r16(d, p16_to_off(buf_p16) + 2) & 0xf0) == 0x80)
-			mvb_md_store(d, p16_to_off(buf_p16));
-
-		tm_w16(d, nxt, 0);		/* Waechter rueckt weiter */
-		tm_w16(d, cur, buf_p16);	/* Puffer ans vorherige LLR */
-		d->p16_rq = nxt_p16;
-	}
+	tm_w16(d, nxt, 0);			/* Waechter rueckt weiter */
+	tm_w16(d, cur, buf_p16);		/* Puffer ans vorherige LLR */
+	d->p16_rq = nxt_p16;
 }
 
 /*
@@ -982,12 +997,18 @@ static int mvb_sndp(struct mvblli_dev *d, u16 dd, int control, const u16 *packet
 	return 0;
 }
 
+/*
+ * lm_m_v_send_queue_flush im Original: dem Controller den Sendeabbruch
+ * melden (MR = 0x0800) und beide Sendeeintraege der QDT austragen. Ringe
+ * und Softwarepositionen bleiben stehen; beim naechsten Senden traegt
+ * mvb_sndp die QDT von der aktuellen Position aus neu ein, alles
+ * dazwischen ist verworfen.
+ */
 static void mvb_md_flush_send_queue(struct mvblli_dev *d)
 {
+	sa_w16(d, MVBC_MR, 0x0800);
 	sa_w16(d, SA_QDT + 0, 0);
 	sa_w16(d, SA_QDT + 2, 0);
-	d->p16_tq0 = mvb_md_install_q(d, MD_TQ0_OFFSET, MD_TQ0_LLRS);
-	d->p16_tq1 = mvb_md_install_q(d, MD_TQ1_OFFSET, MD_TQ1_LLRS);
 }
 
 /*
@@ -1045,10 +1066,16 @@ static void mvb_fev_handler(struct mvblli_dev *d)
 static void mvb_run_int_handler(struct mvblli_dev *d, unsigned int nr)
 {
 	switch (nr) {
+	/*
+	 * mvb_md_wakeup_messenger -> mvb_md_rcv_cb im Original: nur im
+	 * Interruptbetrieb abholen, Empfangsmeldung zaehlen, poll() wecken.
+	 */
 	case MVB_INT_DTI1:
-		/* daran haengt im Original das Wecken des Messengers */
 		dbg_dti1++;
+		if (mvb_irq == 0)
+			break;
 		mvb_md_dispatcher(d);
+		d->md_rcv_irq_dispatched = (d->md_rcv_irq_dispatched + 1) & 0xf;
 		wake_up_interruptible(&d->wait_poll);
 		break;
 	case MVB_INT_DTI2:
@@ -1375,6 +1402,8 @@ static int mvb_init_board(struct mvblli_dev *d)
 		goto err_free;
 	}
 	d->rcv_filled = d->rcv_rd = d->rcv_wr = 0;
+	d->md_rcv_irq_dispatched = 0;
+	d->md_rcv_irq_signaled = 0;
 
 	ret = mvb_md_q_init(d);
 	if (ret)
@@ -1382,20 +1411,21 @@ static int mvb_init_board(struct mvblli_dev *d)
 
 	/*
 	 * Das untere Byte des BCR traegt die Interruptnummer, in beiden
-	 * Halbbytes. Bei mvb_irq = 0 schreibt das eine Null - genau der
-	 * gemessene Stand BCR = 0x2600.
+	 * Halbbytes. Wie im Original nur bei irq > 0; sonst bleibt das BCR
+	 * unberuehrt.
 	 */
-	iowrite16(((u16)mvb_irq & 0xf) | (((u16)mvb_irq << 4) & 0xf0) |
-		  (ioread16(d->pisa + ISA_BCR) & 0xff00),
-		  d->pisa + ISA_BCR);
+	if (mvb_irq > 0)
+		iowrite16(((u16)mvb_irq & 0xf) | (((u16)mvb_irq << 4) & 0xf0) |
+			  (ioread16(d->pisa + ISA_BCR) & 0xff00),
+			  d->pisa + ISA_BCR);
 
 	/*
 	 * Erst jetzt die Interruptquellen freigeben - vorher steht der
-	 * Empfangsring nicht. Die vier Anschluesse ergeben zusammen
-	 * IMR0 = 0x0003 und IMR1 = 0x0880, genau den gemessenen Stand.
-	 * Das Original verteilt sie auf mvb_init_board (FEV, DTI2) und
-	 * mvb_md_init (Empfang, Ueberlauf); fuer das Ergebnis im Register
-	 * ist die Reihenfolge ohne Belang.
+	 * Empfangsring nicht. FEV und DTI2 immer (mvb_init_board), DTI1
+	 * (Message eingegangen) und RQE (Empfangsqueue voll) nur im
+	 * Interruptbetrieb (mvb_md_q_init mit use_ints). Mit der Vorgabe
+	 * irq = 7 ergibt das IMR0 = 0x0003 und IMR1 = 0x0880, den
+	 * gemessenen Stand.
 	 */
 	/*
 	 * Muss vor dem Freigeben der Masken stehen: der Interruptdienst
@@ -1408,8 +1438,10 @@ static int mvb_init_board(struct mvblli_dev *d)
 
 	mvb_int_connect(d, MVB_INT_FEV);
 	mvb_int_connect(d, MVB_INT_DTI2);
-	mvb_int_connect(d, MVB_INT_DTI1);
-	mvb_int_connect(d, MVB_INT_RQE);
+	if (mvb_irq > 0) {
+		mvb_int_connect(d, MVB_INT_DTI1);
+		mvb_int_connect(d, MVB_INT_RQE);
+	}
 
 	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
 		d->brd_id, d->status.hw_version);
@@ -1995,26 +2027,29 @@ static ssize_t pixy_mvblli_write(struct file *filp, const char __user *data,
 	return MVB_MSG_FRAME_SIZE;
 }
 
+/*
+ * poll() wie im Original: ohne Interruptbetrieb nie lesbar. Im
+ * Interruptbetrieb genau einmal "lesbar" je Empfangsmeldung aus dem
+ * DTI1-Pfad - nicht etwa, solange der Softwarering Frames enthaelt.
+ * "Schreibbar" meldet das Original nie. Geprueft wird hier, wie dort,
+ * irq != 0 (nicht > 0).
+ */
 static __poll_t pixy_mvblli_poll(struct file *filp, poll_table *wait)
 {
 	struct mvblli_dev *d = filp->private_data;
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM;
-	unsigned long flags;
 
-	if (!d || !d->status.is_init)
+	if (!d)
 		return EPOLLERR;
+	if (mvb_irq == 0)
+		return 0;
 
-	poll_wait(filp, &d->wait_poll, wait);
+	if (d->md_rcv_irq_dispatched == d->md_rcv_irq_signaled) {
+		poll_wait(filp, &d->wait_poll, wait);
+		return 0;
+	}
 
-	if (mvb_irq <= 0)
-		mvb_md_dispatcher(d);
-
-	spin_lock_irqsave(&d->md_lock, flags);
-	if (d->rcv_filled)
-		mask |= EPOLLIN | EPOLLRDNORM;
-	spin_unlock_irqrestore(&d->md_lock, flags);
-
-	return mask;
+	d->md_rcv_irq_signaled = (d->md_rcv_irq_signaled + 1) & 0xf;
+	return EPOLLIN | EPOLLRDNORM;
 }
 
 /*

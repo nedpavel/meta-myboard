@@ -308,6 +308,11 @@ def snapshot(mm, outdir, step, name, sa_off=SA_OFF, tm=True):
         else:
             v = struct.unpack_from("<H", mm, TM + sa_off + off)[0]
             lines.append("SA+0x%03X  %04X  %s" % (off, v, nm))
+    # Fensterregister der ISA-Bruecke: BASR0/1 legen das TM-Fenster fest,
+    # das untere Byte des BCR traegt die Interruptnummer (Parameter irq)
+    for off, nm in ((0x320, "BASR0"), (0x322, "BASR1"), (0x324, "BCR")):
+        v = struct.unpack_from("<H", mm, ISA + off)[0]
+        lines.append("ISA+0x%03X %04X  %s" % (off, v, nm))
     with open(os.path.join(outdir, "%02d_%s.regs" % (step, name)), "w") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -438,6 +443,16 @@ def run(outdir, allow_md, go):
     log = Log(os.path.join(outdir, "log.txt"))
 
     log.line("Treiber: " + ", ".join(modules()))
+    params = []
+    for f in sorted(glob.glob("/sys/module/pixy_mvblli/parameters/*")):
+        name = os.path.basename(f)
+        if name.startswith("dbg_"):
+            continue
+        try:
+            params.append("%s=%s" % (name, open(f).read().strip()))
+        except OSError:
+            params.append("%s=?" % name)
+    log.line("Parameter LLI: %s" % (" ".join(params) or "keine lesbar"))
     log.line("")
 
     if WIPE and not wipe_tm(log):
@@ -591,13 +606,36 @@ def run(outdir, allow_md, go):
         call(log, "read() PD", lambda: pd_read(fd, rd, WRITE_SIZE))
 
     if allow_md:
-        md = mvb_port(3, 6)
-        for i in range(2, 16):
-            struct.pack_into("<H", md, 4 + i * 2, 0x1234)
-        call(log, "write() MD", lambda: pd_write(fd, md, 32))
+        # Ohne START bleibt alles in den Sendequeues liegen und laesst
+        # sich byteweise vergleichen: Link_Header, Waechter, QDT, die
+        # Ereignisframe-Ports EF0/EF1 und MR. Danach Verwerfen und
+        # erneutes Senden - das traegt die QDT ab der aktuellen Position
+        # neu ein.
+        def md_frame(typ, fill):
+            md = mvb_port(typ, 6)
+            for i in range(2, 16):
+                struct.pack_into("<H", md, 4 + i * 2, fill + i)
+            return md
+        call(log, "write() MD niedrig",
+             lambda: pd_write(fd, md_frame(3, 0x1200), 32))
+        call(log, "write() MD niedrig 2",
+             lambda: pd_write(fd, md_frame(3, 0x1300), 32))
+        call(log, "write() MD hoch",
+             lambda: pd_write(fd, md_frame(2, 0x2200), 32))
         snapshot(mm, outdir, log.step, "writemd")
+        call(log, "write() MD Port 256",
+             lambda: pd_write(fd, mvb_port(3, 256), 32))
+        g3 = bytearray(4)
+        call(log, "MD_GET_STATUS (MD)",
+             lambda: io(IOC["MD_GET_STATUS"], g3, True))
+        log.line("     status 0x%04X" % struct.unpack_from("<H", g3)[0])
         call(log, "MD_FLUSH_QUEUE", lambda: io(IOC["MD_FLUSH_QUEUE"]))
         snapshot(mm, outdir, log.step, "mdflush")
+        call(log, "write() MD nach Flush",
+             lambda: pd_write(fd, md_frame(3, 0x1400), 32))
+        snapshot(mm, outdir, log.step, "mdnachflush")
+        rd = mvb_port(3, 6)
+        call(log, "read() MD", lambda: pd_read(fd, rd, 32))
     else:
         log.line("   (Message-Daten uebersprungen, --md erlaubt sie)")
 
@@ -854,13 +892,27 @@ def describe(off, rev):
     return "da_data %d Seite %d Wort %d" % (idx, page, w)
 
 
+ISA_KEY = 0x10000         # ISA-Register im Registervergleich
+ISA_NAMES = {0x320: "BASR0", 0x322: "BASR1", 0x324: "BCR"}
+
+
 def read_regs(path):
     out = {}
     for ln in open(path).read().splitlines():
         f = ln.split()
-        if len(f) >= 2 and f[1] != "----":
+        if len(f) < 2 or f[1] == "----":
+            continue
+        if f[0].startswith("ISA+0x"):
+            out[ISA_KEY | int(f[0][6:], 16)] = int(f[1], 16)
+        else:
             out[int(f[0][5:], 16)] = int(f[1], 16)
     return out
+
+
+def reg_label(o):
+    if o & ISA_KEY:
+        return "ISA+0x%03X %-5s" % (o & 0xFFF, ISA_NAMES.get(o & 0xFFF, ""))
+    return "SA+0x%03X %-5s" % (o, REGNAMES.get(o, ""))
 
 
 def volatile_line(s):
@@ -974,9 +1026,8 @@ def compare(da, db):
         prev = d
         print("  %-24s UNTERSCHIED" % name)
         for o, x, y in d:
-            print("      SA+0x%03X %-5s A %04X  B %s"
-                  % (o, REGNAMES.get(o, ""), x,
-                     "%04X" % y if y is not None else "----"))
+            print("      %s A %04X  B %s"
+                  % (reg_label(o), x, "%04X" % y if y is not None else "----"))
 
     print("\n%s" % ("ALLES GLEICH" if rc == 0 else "%d Stellen weichen ab" % rc))
     return rc

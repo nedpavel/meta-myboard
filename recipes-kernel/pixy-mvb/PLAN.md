@@ -164,12 +164,54 @@ Message-Daten (`write`/`read`/`poll`, Sendequeue, Empfangsdispatcher),
 `read()` im Betrieb, der Interruptpfad und der Board-Treiber `pixy-mvb.ko`
 selbst (beide Läufe nutzten den Nachbau).
 
+## 2.3 Gegenlesen: Message-Daten und Interruptbetrieb
+
+Gegen Dekompilat und, wo Ghidra unsicher war, Disassembly. Befunde,
+alle behoben und in `tm_replay` geprüft (484 Prüfungen, 0 Fehler):
+
+| Stelle | Original | Nachbau bisher |
+|---|---|---|
+| Modulparameter | heißt **`irq`**, Vorgabe **7** | hieß `mvb_irq`, Vorgabe 0 – ein `options pixy_mvblli irq=…` hätte das Laden verhindert |
+| BCR | Interruptnummer nur bei `irq > 0` geschrieben | immer, bei 0 als 0 |
+| `DTI1`/`RQE` | nur bei `irq > 0` angemeldet (`mvb_md_q_init`) | immer |
+| `MSNK` Bit 5 | nur bei `irq > 0` | immer |
+| `MD_FLUSH_QUEUE` | `MR = 0x0800`, QDT-Sendeeinträge 0, Ringe bleiben | kein `MR`, Ringe neu aufgebaut |
+| Empfangsdispatcher | **ein** Frame je Aufruf | Schleife über alle |
+| `rq_overflow` | wird nie gesetzt | bei vollem Softwarering Bit 2 |
+| `poll()` | bei `irq = 0` nie lesbar; sonst je DTI1-Meldung einmal `POLLIN\|POLLRDNORM` (Zähler modulo 16); nie `POLLOUT` | `POLLOUT` immer, `POLLIN` solange Frames im Ring |
+| DTI1-Dienst | nur bei `irq ≠ 0`: Dispatcher, Zähler, wecken | immer Dispatcher |
+
+Gleich befunden: `write()`, `read()`, `mvb_sndp` (QDT beim ersten
+Senden, Link_Header, Wächter, EF0/EF1 nach `q_tq_priority`, `MR`),
+Interruptdienst (`IVR1` vor `IVR0`, Schranke 20, danach 0).
+
+### Offene Frage mit Gewicht: kommen Interrupts an?
+
+Mit `irq = 7` holt das Original empfangene Messages **nur** im
+DTI1-Interrupt ab. Im Produktivbetrieb wurden Messages empfangen und
+abgeholt – dort kamen also vermutlich Interrupts an. In allen unseren
+Läufen lief aber **der nachgebaute Board-Treiber** darunter, und dort kam
+nie ein Interrupt an, auch nicht mit dem originalen LLI. Die
+MSI-Einrichtung ist im Code gleich; ob der Unterschied im Board-Treiber
+liegt oder im Produktivbetrieb doch mit `irq = 0` gepollt wird, entscheidet
+eine Messung im Produktivzustand (nach Neustart):
+
+```sh
+ls /sys/module/pixy_mvblli/parameters/; cat /sys/module/pixy_mvblli/parameters/irq
+grep -rs pixy /etc/modprobe.d /usr/lib/modprobe.d
+grep -i pixy /proc/interrupts; sleep 10; grep -i pixy /proc/interrupts
+```
+
+Bis das geklärt ist: Der Nachbau verhält sich mit `irq = 7` wie das
+Original. Auf einem Board-Treiber ohne Interrupts empfängt er deshalb
+keine Messages – genau wie das Original dort.
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1, 2.2, Ringbelegung und Schließen erledigt und am Gerät bestätigt (Lauf 3: ALLES GLEICH); 2.3 Gegenlesen in Arbeit, zuerst Message-Daten |
+| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Offen: Interrupt-Messung im Produktivzustand, Board-Treiber `pixy-mvb.ko` |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
-| 4 | offen |
+| 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush |
 | 5 | offen |

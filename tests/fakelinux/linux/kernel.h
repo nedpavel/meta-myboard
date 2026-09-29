@@ -117,6 +117,7 @@ static inline void iowrite32(u32 v, void *p)
 #define O_RDWR   2
 
 #define module_param(a, b, c)
+#define module_param_named(n, v, t, p)
 #define MODULE_PARM_DESC(a, b)
 #define module_init(f)
 #define module_exit(f)

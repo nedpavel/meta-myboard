@@ -571,6 +571,34 @@ static void test_md_receive(void)
 	check(dev.rcv_filled == 0,
 	      "Frame mit falschem Protokolltyp wurde angenommen");
 	printf("  Fremdes Protokoll korrekt verworfen\n");
+
+	/*
+	 * Zwei Frames liegen an: wie im Original holt jeder Aufruf genau
+	 * eines ab, das zweite bleibt im Ring des Controllers.
+	 */
+	{
+		u16 p = dev.p16_rq, n1, n2;
+
+		dev.rcv_filled = dev.rcv_rd = dev.rcv_wr = 0;
+		payload[2] = 0x80;
+		n1 = tm_r16(&dev, p16_to_off(p) + 2);
+		n2 = tm_r16(&dev, p16_to_off(n1) + 2);
+		memcpy(fake_tm + p16_to_off(tm_r16(&dev, p16_to_off(n1))),
+		       payload, sizeof(payload));
+		memcpy(fake_tm + p16_to_off(tm_r16(&dev, p16_to_off(n2))),
+		       payload, sizeof(payload));
+		sa_w16(&dev, SA_QDT + 4, tm_r16(&dev, p16_to_off(n2) + 2));
+
+		mvb_md_dispatcher(&dev);
+		check(dev.rcv_filled == 1 && dev.p16_rq == n1,
+		      "erster Aufruf holte %d Frames", dev.rcv_filled);
+		mvb_md_dispatcher(&dev);
+		check(dev.rcv_filled == 2 && dev.p16_rq == n2,
+		      "zweiter Aufruf: %d Frames", dev.rcv_filled);
+		mvb_md_dispatcher(&dev);
+		check(dev.rcv_filled == 2, "dritter Aufruf holte mehr");
+		printf("  Zwei anstehende Frames: je Aufruf eines\n");
+	}
 }
 
 /* ---------------------------------------------------------- Test 8 */
@@ -1121,6 +1149,84 @@ static void test_deinit(void)
 	       sa_r16(&dev, MVBC_SCR), ioread16(isa + ISA_BCR));
 }
 
+/* ---------------------------------------------------------- Test 15 */
+/*
+ * MD_FLUSH_QUEUE wie lm_m_v_send_queue_flush: MR = 0x0800, beide
+ * Sendeeintraege der QDT auf 0, Ringe und Softwareposition unberuehrt.
+ * Das naechste Senden traegt die QDT ab der aktuellen Position neu ein.
+ * Dazu MSNK Bit 5 nur im Interruptbetrieb.
+ */
+static void test_flush_and_irq_mode(void)
+{
+	static u8 before[0xC000 - MD_TQ0_OFFSET];
+	u16 pkt[16] = { 0 };
+	u16 pos;
+	int saved = mvb_irq;
+
+	printf("\n--- Test 15: Sendequeue verwerfen, Interruptbetrieb ---\n");
+
+	dev.q_tq_priority = 0;
+	mvb_irq = 0;
+	mvb_md_q_init(&dev);
+	check(sa_r16(&dev, SA_PP_PCS + TM_PP_MSNK * 8) == 0xc404,
+	      "MSNK bei irq=0: 0x%04x", sa_r16(&dev, SA_PP_PCS + TM_PP_MSNK * 8));
+	mvb_irq = 7;
+	mvb_md_q_init(&dev);
+	check(sa_r16(&dev, SA_PP_PCS + TM_PP_MSNK * 8) == 0xc424,
+	      "MSNK bei irq=7: 0x%04x", sa_r16(&dev, SA_PP_PCS + TM_PP_MSNK * 8));
+	mvb_irq = saved;
+
+	check(mvb_sndp(&dev, 6, 0, pkt) == 0, "Senden abgelehnt");
+	check(mvb_sndp(&dev, 6, 0, pkt) == 0, "zweites Senden abgelehnt");
+	pos = dev.p16_tq1;
+	memcpy(before, fake_tm + MD_TQ0_OFFSET, sizeof(before));
+
+	mvb_md_flush_send_queue(&dev);
+	check(sa_r16(&dev, MVBC_MR) == 0x0800, "MR 0x%04x statt 0x0800",
+	      sa_r16(&dev, MVBC_MR));
+	check(!sa_r16(&dev, SA_QDT) && !sa_r16(&dev, SA_QDT + 2),
+	      "QDT-Sendeeintraege nicht 0");
+	check(!memcmp(before, fake_tm + MD_TQ0_OFFSET, sizeof(before)) &&
+	      dev.p16_tq1 == pos, "Ringe oder Position veraendert");
+
+	check(mvb_sndp(&dev, 6, 0, pkt) == 0, "Senden nach Flush abgelehnt");
+	check(sa_r16(&dev, SA_QDT + 2) == pos,
+	      "QDT xmit_q1 0x%04x statt Position 0x%04x",
+	      sa_r16(&dev, SA_QDT + 2), pos);
+	printf("  Flush: MR 0x0800, Ringe unveraendert, danach QDT ab 0x%04x\n",
+	       pos);
+	printf("  MSNK: irq=0 -> 0xC404, irq=7 -> 0xC424\n");
+
+	/* poll(): eine Meldung je DTI1, ohne Interruptbetrieb nie */
+	{
+		struct file f = { .private_data = &dev };
+		unsigned int r1, r2, r3, i, hits = 0;
+
+		dev.md_rcv_irq_dispatched = dev.md_rcv_irq_signaled = 0;
+		mvb_irq = 0;
+		mvb_run_int_handler(&dev, MVB_INT_DTI1);
+		check(pixy_mvblli_poll(&f, NULL) == 0, "poll bei irq=0 nicht 0");
+		check(dev.md_rcv_irq_dispatched == 0,
+		      "DTI1 bei irq=0 gezaehlt");
+		mvb_irq = 7;
+		check(pixy_mvblli_poll(&f, NULL) == 0, "poll ohne Meldung nicht 0");
+		mvb_run_int_handler(&dev, MVB_INT_DTI1);
+		mvb_run_int_handler(&dev, MVB_INT_DTI1);
+		r1 = pixy_mvblli_poll(&f, NULL);
+		r2 = pixy_mvblli_poll(&f, NULL);
+		r3 = pixy_mvblli_poll(&f, NULL);
+		check(r1 == 0x41 && r2 == 0x41 && r3 == 0,
+		      "poll nach zwei Meldungen 0x%x 0x%x 0x%x", r1, r2, r3);
+		for (i = 0; i < 20; i++) {
+			mvb_run_int_handler(&dev, MVB_INT_DTI1);
+			hits += pixy_mvblli_poll(&f, NULL) == 0x41;
+		}
+		check(hits == 20, "Zaehler modulo 16: %u von 20", hits);
+		mvb_irq = saved;
+		printf("  poll: irq=0 -> 0; irq=7 -> je DTI1 einmal POLLIN|RDNORM\n");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -1149,6 +1255,7 @@ int main(int argc, char **argv)
 	test_ivr_drain();
 	test_ioctl_abi();
 	test_ring_layout();
+	test_flush_and_irq_mode();
 	test_deinit();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
