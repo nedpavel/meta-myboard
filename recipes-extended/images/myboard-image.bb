@@ -62,7 +62,6 @@ IMAGE_INSTALL:append = " \
 	iproute2 \
 	iproute2-tc \
 	iptables \
-	can-utils \
 	libftdi \
 	alsa-utils \
 	alsa-state \
@@ -88,12 +87,8 @@ IMAGE_INSTALL:append = " \
 	gdb \
 	python3 \
 	python3-pyserial \
-	python3-can \
 	watchdog \
-	sja1000-modprobe \
-    	can-modules-load \
-    	can-network \
-    	can-utils \
+	network-pixy1000 \
     	myboard-gui \
     	xserver-xorg \
     	xf86-input-evdev \

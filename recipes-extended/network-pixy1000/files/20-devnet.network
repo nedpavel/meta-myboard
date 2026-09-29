@@ -1,0 +1,14 @@
+# Pixy 1000 — Entwicklungsnetz (Stecker X3), fuer den NFS-Dev-Share
+#
+# 02:00.0 = "Ethernet Controller 1" laut Architekturbild -> Stecker X3.
+# Gleiche Adressierung wie beim INC-100, damit der bestehende Workflow
+# unveraendert funktioniert:
+#   Board      192.168.1.200
+#   Build-Host 192.168.1.202  (exportiert /srv/nfs/myboard-dev)
+# Das Board mountet die Freigabe per Automount unter /mnt/dev
+# (Recipe nfs-devmount).
+[Match]
+Path=pci-0000:02:00.0
+
+[Network]
+Address=192.168.1.200/24

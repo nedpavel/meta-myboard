@@ -1,0 +1,23 @@
+# Pixy 1000 — Betriebsnetz (Stecker X2)
+#
+# Gematcht wird ueber den PCI-Pfad statt ueber den Interface-Namen:
+# 01:00.0 ist laut lspci "Ethernet Controller (2) I225-IT" und laut
+# Architekturbild "Ethernet Controller 0" -> Stecker X2. Der Pfad bleibt
+# stabil, egal wie systemd das Interface benennt (enp1s0, eth0, ...).
+[Match]
+Path=pci-0000:01:00.0
+
+[Network]
+# TODO: feste Adresse der Anlage eintragen, sobald bekannt, z.B.
+#   Address=10.0.0.50/24
+#   Gateway=10.0.0.1
+# und dann DHCP=yes entfernen.
+#
+# Bis dahin DHCP als Platzhalter: schadet nicht, wenn kein Server
+# antwortet, und haelt den Link oben.
+DHCP=yes
+
+[DHCPv4]
+# Keine Default-Route aus dem Betriebsnetz uebernehmen, damit die
+# Entwicklungsverbindung auf X3 nicht ueberschrieben wird.
+UseRoutes=no
