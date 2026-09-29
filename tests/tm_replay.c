@@ -304,20 +304,47 @@ static void test_allocator(void)
 		}
 	}
 
-	/* PCS-Woerter gegen das Original */
+	/*
+	 * PCS-Woerter gegen das Original. Nach PD_CONF traegt nur eine Senke
+	 * ihren Typ; eine Quelle bleibt passiv, bis sie das erste Mal
+	 * beschrieben wird (lp_ts_open_port / apd_put_port).
+	 */
 	{
-		int diff = 0;
+		int diff = 0, passive = 0, first_src = -1;
+		u16 buf[16] = { 0 };
 
 		for (i = 0; i < count; i++) {
 			u16 w0 = tm_r16(&dev, lp_pcs_off(&dev, new_idx[i]));
 			u16 exp = ((u16)lp_len_2_fcode(list[i].size)
 				   << TM_PCS_FCODE_OFF) |
-				  (list[i].type << TM_PCS_TYPE_OFF);
+				  ((list[i].type == TM_PCS_TYPE_SNK)
+				   ? (TM_PCS_TYPE_SNK << TM_PCS_TYPE_OFF) : 0);
 
 			if (w0 != exp)
 				diff++;
+			if (list[i].type == TM_PCS_TYPE_SRC) {
+				passive += !(w0 & TM_PCS_TYPE_MSK);
+				if (first_src < 0)
+					first_src = i;
+			}
 		}
 		check(diff == 0, "%d PCS-Woerter weichen ab", diff);
+		check(passive == 3, "%d statt 3 Quellen passiv", passive);
+		printf("  Quellen nach PD_CONF passiv: %d von 3\n", passive);
+
+		if (first_src >= 0) {
+			u16 port = list[first_src].prt_addr;
+			u32 pcs = lp_pcs_off(&dev, new_idx[first_src]);
+
+			check(apd_put_port(&dev, port, buf,
+					   list[first_src].size) == 0,
+			      "erstes Schreiben auf Quelle %u abgelehnt", port);
+			check(((tm_r16(&dev, pcs) >> TM_PCS_TYPE_OFF) & 3) ==
+			      TM_PCS_TYPE_SRC,
+			      "Quelle %u nach dem Schreiben nicht aktiv", port);
+			printf("  Quelle %u nach erstem write(): PCS 0x%04x\n",
+			       port, tm_r16(&dev, pcs));
+		}
 		printf("  PCS-Wort 0 fuer alle %d Ports korrekt\n", count);
 	}
 
@@ -390,8 +417,9 @@ static void test_pd_roundtrip(void)
 					      2 << (tm_r16(&dev, lp_pcs_off(&dev, idx))
 						    >> TM_PCS_FCODE_OFF));
 
-			check(rc == 8, "Schreiben auf Senke %d liefert %d "
-			      "statt 8", p, rc);
+			/* 9 wie apd_put_port im Original, nach aussen EIO */
+			check(rc == 9, "Schreiben auf Senke %d liefert %d "
+			      "statt 9", p, rc);
 			printf("  Schreiben auf Senke %d korrekt abgewiesen\n", p);
 			break;
 		}
@@ -995,6 +1023,67 @@ static void test_ioctl_abi(void)
 	      sa_r16(&dev, MVBC_STSR));
 	printf("  PD_CONF mit leerer Liste: STSR 0x%04x\n",
 	       sa_r16(&dev, MVBC_STSR));
+
+	/* Doppelter Port in einer Liste: EIO, danach PIT und PCS leer */
+	{
+		u16 dup[1 + 2 * 3] = { 2, 491, 4, 2, 491, 4, 2 };
+		u16 two[1 + 2 * 3] = { 2, 181, 4, 1, 491, 4, 2 };
+
+		check(ioc(IOCTL_PIXY_MVBLLI_PD_CONF, (unsigned long)dup) ==
+		      -EIO, "doppelter Port nicht EIO");
+		check(!lp_port_index(&dev, 491), "PIT nach Fehler nicht leer");
+		check(ioc(IOCTL_PIXY_MVBLLI_PD_CONF, (unsigned long)two) == 0,
+		      "PD_CONF 181/491 abgelehnt");
+		check(pcs_w0(181) == 0x1400 && pcs_w0(491) == 0x1000,
+		      "PCS 181 0x%04x, 491 0x%04x statt 0x1400/0x1000",
+		      pcs_w0(181), pcs_w0(491));
+		printf("  PD_CONF: Doppel EIO und geleert; Senke 0x%04x, "
+		       "Quelle passiv 0x%04x\n", pcs_w0(181), pcs_w0(491));
+	}
+}
+
+/* ---------------------------------------------------------- Test 13 */
+/*
+ * Ringe wie mvb_md_install_q: LLR k zeigt auf Puffer k, auch der
+ * Waechter hat einen (Datenzeiger 0, Puffer 0 unbenutzt), alle Puffer
+ * leer. Die Sollwerte fuer LLR 1 sind am Geraet unter dem Original
+ * gemessen (mvbdiff p1-orig).
+ */
+static void test_ring_layout(void)
+{
+	static const struct { u32 off; u16 n; u16 llr1; } q[] = {
+		{ MD_TQ0_OFFSET, MD_TQ0_LLRS, 0x2010 },
+		{ MD_TQ1_OFFSET, MD_TQ1_LLRS, 0x2138 },
+		{ MD_RQ_OFFSET,  MD_RQ_LLRS,  0x2910 },
+	};
+	unsigned int k, i;
+
+	printf("\n--- Test 13: Ringbelegung wie im Original ---\n");
+
+	for (k = 0; k < ARRAY_SIZE(q); k++) {
+		u32 data = ALIGN(q[k].off + q[k].n * 4u, 32u);
+		int bad_ptr = 0, bad_buf = 0;
+
+		memset(fake_tm + q[k].off, 0xff, data + q[k].n * 32u - q[k].off);
+		mvb_md_install_q(&dev, q[k].off, q[k].n);
+
+		check(tm_r16(&dev, q[k].off) == 0, "Waechter nicht 0");
+		check(tm_r16(&dev, q[k].off + 4) == q[k].llr1,
+		      "LLR 1 zeigt auf 0x%04x statt 0x%04x",
+		      tm_r16(&dev, q[k].off + 4), q[k].llr1);
+		for (i = 1; i < q[k].n; i++)
+			bad_ptr += tm_r16(&dev, q[k].off + i * 4) !=
+				   (data + i * 32) / 4;
+		for (i = 0; i < q[k].n * 16u; i++)
+			bad_buf += tm_r16(&dev, data + i * 2) != 0;
+		check(!bad_ptr, "%d Datenzeiger falsch", bad_ptr);
+		check(!bad_buf, "%d Pufferworte nicht geleert", bad_buf);
+		check(data + q[k].n * 32u <= (k < 2 ? q[k + 1].off : 0xFC00u),
+		      "Puffer ueberlappen den naechsten Ring");
+		printf("  Ring @0x%05x: %3u LLR, LLR 1 -> 0x%04x, Puffer bis "
+		       "0x%05x\n", q[k].off, q[k].n, tm_r16(&dev, q[k].off + 4),
+		       data + q[k].n * 32u);
+	}
 }
 
 int main(int argc, char **argv)
@@ -1024,6 +1113,7 @@ int main(int argc, char **argv)
 	test_interrupts();
 	test_ivr_drain();
 	test_ioctl_abi();
+	test_ring_layout();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;

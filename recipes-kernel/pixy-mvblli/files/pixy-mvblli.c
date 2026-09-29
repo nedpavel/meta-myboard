@@ -311,7 +311,7 @@ static int apd_put_port(struct mvblli_dev *d, u16 port, const u16 *data,
 
 	/* auf eine Senke darf nicht geschrieben werden */
 	if (((w0 >> TM_PCS_TYPE_OFF) & TM_PCS_TYPE_SNK) != 0)
-		return 8;
+		return 9;
 
 	if (lp_len_2_fcode(length) != (w0 >> TM_PCS_FCODE_OFF))
 		return 3;
@@ -791,17 +791,20 @@ static u16 mvb_md_install_q(struct mvblli_dev *d, u32 base_off, u16 llr_count)
 	/* Die Puffer liegen hinter dem LLR-Feld, auf 32 Byte ausgerichtet */
 	data_off = ALIGN(base_off + (u32)llr_count * 4, MVB_MSG_FRAME_SIZE);
 
+	/*
+	 * Jedes LLR hat seinen eigenen Puffer, LLR k den Puffer k - auch der
+	 * Waechter. Dessen Datenzeiger bleibt aber 0, Puffer 0 wird also nie
+	 * benutzt. Alle Puffer werden geleert. So legt es mvb_md_install_q
+	 * im Original an; am Geraet nachgemessen (xmit_q0: LLR 1 -> 0x2010,
+	 * nicht 0x2008).
+	 */
 	for (i = 0; i < llr_count; i++) {
 		u32 this_llr = llr_off + (u32)i * 4;
 		u32 next_llr = llr_off + (u32)((i + 1) % llr_count) * 4;
+		u32 buf = data_off + (u32)i * MVB_MSG_FRAME_SIZE;
 
-		/*
-		 * Das erste LLR ist der Waechter: sein Datenzeiger bleibt 0.
-		 * Alle anderen bekommen einen Puffer.
-		 */
-		tm_w16(d, this_llr,
-		       i ? off_to_p16(data_off + (u32)(i - 1) *
-					       MVB_MSG_FRAME_SIZE) : 0);
+		tm_w16(d, this_llr, i ? off_to_p16(buf) : 0);
+		tm_memset16(d, buf, 0, MVB_MSG_FRAME_SIZE / 2);
 		tm_w16(d, this_llr + 2, off_to_p16(next_llr));
 	}
 
@@ -1449,10 +1452,59 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 /* ------------------------------------------------- Portkonfiguration */
 
 /*
- * Vergibt die Dock-Indizes und traegt PIT und PCS ein. Die Reihenfolge
- * ist bindend: Start bei Index 4, Groessenklassen absteigend, ein
- * 32-Byte-Port belegt vier Docks, ein 16-Byte-Port zwei, alles Kleinere
- * eines. Aus dem naechsten freien Index leitet sich STSR ab.
+ * Einen Port eintragen, wie lp_ts_open_port() im Original:
+ *
+ *  - PIT-Eintrag schon belegt oder Index schon typisiert: Fehler.
+ *  - Die PIT wird nur bei 16-Bit-Eintraegen beschrieben (pit_type 1) -
+ *    so steht es im Original, fuer 8-Bit-PITs fehlt der Schreibzugriff.
+ *  - Im PCS-Wort 0 werden nur F-Code und Typ geaendert, der Rest bleibt
+ *    (& 0xf3fd). Als Typ wird nur "Senke" gesetzt: eine Quelle bleibt
+ *    passiv, bis die Anwendung sie zum ersten Mal beschreibt
+ *    (apd_put_port). Sonst saendete sie nach START Nullen.
+ *  - PCS-Woerter 1..3 und die Datenpuffer bleiben unberuehrt.
+ *  - Bei ungueltiger Groesse bleibt der F-Code stehen.
+ *
+ * Rueckgabe 0 oder 5 wie im Original.
+ */
+static int lp_ts_open_port(struct mvblli_dev *d, u16 port, u16 idx,
+			   u16 size, u16 type)
+{
+	u32 pcs;
+	u16 w0;
+	int fc;
+
+	if (port > d->prt_addr_max || idx > d->prt_indx_max)
+		return 5;
+	if (lp_port_index(d, port))
+		return 5;
+
+	pcs = lp_pcs_off(d, idx);
+	w0 = tm_r16(d, pcs);
+	if ((w0 & TM_PCS_TYPE_MSK) || type > 3)
+		return 5;
+
+	if (d->pit_type == 1)
+		tm_w16(d, d->off_la_pit + port * 2, idx);
+
+	fc = lp_len_2_fcode(size);
+	if (fc >= 0)
+		w0 = (w0 & ~TM_PCS_FCODE_MSK) | ((u16)fc << TM_PCS_FCODE_OFF);
+
+	tm_w16(d, pcs, (w0 & 0xf3fd) |
+	       ((type == TM_PCS_TYPE_SNK) ? (TM_PCS_TYPE_SNK << TM_PCS_TYPE_OFF)
+					  : 0));
+	return 0;
+}
+
+/*
+ * PD_CONF in der Reihenfolge des Originals:
+ *
+ *  1. Dock-Indizes vergeben: Start bei 4, Groessenklassen absteigend,
+ *     ein 32-Byte-Port belegt vier Docks, ein 16-Byte-Port zwei, alles
+ *     Kleinere eines. Innerhalb einer Klasse zaehlt die Listenfolge.
+ *  2. STSR aus dem naechsten freien Index - auch dann, wenn das
+ *     Eintragen danach scheitert.
+ *  3. Die Ports in Listenfolge eintragen (lp_init_pd).
  */
 static int mvb_conf_ports(struct mvblli_dev *d, PixyMvblliConfigLpPrt *list,
 			  u16 count)
@@ -1461,56 +1513,19 @@ static int mvb_conf_ports(struct mvblli_dev *d, PixyMvblliConfigLpPrt *list,
 	unsigned int k, i;
 	u16 idx = 4, interval;
 	u16 shift = 0;
+	u16 *index;
+
+	index = kcalloc(count ? count : 1, sizeof(*index), GFP_KERNEL);
+	if (!index)
+		return -ENOMEM;
 
 	for (k = 0; k < ARRAY_SIZE(klass); k++) {
 		u16 step = (klass[k] == 32) ? 4 : (klass[k] == 16) ? 2 : 1;
 
 		for (i = 0; i < count; i++) {
-			u32 pcs;
-			int fc;
-
 			if (list[i].size != klass[k])
 				continue;
-			if (list[i].prt_addr >= TM_PORT_COUNT)
-				return -EINVAL;
-
-			fc = lp_len_2_fcode(list[i].size);
-			if (fc < 0)
-				return -EINVAL;
-			if (idx > d->prt_indx_max)
-				return -ENOSPC;
-
-			/* Port Index Table */
-			if (d->pit_type)
-				tm_w16(d, d->off_la_pit + list[i].prt_addr * 2,
-				       idx);
-			else {
-				u32 off = d->off_la_pit +
-					  (list[i].prt_addr & ~1u);
-				u16 w = tm_r16(d, off);
-
-				if (list[i].prt_addr & 1)
-					w = (w & 0x00ff) | (idx << 8);
-				else
-					w = (w & 0xff00) | (idx & 0xff);
-				tm_w16(d, off, w);
-			}
-
-			/* Port Control and Status */
-			pcs = lp_pcs_off(d, idx);
-			tm_w16(d, pcs,
-			       ((u16)fc << TM_PCS_FCODE_OFF) |
-			       ((list[i].type & 3) << TM_PCS_TYPE_OFF));
-			tm_w16(d, pcs + 2, 0);
-			tm_w16(d, pcs + 4, 0);
-			tm_w16(d, pcs + 6, 0);
-
-			/* beide Seiten des Docks leeren */
-			tm_memset16(d, lp_data_off(d, idx, 0), 0,
-				    list[i].size / 2);
-			tm_memset16(d, lp_data_off(d, idx, 1), 0,
-				    list[i].size / 2);
-
+			index[i] = idx;
 			idx += step;
 		}
 	}
@@ -1526,12 +1541,24 @@ static int mvb_conf_ports(struct mvblli_dev *d, PixyMvblliConfigLpPrt *list,
 	d->tmo_shift = shift;
 	interval = (u16)((shift + 1) * 0x1000);
 
-	if (mvb_tmo_config(d, (idx & 0xfff) | interval))
+	if (mvb_tmo_config(d, (idx & 0xfff) | interval)) {
+		kfree(index);
 		return -EIO;
-
+	}
 	memset(d->all_tacks, 0, TM_PORT_COUNT * sizeof(u16));
-	d->status.has_pd = 1;
 
+	for (i = 0; i < count; i++) {
+		/* Groesse ausserhalb der fuenf Klassen: kein Index vergeben */
+		if (!index[i] ||
+		    lp_ts_open_port(d, list[i].prt_addr, index[i],
+				    list[i].size, list[i].type)) {
+			kfree(index);
+			return -EIO;
+		}
+	}
+
+	kfree(index);
+	d->status.has_pd = 1;
 	return 0;
 }
 

@@ -88,12 +88,37 @@ braucht es danach einen Partner am Bus.
 - `dbg_*`-Zähler aus beiden Modulen entfernen.
 - udev-Regeln wieder in Kraft setzen (Bind-Mounts lösen oder Neustart).
 
+## Ergebnis Phase 1 am Gerät (`p1-orig` gegen `p1-neu`)
+
+Mit gelöschtem Traffic Memory und ohne Rauschen bleiben **genau zwei
+Unterschiede** – beide echt, beide erklärt:
+
+| Stelle | Original | Nachbau | Ursache |
+|---|---|---|---|
+| Message-Ringe, 449 Datenzeiger (7 + 221 + 221) ab `00_open` | LLR *k* → Puffer *k* | LLR *k* → Puffer *k−1* | `mvb_md_install_q` gibt auch dem Wächter einen Puffer (bleibt unbenutzt) und leert alle Puffer. Folgezeiger waren gleich. |
+| PCS 32 (Port 491, Quelle) Wort 0 nach `PD_CONF` | `0x1000` | `0x1800` | wie vorhergesagt: Quelle erst beim ersten `write()` aktiv |
+
+Alles andere ist gleich: alle Register außer den flüchtigen in allen
+13 Schritten, PIT, PCS der übrigen Ports, Datenpuffer, Service Area.
+
+**`DR` Bit 9 ist geklärt:** bei beiden Treibern gesetzt, in 6–22 % der
+Lesungen (Original 130 und 432 von 2000, Nachbau 261 und 378). Ein
+Statusbit des Busses, kein Unterschied. Bleibt ausgeblendet.
+
+**Neu aufgefallen:** Nach dem Löschen waren im Lauf des Nachbaus 8 Worte
+sofort wieder ungleich null, im Lauf des Originals keines. Das schreibt
+der Controller selbst – vermutlich hinterlässt der zuvor geschlossene
+Treiber ihn in einem anderen Zustand. `mvbdiff` protokolliert jetzt
+Lage und Wert dieser Worte, das `SCR` beim Löschen und einen Abzug nach
+`close()` (`99_zu`); damit wird `mvb_deinit_board` in Phase 3 direkt
+vergleichbar.
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
-| 1 | erledigt, am Gerät noch nicht gelaufen (Attrappe: Löschen ohne Registerblock, 0 Restworte; Vergleich mit eingebauten Unterschieden richtig übersetzt) |
-| 2 | offen |
+| 1 | erledigt, am Gerät bestätigt |
+| 2 | 2.1 `PD_CONF` nach `lp_ts_open_port` erledigt, 2.2 erledigt, Ringbelegung korrigiert; 2.3 Gegenlesen offen |
 | 3 | offen |
 | 4 | offen |
 | 5 | offen |

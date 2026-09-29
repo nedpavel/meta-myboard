@@ -109,7 +109,8 @@ DR_SAMPLES = 2000
 VOLATILE_LOG = ("frames ", "FC ", "Stichprobe", "fresh ")
 
 # Die drei Message-Ringe: Name, Byteoffset im TM, Zahl der LLR. Die
-# Puffer liegen hinter dem LLR-Feld, auf 32 Byte ausgerichtet
+# Puffer liegen hinter dem LLR-Feld, auf 32 Byte ausgerichtet; LLR k
+# gehoert Puffer k, Puffer 0 (Waechter) bleibt unbenutzt
 # (mvb_md_install_q).
 RINGS = (("xmit_q0", 0x08000, 8),
          ("xmit_q1", 0x08140, 0xDE),
@@ -360,13 +361,20 @@ def wipe_tm(log):
     for i in range(0x20000):
         if not skip_lo <= i < skip_hi:
             view[i] = 0
-    rest = sum(1 for i in range(0x20000)
-               if not skip_lo <= i < skip_hi and view[i])
+    rest = [(i * 2, view[i]) for i in range(0x20000)
+            if not skip_lo <= i < skip_hi and view[i]]
     view.release()
     mw.close()
 
     log.line("Traffic Memory geloescht: %d Worte, danach ungleich 0: %d"
-             % (0x20000 - (skip_hi - skip_lo), rest))
+             % (0x20000 - (skip_hi - skip_lo), len(rest)))
+    # Was nach dem Loeschen sofort wieder beschrieben ist, schreibt der
+    # Controller selbst - das zeigt, in welchem Zustand der zuletzt
+    # geschlossene Treiber ihn hinterlassen hat.
+    log.line("     SCR beim Loeschen 0x%04X" % scr)
+    for off, v in rest[:16]:
+        log.line("     danach TM+0x%05X  %-40s %04X"
+                 % (off, describe(off, ({}, {})), v))
     return True
 
 
@@ -688,6 +696,13 @@ def run(outdir, allow_md, go):
     snapshot(mm, outdir, 99, "ende")
     os.close(fd)
     log.line("\ngeschlossen")
+
+    # Zustand nach release(): was mvb_deinit_board hinterlaesst, findet
+    # der naechste Treiber vor.
+    time.sleep(0.2)
+    log.line("     SCR nach close 0x%04X"
+             % struct.unpack_from("<H", mm, TM + SA_OFF + 0x380)[0])
+    snapshot(mm, outdir, 99, "zu")
     mm.close()
     log.close()
 
@@ -748,7 +763,7 @@ def ring_desc(off):
             k = (off - base) // 4
             field = "Daten" if (off - base) % 4 < 2 else "Folge"
             return "%s LLR %d %szeiger" % (name, k, field)
-        if data <= off < data + (n - 1) * 32:
+        if data <= off < data + n * 32:
             k = (off - data) // 32
             return "%s Puffer %d Byte %d" % (name, k, (off - data) % 32)
     return "frei"
