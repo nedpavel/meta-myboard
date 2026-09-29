@@ -107,6 +107,59 @@ Der Aufbau in Kurzform:
 | 2 | Nachbau + Nachbau | `diff snap2 snap3` muss leer sein |
 | 3 | mit der Originalanwendung, eigener Neustart | echter Busverkehr, nur am Prüfgerät |
 
+## Am Gerät belegt
+
+Stand des Gerätetests am Laborbus. Geprüft wurde mit `tools/mvbdiff.py`
+gegen die Telegramme, in denen dieses Gerät (`IDU2`) Senke ist.
+
+### Empfangspfad — quantitativ bestätigt
+
+Elf Senkenports empfangen. Entscheidend sind die drei Lebenszeichen von
+drei verschiedenen Quellen, weil sich ihr Inhalt nachrechnen lässt:
+
+| Port | Signal | Quelle | Zyklus | gelesen | Zuwachs je 20 s | erwartet |
+|---|---|---|---|---|---|---|
+| 181 | `IN-XMVBLifeSFLG1` | FLG1N | 64 ms | `C4A9`→`C5E2`→`C719` | +313, +311 | 312,5 |
+| 471 | `DDA1-XMVBLifeSig` | DDA1 | 64 ms | `C470`→`C5A8`→`C6E0` | +312, +312 | 312,5 |
+| 460 | `NC-XTimeDate` | DIA1 | 64 ms | `1E4184B6`→`…CA`→`…DE` | +20, +20 | 20 (Sekunden) |
+
+Die beiden Lebenszeichen zählen **auf den Schritt genau** einmal je
+64-ms-Zyklus hoch, und die Uhr des Diagnoserechners läuft in
+Echtzeit mit. Damit ist belegt: Frames werden empfangen, im richtigen
+Dock abgelegt, die Seitenumschaltung über `VP` greift, und kein Zyklus
+geht verloren.
+
+Nebenbei bestätigt: die Nutzdaten werden unverändert durchgereicht. Die
+Lebenszeichen sind big-endian `WORD` nach MVB-Konvention, der Zeitstempel
+ein little-endian `u32` der Anwendung — der Treiber dreht an keinem von
+beiden.
+
+`freshness` skaliert mit der Zykluszeit: 64 ms → ~29, 256 ms → ~150,
+1024 ms → ~646. Die Rechnung `(0xFFFF - tack) << tmo_shift` liefert also
+über alle Portklassen hinweg ein vergleichbares Alter.
+
+### Ebenfalls am Gerät bestätigt
+
+* Alle 22 ioctls angesprochen, Rückgaben protokolliert.
+* `PD_CONF` mit zwölf Ports über alle fünf Größenklassen; `STSR` ergibt
+  den vorausberechneten Wert.
+* `write()` auf einen Quellport, zweimal, mit Seitenumschaltung.
+* `DISABLE_PORT` wirkt: der abgeschaltete Port liefert danach `EIO`.
+* Exklusivität: das zweite `open()` liefert `EBUSY`.
+* `MVB_GO` und `MVB_STOP` am laufenden Bus.
+
+### Offen
+
+**Interrupts.** `IPR1` trägt Bit 7 (`FEV`), `IMR1` gibt es frei, und
+trotzdem kommt beim Board-Treiber keine Meldung an — auch mit
+`mvb_irq=1` nicht. Ob das Original sich anders verhält, ist noch nicht
+gemessen; erst dieser Vergleich entscheidet, ob es ein Befund ist oder
+der Pollbetrieb, für den die Anwendung ohnehin ausgelegt ist
+(`strace` zeigt zyklisches `MD_GET_STATUS`).
+
+**Message-Daten.** Senden und Empfangen sind am Gerät noch nicht
+geprüft.
+
 ## Gegenlesen gegen das Dekompilat
 
 Beide Module wurden Funktion für Funktion gegen das Ghidra-Dekompilat der
