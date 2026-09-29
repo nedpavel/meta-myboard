@@ -14,7 +14,10 @@
 # meta-intel empfohlen; intel-corei7-64.conf zieht die Abhaengigkeit
 # bereits ueber WKS_FILE_DEPENDS).
 
-part /boot --source bootimg-efi --sourceparams="loader=grub-efi,initrd=microcode.cpio" --ondisk sda --label boot --active --align 1024 --fixed-size 64M
+# --part-type setzt die GPT-Typ-GUID auf "EFI System Partition". Ohne sie
+# legt wic die Partition als "Microsoft basic data" an — strenge UEFI-
+# Firmware erkennt sie dann nicht als ESP und bootet nicht davon.
+part /boot --source bootimg-efi --sourceparams="loader=grub-efi,initrd=microcode.cpio" --ondisk sda --label boot --active --align 1024 --fixed-size 64M --part-type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 
 part / --source rootfs --ondisk sda --fstype=ext4 --label rootfs --align 1024
 
