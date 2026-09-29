@@ -142,12 +142,34 @@ Zwei Fehler im Werkzeug, ebenfalls behoben:
   zusätzlichen Zeilen außer Tritt. Jetzt wird ausgerichtet, und der
   Vorzustand (vom zuvor geschlossenen Treiber) steht getrennt.
 
+## Ergebnis Lauf 3 (`p3-orig` gegen `p3-neu`): ALLES GLEICH
+
+Nachbau `6A74FC76…` gegen Original `3FAE4A7A…`, beide auf demselben
+Board-Treiber, mit gelöschtem Traffic Memory:
+
+- 39 von 39 Rückgabewerten gleich,
+- alle 15 Speicherabzüge gleich, von `00_open` bis `99_zu` nach `close()`,
+- alle Register gleich, auch am Grundplatz nach dem RESET,
+- Vorzustand beider Läufe identisch (`SCR@3C00 0700`, Registerblock am
+  Grundplatz) – beide Treiber hinterlassen den Controller gleich.
+
+Damit ist belegt: Für alles, was `mvbdiff` ohne Bus und ohne
+Message-Daten anspricht – Initialisierung, alle 22 ioctls samt
+Fehlerpfaden, Portkonfiguration, Prozessdaten schreiben,
+Ereignisaufzeichnung, Schließen – ist der Nachbau vom Original nicht zu
+unterscheiden.
+
+**Nicht abgedeckt** und deshalb Gegenstand von 2.3 und Phase 4:
+Message-Daten (`write`/`read`/`poll`, Sendequeue, Empfangsdispatcher),
+`read()` im Betrieb, der Interruptpfad und der Board-Treiber `pixy-mvb.ko`
+selbst (beide Läufe nutzten den Nachbau).
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1 `PD_CONF`, 2.2, Ringbelegung und Schließen (`mvb_deinit_board`) erledigt und bis auf das Schließen am Gerät bestätigt; 2.3 Gegenlesen offen |
-| 3 | offen |
+| 2 | 2.1, 2.2, Ringbelegung und Schließen erledigt und am Gerät bestätigt (Lauf 3: ALLES GLEICH); 2.3 Gegenlesen in Arbeit, zuerst Message-Daten |
+| 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
 | 4 | offen |
 | 5 | offen |
