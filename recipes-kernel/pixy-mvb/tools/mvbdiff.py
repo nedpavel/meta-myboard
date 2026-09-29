@@ -364,6 +364,12 @@ def wipe_tm(log):
     try:
         mw = mmap.mmap(fb, BAR_SIZE, mmap.MAP_SHARED,
                        mmap.PROT_READ | mmap.PROT_WRITE)
+    except OSError as e:
+        # Ein Board-Treiber, dessen mmap nicht beschreibbar ist: dann
+        # eben ohne Loeschen weiter, aber sichtbar im Protokoll.
+        log.line("Traffic Memory NICHT geloescht: mmap schreibend "
+                 "abgelehnt (%s)" % errname(e.errno))
+        return True
     finally:
         os.close(fb)
 
@@ -423,6 +429,20 @@ def fmt_scr(scrs, live=()):
     return "  ".join("SCR@%04X %04X%s" % (sa, v, "*" if sa in live else "")
                      for sa, v in sorted(scrs.items())) + \
         "   (* = Registerblock)"
+
+
+def irq_count():
+    """Summe ueber alle CPUs der pixy-mvb-Zeile in /proc/interrupts.
+    Zaehlt auch unter dem Original-Board-Treiber, der keine dbg_*-
+    Zaehler hat."""
+    try:
+        for ln in open("/proc/interrupts"):
+            if ln.rstrip().endswith("pixy-mvb"):
+                f = ln.split()
+                return sum(int(x) for x in f[1:] if x.isdigit())
+    except OSError:
+        pass
+    return None
 
 
 def sample_dr(mm, log, label):
@@ -673,6 +693,7 @@ def run(outdir, allow_md, go):
     # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
     if go:
         log.line("\n--- Betrieb (MVB_GO) ---")
+        irq0 = irq_count()
         ok, _ = call(log, "START", lambda: io(IOC["START"]))
         snapshot(mm, outdir, log.step, "started")
 
@@ -741,6 +762,13 @@ def run(outdir, allow_md, go):
                 log.line("       Port %4d %-18s nicht gelesen" % (a_, nm))
 
         c1 = counters()
+        irq1 = irq_count()
+        if irq0 is None or irq1 is None:
+            log.line("     Interrupt-Stichprobe: pixy-mvb nicht in "
+                     "/proc/interrupts")
+        else:
+            log.line("     Interrupt-Stichprobe: pixy-mvb +%d in 60 s "
+                     "(%d -> %d)" % (irq1 - irq0, irq0, irq1))
         log.line("     Zaehler:")
         for k in sorted(set(c0) | set(c1)):
             if c0.get(k) != c1.get(k):

@@ -892,10 +892,13 @@ static int pixy_mvb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		brd->gpio_info.IERreg  = ioread32(brd->gpio + GPIO_IER);
 	}
 
+	/* Texte wie im Original: Bit 0 MVB/PC104, Bit 1 EMD/ESD */
 	dev_info(dev,
 		 "%s Extension Board detected in bus slot %X, Fw version code %d\n",
-		 (brd->gpio_info.DATreg & PIXY_MVB_BOARD_GPIO_MVB_PC104n) ?
-			"MVB" : "PC104",
+		 !(brd->gpio_info.DATreg & PIXY_MVB_BOARD_GPIO_MVB_PC104n) ?
+			"PC104" :
+		 (brd->gpio_info.DATreg & PIXY_MVB_BOARD_GPIO_EMD_ESDn) ?
+			"MVB EMD" : "MVB ESD",
 		 brd->busnum, brd->coreid_info.codeID);
 
 	mvbdrvr.dev_num++;
@@ -945,8 +948,16 @@ static int pixy_mvb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		brd->irq_srv[i].irq = irq;
 		brd->irq_srv[i].act_nr_funcs = 0;
 
+		/*
+		 * Flags wie im Original: IRQF_SHARED (0x80), kein
+		 * IRQF_ONESHOT. Auf PREEMPT_RT ist das mehr als Kosmetik:
+		 * mit IRQF_ONESHOT nimmt der Kernel den Handler von der
+		 * erzwungenen Verlagerung in einen Thread aus, er liefe dann
+		 * im harten Interruptkontext - und nimmt dort einen
+		 * spinlock_t, der auf RT schlafen kann.
+		 */
 		err = request_threaded_irq(irq, pixy_mvb_irq_handler, NULL,
-					   IRQF_ONESHOT, DRV_NAME, brd);
+					   IRQF_SHARED, DRV_NAME, brd);
 		if (err) {
 			dev_err(dev,
 				"Failed to request irq #%d for MSI vector %d\n",

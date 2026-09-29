@@ -185,33 +185,39 @@ Gleich befunden: `write()`, `read()`, `mvb_sndp` (QDT beim ersten
 Senden, Link_Header, Wächter, EF0/EF1 nach `q_tq_priority`, `MR`),
 Interruptdienst (`IVR1` vor `IVR0`, Schranke 20, danach 0).
 
-### Offene Frage mit Gewicht: kommen Interrupts an?
+### Interrupts: Messung im Produktivzustand
 
-Mit `irq = 7` holt das Original empfangene Messages **nur** im
-DTI1-Interrupt ab. Im Produktivbetrieb wurden Messages empfangen und
-abgeholt – dort kamen also vermutlich Interrupts an. In allen unseren
-Läufen lief aber **der nachgebaute Board-Treiber** darunter, und dort kam
-nie ein Interrupt an, auch nicht mit dem originalen LLI. Die
-MSI-Einrichtung ist im Code gleich; ob der Unterschied im Board-Treiber
-liegt oder im Produktivbetrieb doch mit `irq = 0` gepollt wird, entscheidet
-eine Messung im Produktivzustand (nach Neustart):
+Nach Neustart, Herstellerstack läuft (beide Original-Module):
 
-```sh
-ls /sys/module/pixy_mvblli/parameters/; cat /sys/module/pixy_mvblli/parameters/irq
-grep -rs pixy /etc/modprobe.d /usr/lib/modprobe.d
-grep -i pixy /proc/interrupts; sleep 10; grep -i pixy /proc/interrupts
+```
+/sys/module/pixy_mvblli/parameters/irq = 7     (keine modprobe-Optionen)
+/proc/interrupts  pixy-mvb  292 -> 303 in 10 s  (PCI-MSI, ~1/s)
 ```
 
-Bis das geklärt ist: Der Nachbau verhält sich mit `irq = 7` wie das
-Original. Auf einem Board-Treiber ohne Interrupts empfängt er deshalb
-keine Messages – genau wie das Original dort.
+Damit ist belegt: **Vorgabe `irq = 7` ist der Produktivbetrieb**, und dort
+kommen Interrupts an – vermutlich DTI1, also eingehende Messages der
+laufenden Anwendung.
+
+**Nicht** belegt ist, dass der nachgebaute Board-Treiber Interrupts
+verliert. In unseren Läufen lief keine Anwendung, niemand schickte
+Messages, und die einzige anstehende Quelle (FEV) kam unter *beiden*
+LLIs nie im `ISR` an – es gab nichts zuzustellen. Die Probe-Funktionen
+beider Board-Treiber sind gleich bis auf die Interrupt-Flags (behoben:
+`IRQF_SHARED` wie im Original statt `IRQF_ONESHOT`, das auf PREEMPT_RT
+den Handler im harten Interruptkontext laufen ließe) und den
+Meldungstext.
+
+Entscheiden kann das nur der Gegenversuch unter gleichen Bedingungen:
+derselbe `mvbdiff --go`-Lauf einmal mit Original-Board-Treiber, einmal
+mit dem Nachbau darunter, beide Male mit dem originalen LLI.
+`mvbdiff` zählt dafür jetzt `/proc/interrupts` über die 60 s Betrieb.
 
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Offen: Interrupt-Messung im Produktivzustand, Board-Treiber `pixy-mvb.ko` |
+| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); offen: Gegenversuch Board-Treiber |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
 | 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush |
 | 5 | offen |
