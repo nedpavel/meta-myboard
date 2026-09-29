@@ -1374,6 +1374,24 @@ static int mvb_init_board(struct mvblli_dev *d)
 	mvb_int_connect(d, MVB_INT_DTI1);
 	mvb_int_connect(d, MVB_INT_RQE);
 
+	/*
+	 * Einmal leerraeumen, nachdem die Masken stehen.
+	 *
+	 * Am Geraet gemessen: IPR1 = 0x0080 (FEV liegt an), IMR1 gibt das
+	 * Bit frei, ISR1 bleibt trotzdem 0 und es kommt kein Interrupt.
+	 * Das passt nur zusammen, wenn der Controller auf die Flanke im
+	 * IPR ausloest, nicht auf den Pegel: die Quelle stand schon vor
+	 * dem Freigeben der Maske an, also gibt es keine Flanke mehr, und
+	 * weil niemand sie quittiert, bleibt sie fuer immer stehen und
+	 * blockiert jede weitere Meldung derselben Nummer.
+	 *
+	 * Das Quittieren ist das Lesen des IVR. Genau das holen wir hier
+	 * einmal nach, damit die Quelle wieder scharf wird. Steht nichts
+	 * an, kostet die Stelle zwei Registerlesevorgaenge.
+	 */
+	mvb_drain_ivr(d, MVBC_IVR1, 16);
+	mvb_drain_ivr(d, MVBC_IVR0, 0);
+
 	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
 		d->brd_id, d->status.hw_version);
 
