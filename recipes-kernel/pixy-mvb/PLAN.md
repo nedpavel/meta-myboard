@@ -1,0 +1,99 @@
+# Plan: verbleibende Abweichungen zum Original ausmerzen
+
+Stand nach dem Vergleichslauf `abi-orig` gegen `abi-neu`
+(`pixy-mvblli` `3FAE4A7A…` gegen `54631CFD…`).
+
+## Ausgangslage
+
+**Rückgabewerte: 39 von 39 gleich.** Jeder getestete ioctl liefert
+denselben Code wie das Original, einschließlich aller Fehlerpfade.
+Das Original läuft mit gültigem `HWINIT` auch durch `PD_CONF`.
+
+Die Speicher- und Registerunterschiede des Laufs zerfallen in:
+
+| Gruppe | Was | Bewertung |
+|---|---|---|
+| Rauschen | `FC`, `EC`, `ECA`, `TC2` | Zähler des laufenden Busses bzw. Endwert der letzten Warteschleife. Kein Befund – das Werkzeug hätte sie nie vergleichen dürfen. |
+| Vorgeschichte | Message-Ringe ab `0x8004`, `la_data`, `la_pcs` schon bei `00_open` | Nicht auswertbar: der Traffic Memory wird zwischen den Läufen nicht gelöscht, beide Treiber starteten auf verschiedenen Resten. |
+| **echt** | `la_pcs` Index 32 (Port 491, Quelle) nach `PD_CONF` | **Fehler im Nachbau**, siehe Phase 2. |
+| unklar | `DR` Bit 9 (`0x0200`) beim Original in 3 von 13 Abzügen, beim Nachbau nie | vermutlich ein Statusbit des Busses; wird gemessen. |
+
+## Phase 1 – Messwerkzeug: „UNTERSCHIED“ muss einen echten Unterschied bedeuten
+
+Ohne Gerät. Alles in `tools/mvbdiff.py`.
+
+1. **Sauberer Start.** Vor jedem Lauf den gesamten Traffic Memory über
+   `/dev/mvb0` nullen, in 16-Bit-Zugriffen, den Registerblock
+   `SA+0x380…0x3FF` ausgenommen. Nur bei gestopptem Controller und nur,
+   wenn kein anderer Prozess `/dev/mvblli0` offen hat. Abschaltbar mit
+   `--no-wipe`.
+2. **Flüchtige Register ausblenden.** `FC`, `EC`, `ECA`, `ECB`, `MFR`,
+   `MFRE`, `IPR0`, `IPR1`, `TC1`, `TC2` und `DR` Bit 9 werden
+   ausgegeben, aber nicht verglichen. Ebenso die Zählerzeilen im
+   Protokoll.
+3. **Unterschiede lesbar machen.** Wortweise mit beiden Werten und
+   übersetzter Stelle: PIT-Eintrag mit Port, PCS mit Index, Port und
+   Wortnummer, Datenpuffer mit Dock, Seite und Port, Service Area mit
+   physischem Port bzw. QDT-Eintrag. Wiederholt sich derselbe
+   Unterschied im nächsten Schritt, steht dort nur „wie vorher“.
+4. **`DR`-Stichprobe.** Nach dem Öffnen und vor dem Schließen je 2000
+   Lesungen von `DR`, als Häufigkeit je Wert protokolliert. Der
+   Vergleich stellt die Anteile von Bit 9 nebeneinander.
+
+## Phase 2 – Portkonfiguration korrigieren, Rest systematisch prüfen
+
+Ohne Gerät.
+
+1. **`PD_CONF` wie `lp_ts_open_port`:**
+   - Quellen werden **passiv** eingetragen, nur das Senkenbit wird
+     gesetzt; aktiv wird eine Quelle erst beim ersten `write()`
+     (`apd_put_port`). Der Nachbau macht sie bisher sofort zur Quelle
+     und sendet nach `START` Nullen für Ports, die die Anwendung noch
+     nicht beschrieben hat.
+   - PCS-Wort 0 wird gelesen und nur in F-Code und Typ geändert
+     (`& 0xf3fd`), Wörter 1–3 und die Datenpuffer bleiben unberührt.
+   - Bereits belegter PIT-Eintrag oder bereits typisierter Index: Fehler.
+   - Ungültige Größe: F-Code bleibt stehen, kein Fehler.
+2. `write()` auf eine Senke: interner Code 9 statt 8 (nach außen
+   weiterhin `EIO`).
+3. **Funktion für Funktion gegen das Disassembly**, wie beim
+   ioctl-Verteiler: `read`/`write`, `mvb_config`, `mvb_init_board`,
+   `mvb_deinit_board`, `mvb_md_q_init`/`install_q`, `mvb_sndp`,
+   `mvb_md_dispatcher`, `lm_*`, `poll`, `open`/`release`. Ergebnis ist
+   eine Liste aller Funktionen des Originals mit Status *gleich* /
+   *abweichend, behoben* / *bewusst nicht nachgebaut, mit Grund*.
+4. Jeder Fund bekommt eine Prüfung in `tests/tm_replay.c`.
+
+## Phase 3 – Gerätelauf ohne Bus
+
+```sh
+python3 mvbdiff.py run /root/p3-neu
+python3 mvbdiff.py run /root/p3-orig      # nach Wechsel auf das Original
+python3 mvbdiff.py compare /root/p3-orig /root/p3-neu
+```
+
+Ziel: vollständig gleich. Was abweicht, geht zurück in Phase 2.
+
+## Phase 4 – Message-Daten ohne Partner
+
+`write()` auf Message-Daten legt den Frame in die Sendequeue; ohne
+`START` bleibt er dort. Queue und Ring lassen sich damit zwischen beiden
+Treibern byteweise vergleichen (`--md`, ohne `--go`). Für den Empfang
+braucht es danach einen Partner am Bus.
+
+## Phase 5 – Betrieb und Aufräumen
+
+- Ein `--go`-Lauf mit dem Nachbau: Empfang nach der `PD_CONF`-Änderung
+  erneut bestätigen, Quelle 491 erst nach dem ersten `write()` aktiv.
+- `dbg_*`-Zähler aus beiden Modulen entfernen.
+- udev-Regeln wieder in Kraft setzen (Bind-Mounts lösen oder Neustart).
+
+## Stand
+
+| Phase | Stand |
+|---|---|
+| 1 | erledigt, am Gerät noch nicht gelaufen (Attrappe: Löschen ohne Registerblock, 0 Restworte; Vergleich mit eingebauten Unterschieden richtig übersetzt) |
+| 2 | offen |
+| 3 | offen |
+| 4 | offen |
+| 5 | offen |

@@ -15,6 +15,10 @@ geprueft - und zwar bis aufs Byte, nicht nur an 32 Registern.
     mvbdiff.py run     <Verzeichnis>
     mvbdiff.py compare <VerzeichnisA> <VerzeichnisB>
 
+Vor jedem Lauf wird der Traffic Memory genullt (Registerblock
+ausgenommen), damit beide Treiber vom selben Zustand ausgehen. Ohne
+das vergleicht man die Reste frueherer Laeufe.
+
 Ohne weitere Angabe wird der Controller NICHT gestartet: kein MVB_GO,
 nichts geht auf den Bus, alles Geschriebene bleibt im Traffic Memory.
 Zwei Schalter gehen darueber hinaus und gehoeren nur an einen Bus, an
@@ -26,13 +30,17 @@ dem das erlaubt ist:
 
 Dazu:
 
-    --no-pd       PD_CONF und alle Prozessdatenzugriffe auslassen, der
-                  Rest laeuft vollstaendig, START eingeschlossen. Fuer den
-                  Interruptvergleich mit dem Original, das bei PD_CONF
-                  abstuerzt. (--stop-after taugt dafuer nicht: es
-                  ueberspringt alles danach, auch START.)
+    --no-wipe       Traffic Memory vorher nicht nullen
+    --no-pd         PD_CONF und alle Prozessdatenzugriffe auslassen, der
+                    Rest laeuft vollstaendig, START eingeschlossen.
+                    (--stop-after taugt dafuer nicht: es ueberspringt
+                    alles danach, auch START.)
     --stop-after N  nach Schritt N nur noch protokollieren
     --ports DATEI   Portliste "adresse groesse typ" statt der eingebauten
+
+Beim Vergleich bleiben aussen vor: Zaehler, Timer, anstehende Ereignisse
+und der zuletzt gesehene Master Frame (VOLATILE_REGS), DR Bit 9 und die
+Zaehlerzeilen im Protokoll. Sie werden gezeigt, aber nicht gezaehlt.
 
 Mit --go veraendert der laufende Bus den Traffic Memory staendig. Der
 Vergleich der Abzuege ist dann nicht mehr aussagekraeftig - dort zaehlt
@@ -83,6 +91,33 @@ REGNAMES = {
     0x3E0: "TCR", 0x3F0: "TR1", 0x3F4: "TR2", 0x3F8: "TC1",
     0x3FC: "TC2",
 }
+
+# Register, die der Bus oder die Zeit veraendert, nicht der Treiber:
+# Zaehler, zuletzt gesehener Master Frame, anstehende Ereignisse und die
+# Timer, deren Endwert von der Laufzeit der Warteschleife abhaengt. Sie
+# werden ausgegeben, aber nicht verglichen.
+VOLATILE_REGS = {0x390, 0x394, 0x398, 0x39C, 0x3B0, 0x3B4,
+                 0x3D0, 0x3D4, 0x3F8, 0x3FC}
+
+# DR Bit 9 wechselt beim Original gelegentlich; bis die Stichprobe
+# gezeigt hat, was es ist, wird es beim Vergleich ausgeblendet.
+DR_OFF = 0x388
+DR_VOLATILE = 0x0200
+DR_SAMPLES = 2000
+
+# Protokollzeilen mit diesen Merkmalen haengen am laufenden Bus.
+VOLATILE_LOG = ("frames ", "FC ", "Stichprobe", "fresh ")
+
+# Die drei Message-Ringe: Name, Byteoffset im TM, Zahl der LLR. Die
+# Puffer liegen hinter dem LLR-Feld, auf 32 Byte ausgerichtet
+# (mvb_md_install_q).
+RINGS = (("xmit_q0", 0x08000, 8),
+         ("xmit_q1", 0x08140, 0xDE),
+         ("rcve_q", 0x0A0A0, 0xDE))
+
+# Physische Ports in der Service Area (Index = Dock bzw. PCS-Nummer)
+PP_NAMES = {0x0: "FC8", 0x1: "EFS", 0x4: "EF0", 0x5: "EF1", 0x6: "MOS",
+            0x7: "FC15", 0x8: "MSRC", 0xC: "MSNK"}
 
 # ---------------------------------------------------------------- ioctls
 IOC = {
@@ -225,6 +260,7 @@ def errname(n):
 
 STOP_AFTER = None
 NO_PD = False
+WIPE = True
 
 
 def call(log, name, fn):
@@ -277,12 +313,86 @@ def modules():
 
 
 # ---------------------------------------------------------------- Ablauf
+def holders(path):
+    """PIDs, die path offen haben - wie fuser, ohne fuser."""
+    pids = []
+    for fd_dir in glob.glob("/proc/[0-9]*/fd"):
+        try:
+            for fd_ in os.listdir(fd_dir):
+                if os.readlink(os.path.join(fd_dir, fd_)) == path:
+                    pids.append(int(fd_dir.split("/")[2]))
+                    break
+        except OSError:
+            pass
+    return pids
+
+
+def wipe_tm(log):
+    """Traffic Memory nullen, damit beide Treiber vom selben Zustand
+    ausgehen. Ohne das vergleicht man die Reste frueherer Laeufe.
+
+    Nur in 16-Bit-Zugriffen (der MVBC vertraegt keine breiteren), nur
+    bei gestopptem Controller, nur wenn niemand /dev/mvblli0 offen hat,
+    und nie im Registerblock SA+0x380..0x3FF."""
+    busy = holders(DEV)
+    if busy:
+        log.line("ABBRUCH: %s ist offen (PID %s) - nicht geloescht"
+                 % (DEV, ", ".join(map(str, busy))))
+        return False
+
+    fb = os.open(BOARD, os.O_RDWR)
+    try:
+        mw = mmap.mmap(fb, BAR_SIZE, mmap.MAP_SHARED,
+                       mmap.PROT_READ | mmap.PROT_WRITE)
+    finally:
+        os.close(fb)
+
+    scr = struct.unpack_from("<H", mw, TM + SA_OFF + 0x380)[0]
+    if scr & 3 == 3:
+        mw.close()
+        log.line("ABBRUCH: Controller laeuft (SCR 0x%04X) - nicht geloescht"
+                 % scr)
+        return False
+
+    skip_lo = (SA_OFF + REG) // 2
+    skip_hi = (SA_OFF + 0x400) // 2
+    view = memoryview(mw)[TM:TM + 0x40000].cast("H")
+    for i in range(0x20000):
+        if not skip_lo <= i < skip_hi:
+            view[i] = 0
+    rest = sum(1 for i in range(0x20000)
+               if not skip_lo <= i < skip_hi and view[i])
+    view.release()
+    mw.close()
+
+    log.line("Traffic Memory geloescht: %d Worte, danach ungleich 0: %d"
+             % (0x20000 - (skip_hi - skip_lo), rest))
+    return True
+
+
+def sample_dr(mm, log, label):
+    """DR mehrfach lesen und die Haeufigkeit je Wert festhalten."""
+    seen = {}
+    for _ in range(DR_SAMPLES):
+        v = struct.unpack_from("<H", mm, TM + SA_OFF + DR_OFF)[0]
+        seen[v] = seen.get(v, 0) + 1
+    bit9 = sum(n for v, n in seen.items() if v & DR_VOLATILE)
+    log.line("     DR-Stichprobe %s (%d): %s   Bit 9 in %d"
+             % (label, DR_SAMPLES,
+                ", ".join("%04X x%d" % (v, n) for v, n in sorted(seen.items())),
+                bit9))
+
+
 def run(outdir, allow_md, go):
     os.makedirs(outdir, exist_ok=True)
     log = Log(os.path.join(outdir, "log.txt"))
 
     log.line("Treiber: " + ", ".join(modules()))
     log.line("")
+
+    if WIPE and not wipe_tm(log):
+        log.close()
+        sys.exit(3)
 
     fb = os.open(BOARD, os.O_RDWR)
     try:
@@ -308,6 +418,7 @@ def run(outdir, allow_md, go):
         log.close()
         sys.exit(3)
     snapshot(mm, outdir, 0, "open")
+    sample_dr(mm, log, "nach open")
 
     def io(req, buf=0, mutate=False):
         if isinstance(buf, bytearray):
@@ -573,6 +684,7 @@ def run(outdir, allow_md, go):
         return "zweites open war moeglich"
     call(log, "zweites open()", second_open)
 
+    sample_dr(mm, log, "vor close")
     snapshot(mm, outdir, 99, "ende")
     os.close(fd)
     log.line("\ngeschlossen")
@@ -581,6 +693,9 @@ def run(outdir, allow_md, go):
 
 
 # ------------------------------------------------------------ Vergleich
+MAX_LINES = 12          # je Bereich und Schritt
+
+
 def region(off):
     for a, b, n in REGIONS:
         if a <= off < b:
@@ -594,6 +709,105 @@ def bin_offset(i):
     return i if i < first else CHUNKS[1][0] + (i - first)
 
 
+def words(data):
+    """Abzug -> {TM-Offset: Wort}"""
+    n = len(data) // 2
+    vals = struct.unpack("<%dH" % n, data[:n * 2])
+    return {bin_offset(i * 2): v for i, v in enumerate(vals)}
+
+
+def dock_index(rel):
+    """Byte im Datenbereich -> (Dock-Index, Seite, Wort). 64 Byte je vier
+    Docks, darin zwei Seiten zu 32 Byte, darin vier Docks zu 8 Byte."""
+    return (rel // 64) * 4 + (rel % 32) // 8, (rel % 64) // 32, (rel % 8) // 2
+
+
+def port_of(rev, idx):
+    """Dock-Index -> Portname aus der PIT beider Seiten."""
+    a, b = rev[0].get(idx), rev[1].get(idx)
+    if a == b:
+        return " (Port %d)" % a if a is not None else ""
+    return " (Port %s|%s)" % (a if a is not None else "-",
+                              b if b is not None else "-")
+
+
+def reverse_pit(w):
+    rev = {}
+    for port in range(0x1000):
+        idx = w.get(port * 2, 0)
+        if idx:
+            rev.setdefault(idx, port)
+    return rev
+
+
+def ring_desc(off):
+    for name, base, n in RINGS:
+        llr_end = base + n * 4
+        data = (llr_end + 31) & ~31
+        if base <= off < llr_end:
+            k = (off - base) // 4
+            field = "Daten" if (off - base) % 4 < 2 else "Folge"
+            return "%s LLR %d %szeiger" % (name, k, field)
+        if data <= off < data + (n - 1) * 32:
+            k = (off - data) // 32
+            return "%s Puffer %d Byte %d" % (name, k, (off - data) % 32)
+    return "frei"
+
+
+def sa_desc(rel):
+    if rel < 0x200:
+        idx, page, w = dock_index(rel)
+        return "phys. Dock %s Seite %d Wort %d" % (
+            PP_NAMES.get(idx, str(idx)), page, w)
+    if rel < 0x300:
+        i = (rel - 0x200) // 8
+        return "phys. PCS %s Wort %d" % (PP_NAMES.get(i, str(i)),
+                                         (rel % 8) // 2)
+    if rel < 0x310:
+        return "MFS +%d" % (rel - 0x300)
+    q = {0x310: "QDT xmit_q0", 0x312: "QDT xmit_q1", 0x314: "QDT rcve_q"}
+    return q.get(rel, "SA+0x%03X" % rel)
+
+
+def describe(off, rev):
+    if off < 0x2000:
+        return "PIT Port %d" % (off // 2)
+    if off < 0x4000:
+        return "da_pit Port %d" % ((off - 0x2000) // 2)
+    if off < 0x8000:
+        return "da_pcs %d Wort %d" % ((off - 0x4000) // 8, (off % 8) // 2)
+    if off < 0xFC00:
+        return ring_desc(off)
+    if off < 0x10000:
+        return sa_desc(off - 0xFC00)
+    if off < 0x20000:
+        idx, page, w = dock_index(off - 0x10000)
+        return "Dock %d%s Seite %d Wort %d" % (idx, port_of(rev, idx),
+                                               page, w)
+    if off < 0x30000:
+        idx, page, w = dock_index(off - 0x20000)
+        return "Force %d%s Seite %d Wort %d" % (idx, port_of(rev, idx),
+                                                page, w)
+    if off < 0x38000:
+        i = (off - 0x30000) // 8
+        return "PCS %d%s Wort %d" % (i, port_of(rev, i), (off % 8) // 2)
+    idx, page, w = dock_index(off - 0x38000)
+    return "da_data %d Seite %d Wort %d" % (idx, page, w)
+
+
+def read_regs(path):
+    out = {}
+    for ln in open(path).read().splitlines():
+        f = ln.split()
+        if len(f) >= 2 and f[1] != "----":
+            out[int(f[0][5:], 16)] = int(f[1], 16)
+    return out
+
+
+def volatile_line(s):
+    return any(k in s for k in VOLATILE_LOG)
+
+
 def compare(da, db):
     rc = 0
     la = open(os.path.join(da, "log.txt")).read().splitlines()
@@ -602,18 +816,24 @@ def compare(da, db):
     print("=== Protokoll ===")
     diff = 0
     for a, b in zip(la, lb):
-        if a != b and not a.startswith("Treiber:"):
-            tag = ""
-            if any(k in a for k in KNOWN_DIFF):
-                tag = "   (bekannter Unterschied)"
-            else:
-                diff += 1
-            print("  A: %s\n  B: %s%s" % (a, b, tag))
+        if a == b or a.startswith("Treiber:") or volatile_line(a):
+            continue
+        tag = ""
+        if any(k in a for k in KNOWN_DIFF):
+            tag = "   (bekannter Unterschied)"
+        else:
+            diff += 1
+        print("  A: %s\n  B: %s%s" % (a, b, tag))
     if len(la) != len(lb):
         print("  Protokolle verschieden lang: %d gegen %d" % (len(la), len(lb)))
         diff += 1
-    print("  %d unerwartete Abweichungen" % diff)
+    print("  %d Abweichungen" % diff)
     rc += diff
+
+    print("\n=== Stichproben (nicht verglichen) ===")
+    for a, b in zip(la, lb):
+        if "Stichprobe" in a:
+            print("  A: %s\n  B: %s" % (a.strip(), b.strip()))
 
     print("\n=== Speicherabzuege ===")
     fa = sorted(os.path.basename(p) for p in glob.glob(os.path.join(da, "*.bin")))
@@ -624,39 +844,64 @@ def compare(da, db):
         print("   nur in B: %s" % sorted(set(fb) - set(fa)))
         return rc + 1
 
+    prev = None
     for name in fa:
-        A = open(os.path.join(da, name), "rb").read()
-        B = open(os.path.join(db, name), "rb").read()
-        if A == B:
-            print("  %-24s gleich" % name)
-            continue
-        bad = {}
-        for i in range(min(len(A), len(B))):
-            if A[i] != B[i]:
-                off = bin_offset(i)
-                r = region(off)
-                if r not in bad:
-                    bad[r] = [0, off]
-                bad[r][0] += 1
-        print("  %-24s UNTERSCHIED" % name)
-        for r in sorted(bad, key=lambda k: bad[k][1]):
-            cnt, first = bad[r]
-            print("      %-22s %5d Byte, ab TM+0x%05X" % (r, cnt, first))
-        rc += 1
-
-    print("\n=== Register ===")
-    for name in sorted(os.path.basename(p)
-                       for p in glob.glob(os.path.join(da, "*.regs"))):
-        A = open(os.path.join(da, name)).read().splitlines()
-        B = open(os.path.join(db, name)).read().splitlines()
-        d = [(x, y) for x, y in zip(A, B) if x != y]
+        wa = words(open(os.path.join(da, name), "rb").read())
+        wb = words(open(os.path.join(db, name), "rb").read())
+        d = sorted((o, wa[o], wb.get(o)) for o in wa if wa[o] != wb.get(o))
         if not d:
             print("  %-24s gleich" % name)
+            prev = None
             continue
-        print("  %-24s UNTERSCHIED" % name)
-        for x, y in d:
-            print("      A: %s\n      B: %s" % (x, y))
         rc += 1
+        if d == prev:
+            print("  %-24s UNTERSCHIED, wie vorher (%d Worte)" % (name, len(d)))
+            continue
+        prev = d
+        rev = (reverse_pit(wa), reverse_pit(wb))
+        print("  %-24s UNTERSCHIED, %d Worte" % (name, len(d)))
+        by_reg = {}
+        for o, x, y in d:
+            by_reg.setdefault(region(o), []).append((o, x, y))
+        for r in sorted(by_reg, key=lambda k: by_reg[k][0][0]):
+            items = by_reg[r]
+            print("    %s: %d Worte" % (r, len(items)))
+            for o, x, y in items[:MAX_LINES]:
+                print("      TM+0x%05X  %-44s A %04X  B %04X"
+                      % (o, describe(o, rev), x, y))
+            if len(items) > MAX_LINES:
+                print("      ... und %d weitere" % (len(items) - MAX_LINES))
+
+    print("\n=== Register (ohne %s, DR ohne Bit 9) ==="
+          % " ".join(REGNAMES[o] for o in sorted(VOLATILE_REGS)))
+    prev = None
+    for name in sorted(os.path.basename(p)
+                       for p in glob.glob(os.path.join(da, "*.regs"))):
+        ra = read_regs(os.path.join(da, name))
+        rb = read_regs(os.path.join(db, name))
+        d = []
+        for o in sorted(ra):
+            if o in VOLATILE_REGS:
+                continue
+            x, y = ra[o], rb.get(o)
+            if o == DR_OFF and y is not None:
+                x, y = x & ~DR_VOLATILE, y & ~DR_VOLATILE
+            if x != y:
+                d.append((o, ra[o], rb.get(o)))
+        if not d:
+            print("  %-24s gleich" % name)
+            prev = None
+            continue
+        rc += 1
+        if d == prev:
+            print("  %-24s UNTERSCHIED, wie vorher" % name)
+            continue
+        prev = d
+        print("  %-24s UNTERSCHIED" % name)
+        for o, x, y in d:
+            print("      SA+0x%03X %-5s A %04X  B %s"
+                  % (o, REGNAMES.get(o, ""), x,
+                     "%04X" % y if y is not None else "----"))
 
     print("\n%s" % ("ALLES GLEICH" if rc == 0 else "%d Stellen weichen ab" % rc))
     return rc
@@ -664,9 +909,10 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        global STOP_AFTER, NO_PD, PORTS, WRITE_PORT, WRITE_SIZE
+        global STOP_AFTER, NO_PD, WIPE, PORTS, WRITE_PORT, WRITE_SIZE
         global DISABLE_PORT_ADDR
         NO_PD = "--no-pd" in sys.argv
+        WIPE = "--no-wipe" not in sys.argv
         for i, a_ in enumerate(sys.argv):
             if a_ == "--stop-after":
                 STOP_AFTER = int(sys.argv[i + 1])
