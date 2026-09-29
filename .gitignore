@@ -13,3 +13,16 @@ __pycache__/
 *.o
 *.rej
 *.orig
+
+# Kernelmodul-Bauartefakte
+*.ko
+*.ko.xz
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+tests/tm_replay
+tests/mvbsnap/
