@@ -1,0 +1,28 @@
+# Pixy 1000 (Intel Atom Apollo Lake E3940) — UEFI-Boot auf CFast
+#
+# Gegenstueck zu myboard-cfast.wks (INC-100, Legacy-PC-BIOS). Beide
+# Dateien bleiben im Layer; ausgewaehlt wird ueber WKS_FILE im
+# Image-Rezept.
+#
+# Das Geraet bootet nachweislich 64-bit-UEFI (/sys/firmware/efi mit
+# fw_platform_size=64). EFI-Variablen sind dort NICHT verfuegbar
+# (efivarfs fehlt im Kernel, efibootmgr schlaegt fehl) — deshalb wird
+# bewusst ueber den festen Fallback-Pfad EFI/BOOT/bootx64.efi gebootet.
+# Den probiert jede UEFI-Firmware von selbst, ganz ohne NVRAM-Eintrag.
+#
+# initrd=microcode.cpio bindet das Intel-Microcode frueh ein (von
+# meta-intel empfohlen; intel-corei7-64.conf zieht die Abhaengigkeit
+# bereits ueber WKS_FILE_DEPENDS).
+
+part /boot --source bootimg-efi --sourceparams="loader=grub-efi,initrd=microcode.cpio" --ondisk sda --label boot --active --align 1024 --fixed-size 64M
+
+part / --source rootfs --ondisk sda --fstype=ext4 --label rootfs --align 1024
+
+part /data --ondisk sda --fstype=ext4 --label data --align 1024 --fixed-size 512M
+
+# GPT statt msdos (UEFI-Standard).
+# console=tty0 zusaetzlich, damit Kernelmeldungen beim Bring-up auch ohne
+# serielles Kabel auf dem Display sichtbar sind.
+# i915.enable_rc6=0 entfaellt — das war ein Bay-Trail-Workaround und wird
+# auf Apollo Lake (Gen9) nicht gebraucht.
+bootloader --ptable gpt --timeout=3 --append="rootwait console=ttyS0,115200 console=tty0 quiet"

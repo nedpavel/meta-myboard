@@ -23,4 +23,5 @@ SRC_URI:append = " \
     file://audio-alc662.cfg \
     file://touch-penmount.cfg \
     file://network-i210.cfg \
+    file://efi-gpt.cfg \
     "

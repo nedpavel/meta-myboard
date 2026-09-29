@@ -1,10 +1,15 @@
 require recipes-extended/images/core-image-full-cmdline.bb
 
-# myboard-cfast.wks uses bootimg-pcbios with loader-bios=grub (legacy
-# PC-BIOS GRUB, not grub-efi/UEFI). The wic-native sysroot needs the plain
-# "grub" recipe's native grub-mkimage/grub-bios-setup, which isn't pulled
-# in automatically by the machine's default WKS_FILE_DEPENDS.
-WKS_FILE_DEPENDS:append = " grub-native grub"
+# --- Boot: UEFI (Pixy 1000, Apollo Lake) -----------------------------------
+# Das Pixy 1000 bootet 64-bit-UEFI; ein Legacy-PC-BIOS-Image wuerde dort
+# nicht starten. Gebootet wird ueber den Fallback-Pfad EFI/BOOT/bootx64.efi,
+# weil auf dem Geraet keine EFI-Variablen verfuegbar sind (efivarfs fehlt).
+#
+# Das alte INC-100 (Legacy-BIOS) wird auf dem Branch 'main' weitergepflegt
+# und nutzt dort myboard-cfast.wks mit bootimg-pcbios.
+WKS_FILE = "pixy1000-efi.wks"
+EFI_PROVIDER = "grub-efi"
+WKS_FILE_DEPENDS:append = " grub-efi"
 
 #IMAGE_FSTYPES:append = " img.bz2"
 
