@@ -148,14 +148,68 @@ beiden.
 * Exklusivität: das zweite `open()` liefert `EBUSY`.
 * `MVB_GO` und `MVB_STOP` am laufenden Bus.
 
-### Offen
+### Interrupts — verhalten sich wie beim Original
 
-**Interrupts.** `IPR1` trägt Bit 7 (`FEV`), `IMR1` gibt es frei, und
-trotzdem kommt beim Board-Treiber keine Meldung an — auch mit
-`mvb_irq=1` nicht. Ob das Original sich anders verhält, ist noch nicht
-gemessen; erst dieser Vergleich entscheidet, ob es ein Befund ist oder
-der Pollbetrieb, für den die Anwendung ohnehin ausgelegt ist
-(`strace` zeigt zyklisches `MD_GET_STATUS`).
+Gleicher Lauf (`mvbdiff.py --go --no-pd`) mit beiden LLIs auf demselben
+Board-Treiber, dessen `dbg_hardirq` damit für beide gleich zählt:
+
+| | Nachbau | Original |
+|---|---|---|
+| `IMR0` / `IMR1` nach `START` | `0003` / `0880` | `0003` / `0880` |
+| `IPR1` vor → nach 20 s | `0000` → `0080` | `0000` → `0080` |
+| `ISR0` / `ISR1` | `0000` / `0000` | `0000` / `0000` |
+| Interrupts beim Board-Treiber | 0 | 0 |
+
+`FEV` wird also *nach* dem Freigeben der Maske gesetzt, und trotzdem
+landet es weder in `ISR` noch als Interrupt beim Treiber — bei beiden
+Modulen. Die Vermutung, eine vor dem Freigeben anstehende Quelle
+blockiere die Meldung, ist damit widerlegt, die dafür eingebaute
+Quittung wieder entfernt. Für die Anwendung ohne Belang: sie arbeitet
+im Pollbetrieb (`strace`: zyklisches `MD_GET_STATUS`).
+
+### ioctl-ABI — gegen den Maschinencode nachgezogen
+
+Der Vergleichslauf zeigte `WRITE_DEV_ADDR`: Original `EINVAL`, Nachbau
+`ok`. Die Ursache stand nicht im Dekompilat, sondern nur im
+Disassembly: in den abgespaltenen Fallfunktionen des ioctl-Verteilers
+hat Ghidra die Register falsch zugeordnet. Der Verteiler wurde deshalb
+Fall für Fall gegen den Maschinencode gelesen. Befunde:
+
+| ioctl | Original | Nachbau bisher |
+|---|---|---|
+| `WRITE_DEV_ADDR` | Adresse **als Wert** im Argument, `arg == 0` → `EINVAL` | Zeiger |
+| `WRITE_DSW` | **Wert**: oberes Wort Maske, unteres Wert | Zeiger |
+| `DISABLE_PORT` | **Wert**; nur auf Quellen, löscht nur die Typbits im PCS, sonst `EIO` | Zeiger; PIT und PCS genullt, jeder Port |
+| `MD_GET_STATUS` | prüft das eingelesene Wort, übergibt als selector/reset aber **den Zeiger** (Bits 31..16 / 15..0); schreibt **2 Byte** | Wort ignoriert, alles ausgewählt, nichts zurückgesetzt, 4 Byte |
+| `HWINIT` | `ts_type ≠ 1` → `EIO`; Grenzen aus der TM-Größe (`0xfff`/`0x3ff`), nicht vom Aufrufer; `ownership == 1` leert PIT und PCS; `DSW &= ~2` | nichts davon |
+| `REC_CONF`/`REC_DEL` | vorhanden, zwei Plätze, DTI 7 im PCS, `IMR0` Bit 6 | `EPERM` |
+| `PD_CONF` | leere Liste gültig (`STSR 0x1004`); vor jeder weiteren Konfiguration und nach Fehlern PIT/PCS leeren | leere Liste `EINVAL`, nie geleert |
+| `MD_FLUSH_QUEUE` | Argument ≠ 0 → `EINVAL` | ignoriert |
+| unbekannte Nummer ≤ 22 | `EINVAL` | `ENOTTY` |
+
+Die ersten drei hätten die Herstelleranwendung auf dem Nachbau
+scheitern lassen: sie übergibt Werte, der Nachbau hätte sie als Zeiger
+gelesen und `EFAULT` geliefert.
+
+`MD_GET_STATUS` ist ein Fehler im Original und wird **bewusst
+nachgebaut**: welche Statusbits die Anwendung sieht und welche dabei
+zurückgesetzt werden, hängt an der Stapeladresse ihres Puffers. Die
+Anwendung läuft seit Jahren genau so; ein korrigiertes Verhalten wäre
+ein anderes.
+
+Die Ereignisaufzeichnung schreibt im Original in Ringpuffer, die
+`read()` nie ausliefert. Nachgebaut ist, was nach außen sichtbar ist:
+Rückgabewerte, das DTI-Feld im PCS und `IMR0`; der unerreichbare
+Ringpuffer nicht.
+
+Der Absturz des Originals bei `PD_CONF` in der ersten Vergleichsrunde
+(`Killed`) war eine Folge von `HWINIT` mit `ts_type = 0`: das
+schlägt fehl, und `PD_CONF` arbeitet dann auf einer nie angelegten
+Traffic-Store-Beschreibung.
+
+`tests/tm_replay.c`, Test 12, prüft alle Punkte der Tabelle.
+
+### Offen
 
 **Message-Daten.** Senden und Empfangen sind am Gerät noch nicht
 geprüft.

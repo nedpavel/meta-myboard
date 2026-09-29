@@ -787,6 +787,216 @@ static void test_ivr_drain(void)
 	printf("  IVR1 meldet FEV als 7, RQE als 11 (+16 Versatz)\n");
 }
 
+/* ---------------------------------------------------------- Test 12 */
+/*
+ * ioctl-ABI gegen das Disassembly des Originals. Der Geraetetest hat
+ * gezeigt, dass WRITE_DEV_ADDR im Original das Argument als Wert nimmt;
+ * dieselbe Pruefung deckt DISABLE_PORT, WRITE_DSW, MD_GET_STATUS,
+ * HWINIT und die Ereignisaufzeichnung ab.
+ */
+static long ioc(unsigned int cmd, unsigned long arg)
+{
+	struct file f = { .private_data = &dev };
+
+	return pixy_mvblli_ioctl(&f, cmd, arg);
+}
+
+static u16 pcs_w0(u16 port)
+{
+	return tm_r16(&dev, lp_pcs_off(&dev, lp_port_index(&dev, port)));
+}
+
+static u16 port_of_type(unsigned int type, u16 after)
+{
+	u16 p;
+
+	for (p = after + 1; p < TM_PORT_COUNT; p++) {
+		u16 idx = lp_port_index(&dev, p);
+
+		if (idx && idx <= 0x3ff &&
+		    ((pcs_w0(p) >> TM_PCS_TYPE_OFF) & 3) == type)
+			return p;
+	}
+	return 0;
+}
+
+static void test_ioctl_abi(void)
+{
+	u16 v16 = 0, src, snk1, snk2, snk3;
+	u32 v32;
+	u16 pcs_before;
+	mvb_rec_event ev;
+	PixyMvblliConfigLpTs ts;
+	struct { u16 count; } empty = { 0 };
+	unsigned long a;
+	u16 sel, rst, st;
+	int i, pit_nonzero;
+
+	printf("\n--- Test 12: ioctl-ABI wie im Maschinencode ---\n");
+
+	dev.enable = 1;
+	dev.status.is_init = 1;
+	dev.status.is_active = 0;
+	dev.prt_indx_max = 0x3ff;
+	if (!dev.all_tacks)
+		dev.all_tacks = calloc(TM_PORT_COUNT, sizeof(u16));
+
+	src  = port_of_type(2, 0);
+	snk1 = port_of_type(1, 0);
+	snk2 = port_of_type(1, snk1);
+	snk3 = port_of_type(1, snk2);
+	check(src && snk1 && snk2 && snk3, "keine Quelle/Senken im Abzug");
+	printf("  Quelle %u, Senken %u %u %u\n", src, snk1, snk2, snk3);
+
+	/* WRITE_DEV_ADDR: Wert, nicht Zeiger */
+	check(ioc(IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR, 0xF0) == 0,
+	      "WRITE_DEV_ADDR 0xF0 als Wert abgelehnt");
+	check(sa_r16(&dev, MVBC_DAOR) == 0xF0 && dev.mvb_addr == 0xF0,
+	      "Adresse 0xF0 nicht gesetzt");
+	check(ioc(IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR, (unsigned long)&v16) ==
+	      -EINVAL, "WRITE_DEV_ADDR mit Zeiger nicht EINVAL");
+	check(ioc(IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR, 0) == -EINVAL,
+	      "WRITE_DEV_ADDR 0 nicht EINVAL");
+	dev.status.is_active = 1;
+	check(ioc(IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR, 0x10) == -EFAULT,
+	      "WRITE_DEV_ADDR im Betrieb nicht EFAULT");
+	dev.status.is_active = 0;
+	check(ioc(IOCTL_PIXY_MVBLLI_READ_DEV_ADDR, (unsigned long)&v16) == 0 &&
+	      v16 == 0xF0, "READ_DEV_ADDR liefert 0x%04x", v16);
+	printf("  WRITE_DEV_ADDR nimmt den Wert, Zeiger ergibt EINVAL\n");
+
+	/* WRITE_DSW: Wert, oberes Wort Maske */
+	check(ioc(IOCTL_PIXY_MVBLLI_WRITE_DSW, 0x00020002) == 0,
+	      "WRITE_DSW abgelehnt");
+	ioc(IOCTL_PIXY_MVBLLI_READ_DSW, (unsigned long)&v16);
+	check(v16 & 0x0002, "DSW Bit 1 nicht gesetzt (0x%04x)", v16);
+	ioc(IOCTL_PIXY_MVBLLI_WRITE_DSW, 0x00020000);
+	ioc(IOCTL_PIXY_MVBLLI_READ_DSW, (unsigned long)&v16);
+	check(!(v16 & 0x0002), "DSW Bit 1 nicht geloescht (0x%04x)", v16);
+	printf("  WRITE_DSW nimmt den Wert, Maske im oberen Wort\n");
+
+	/* DISABLE_PORT: nur Quellen, nur die Typbits */
+	check(ioc(IOCTL_PIXY_MVBLLI_DISABLE_PORT, 0x1000) == -EINVAL,
+	      "DISABLE_PORT 0x1000 nicht EINVAL");
+	pcs_before = pcs_w0(snk1);
+	check(ioc(IOCTL_PIXY_MVBLLI_DISABLE_PORT, snk1) == -EIO,
+	      "DISABLE_PORT auf Senke nicht EIO");
+	check(pcs_w0(snk1) == pcs_before, "Senke wurde veraendert");
+	pcs_before = pcs_w0(src);
+	check(ioc(IOCTL_PIXY_MVBLLI_DISABLE_PORT, src) == 0,
+	      "DISABLE_PORT auf Quelle abgelehnt");
+	check(pcs_w0(src) == (pcs_before & 0xf3ff) && lp_port_index(&dev, src),
+	      "Quelle: PCS 0x%04x -> 0x%04x, PIT %u", pcs_before, pcs_w0(src),
+	      lp_port_index(&dev, src));
+	printf("  DISABLE_PORT: Senke EIO, Quelle PCS 0x%04x -> 0x%04x\n",
+	       pcs_before, pcs_w0(src));
+
+	/* MD_GET_STATUS: Pruefung des Inhalts, Auswahl aus dem Zeiger */
+	v32 = 0x00000008;
+	check(ioc(IOCTL_PIXY_MVBLLI_MD_GET_STATUS, (unsigned long)&v32) ==
+	      -EINVAL, "MD_GET_STATUS mit Bit 3 nicht EINVAL");
+	dev.rq_overflow = 4;
+	sa_w16(&dev, SA_PP_PCS + TM_PP_MSRC * 8 + 4, 0xffff);
+	sa_w16(&dev, SA_PP_PCS + TM_PP_MSNK * 8 + 4, 0);
+	a = (unsigned long)&v32;
+	sel = (u16)(a >> 16);
+	rst = (u16)a;
+	v32 = 0x00050000;
+	check(ioc(IOCTL_PIXY_MVBLLI_MD_GET_STATUS, a) == 0,
+	      "MD_GET_STATUS abgelehnt");
+	st = (u16)v32;
+	check((v32 >> 16) == 0x0005, "MD_GET_STATUS schreibt mehr als 2 Byte");
+	check(st == (0x0006 & sel), "Status 0x%04x statt 0x%04x", st,
+	      0x0006 & sel);
+	check(dev.rq_overflow == ((rst & 4) ? 0 : 4),
+	      "rq_overflow %u, reset aus Zeiger 0x%04x", dev.rq_overflow, rst);
+	printf("  MD_GET_STATUS: 2 Byte, selector 0x%04x/reset 0x%04x aus der "
+	       "Adresse\n", sel, rst);
+
+	/* Rahmen: FLUSH, unbekannte Nummern */
+	check(ioc(IOCTL_PIXY_MVBLLI_MD_FLUSH_QUEUE, 1) == -EINVAL,
+	      "FLUSH mit Argument nicht EINVAL");
+	check(ioc(_IO('L', 0), 0) == -EINVAL, "Nummer 0 nicht EINVAL");
+	check(ioc(_IOW('L', 2, u32), 0xF0) == -EINVAL,
+	      "falsche Groesse nicht EINVAL");
+	check(ioc(IOCTL_PIXY_MVBLLI_MD_NSDB, 1) == -EINVAL,
+	      "MD_NSDB nicht EINVAL");
+	check(ioc(_IO('L', 23), 0) == -ENOTTY, "Nummer 23 nicht ENOTTY");
+	printf("  FLUSH mit Argument, Nummer 0 und falsche Groesse: EINVAL\n");
+
+	/* Ereignisaufzeichnung */
+	ev.ts_port = snk1; ev.buf_len = 0;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -EINVAL,
+	      "REC_CONF buf_len 0 nicht EINVAL");
+	ev.buf_len = MVB_REC_BUF_SIZE + 1;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -EINVAL,
+	      "REC_CONF buf_len 21 nicht EINVAL");
+	ev.ts_port = 0; ev.buf_len = 5;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -EINVAL,
+	      "REC_CONF Port 0 nicht EINVAL");
+	ev.ts_port = src;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -EIO,
+	      "REC_CONF auf Quelle nicht EIO");
+	ev.ts_port = snk1;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == 0,
+	      "REC_CONF Senke 1 abgelehnt");
+	check((pcs_w0(snk1) & 0x00e0) == 0x00e0, "DTI-Feld nicht 7");
+	check(sa_r16(&dev, MVBC_IMR0) & 0x0040, "DTI7 nicht freigegeben");
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -EBUSY,
+	      "doppelter REC_CONF nicht EBUSY");
+	ev.ts_port = snk2;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == 0,
+	      "REC_CONF Senke 2 abgelehnt");
+	ev.ts_port = snk3;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_CONF, (unsigned long)&ev) == -ENOSPC,
+	      "dritter REC_CONF nicht ENOSPC");
+	ev.ts_port = snk1;
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_DEL, (unsigned long)&ev) == 0,
+	      "REC_DEL Senke 1 abgelehnt");
+	check(!(pcs_w0(snk1) & 0x00e0), "DTI-Feld nicht geloescht");
+	check(sa_r16(&dev, MVBC_IMR0) & 0x0040, "DTI7 zu frueh abgeschaltet");
+	check(ioc(IOCTL_PIXY_MVBLLI_REC_DEL, (unsigned long)&ev) == -EINVAL,
+	      "REC_DEL unbekannt nicht EINVAL");
+	ev.ts_port = snk2;
+	ioc(IOCTL_PIXY_MVBLLI_REC_DEL, (unsigned long)&ev);
+	check(!(sa_r16(&dev, MVBC_IMR0) & 0x0040), "DTI7 bleibt an");
+	printf("  REC_CONF/REC_DEL: DTI 7 im PCS, IMR0 Bit 6, EBUSY, ENOSPC\n");
+
+	/* HWINIT */
+	memset(&ts, 0, sizeof(ts));
+	ts.prt_addr_max = 0x123;
+	ts.prt_indx_max = 0x456;
+	check(ioc(IOCTL_PIXY_MVBLLI_HWINIT, (unsigned long)&ts) == -EIO,
+	      "HWINIT mit ts_type 0 nicht EIO");
+	check(dev.prt_indx_max == 0x3ff && dev.prt_addr_max == 0xfff,
+	      "Grenzen 0x%x/0x%x statt aus mcm", dev.prt_addr_max,
+	      dev.prt_indx_max);
+	ts.ts_type = 1;
+	check(ioc(IOCTL_PIXY_MVBLLI_HWINIT, (unsigned long)&ts) == 0,
+	      "HWINIT ts_type 1 abgelehnt");
+	check(lp_port_index(&dev, snk1), "ownership 0 hat die PIT geleert");
+	ts.ownership = 1;
+	check(ioc(IOCTL_PIXY_MVBLLI_HWINIT, (unsigned long)&ts) == 0,
+	      "HWINIT ownership 1 abgelehnt");
+	pit_nonzero = 0;
+	for (i = 0; i < TM_PORT_COUNT; i++)
+		pit_nonzero += lp_port_index(&dev, i) != 0;
+	for (i = 0; i <= 0x3ff; i++)
+		pit_nonzero += tm_r16(&dev, lp_pcs_off(&dev, i)) != 0;
+	check(!pit_nonzero, "%d Eintraege in PIT/PCS stehen geblieben",
+	      pit_nonzero);
+	printf("  HWINIT: ts_type 0 EIO, Grenzen 0xfff/0x3ff aus mcm, "
+	       "ownership 1 leert PIT und PCS\n");
+
+	/* PD_CONF mit leerer Liste */
+	check(ioc(IOCTL_PIXY_MVBLLI_PD_CONF, (unsigned long)&empty) == 0,
+	      "PD_CONF leer abgelehnt");
+	check(sa_r16(&dev, MVBC_STSR) == 0x1004, "STSR 0x%04x statt 0x1004",
+	      sa_r16(&dev, MVBC_STSR));
+	printf("  PD_CONF mit leerer Liste: STSR 0x%04x\n",
+	       sa_r16(&dev, MVBC_STSR));
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -813,6 +1023,7 @@ int main(int argc, char **argv)
 	test_hardw_config();
 	test_interrupts();
 	test_ivr_drain();
+	test_ioctl_abi();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;

@@ -49,6 +49,13 @@
 /* Groesse des Software-Empfangsrings fuer Message-Frames */
 #define MVBLLI_RCV_RING_ELEMS	0xde
 
+/*
+ * Ereignisaufzeichnung: zwei Plaetze (mvb_rec = 2), je Aufzeichnung
+ * hoechstens 0x14 Eintraege (mvb_recbuf_size) - beides fest im Original.
+ */
+#define MVB_REC_SLOTS		2
+#define MVB_REC_BUF_SIZE	0x14
+
 /* Lage der drei Message-Queues im Traffic Memory (Byteoffsets) */
 #define MD_TQ0_OFFSET		0x08000
 #define MD_TQ0_LLRS		8
@@ -127,6 +134,11 @@ struct mvblli_dev {
 	u8 auto_reset_rld;
 	u16 prt_addr_max;
 	u16 prt_indx_max;
+	u8 lp_state;			/* 1 = PD_CONF ist einmal durchgelaufen */
+
+	/* Ereignisaufzeichnung (REC_CONF / REC_DEL) */
+	u16 rec_port[MVB_REC_SLOTS];	/* 0 = Platz frei */
+	u16 rec_used;
 
 	u16 tmo_shift;			/* Schiebeweite fuer mvb_port.freshness */
 	u16 *all_tacks;			/* Sink-Time-Schwelle je Portadresse */
@@ -450,6 +462,7 @@ static void mvb_reset_rlds(struct mvblli_dev *d)
  */
 #define MVB_INT_DTI1		0	/* IMR0 Bit 0  - Deadline Timer 1  */
 #define MVB_INT_DTI2		1	/* IMR0 Bit 1  - Deadline Timer 2  */
+#define MVB_INT_DTI7		6	/* IMR0 Bit 6  - Ereignisaufzeichnung */
 #define MVB_INT_FEV		23	/* IMR1 Bit 7  - Zaehlerueberlauf  */
 #define MVB_INT_RQE		27	/* IMR1 Bit 11 - Empfangsqueue     */
 
@@ -462,6 +475,15 @@ static void mvb_int_connect(struct mvblli_dev *d, unsigned int nr)
 
 	d->int_mask[nr >> 4] |= bit;
 	sa_w16(d, reg, sa_r16(d, reg) | bit);
+}
+
+static void mvb_int_disconnect(struct mvblli_dev *d, unsigned int nr)
+{
+	u32 reg = (nr < 16) ? MVBC_IMR0 : MVBC_IMR1;
+	u16 bit = MVB_INT_BIT(nr);
+
+	d->int_mask[nr >> 4] &= ~bit;
+	sa_w16(d, reg, sa_r16(d, reg) & ~bit);
 }
 
 /*
@@ -1036,6 +1058,13 @@ static void mvb_run_int_handler(struct mvblli_dev *d, unsigned int nr)
 		dbg_rqe++;
 		d->debug_overflows++;
 		break;
+	/*
+	 * Das Original kopiert hier den gemeldeten Port in einen Ringpuffer
+	 * je Aufzeichnung. Ausgelesen wird der nirgends - read() kennt nur
+	 * Prozess- und Message-Daten. Die Quittung ueber das IVR genuegt.
+	 */
+	case MVB_INT_DTI7:
+		break;
 	default:
 		dbg_other++;
 		dbg_last_other = (int)nr;
@@ -1299,6 +1328,9 @@ static int mvb_init_board(struct mvblli_dev *d)
 	d->waitstates = TM_SCR_WS_3;
 	d->prt_addr_max = TM_PORT_COUNT - 1;
 	d->prt_indx_max = 0xfff;
+	d->lp_state = 0;
+	memset(d->rec_port, 0, sizeof(d->rec_port));
+	d->rec_used = 0;
 	d->q_tq_priority = 0;
 	d->rq_overflow = 0;
 
@@ -1373,24 +1405,6 @@ static int mvb_init_board(struct mvblli_dev *d)
 	mvb_int_connect(d, MVB_INT_DTI2);
 	mvb_int_connect(d, MVB_INT_DTI1);
 	mvb_int_connect(d, MVB_INT_RQE);
-
-	/*
-	 * Einmal leerraeumen, nachdem die Masken stehen.
-	 *
-	 * Am Geraet gemessen: IPR1 = 0x0080 (FEV liegt an), IMR1 gibt das
-	 * Bit frei, ISR1 bleibt trotzdem 0 und es kommt kein Interrupt.
-	 * Das passt nur zusammen, wenn der Controller auf die Flanke im
-	 * IPR ausloest, nicht auf den Pegel: die Quelle stand schon vor
-	 * dem Freigeben der Maske an, also gibt es keine Flanke mehr, und
-	 * weil niemand sie quittiert, bleibt sie fuer immer stehen und
-	 * blockiert jede weitere Meldung derselben Nummer.
-	 *
-	 * Das Quittieren ist das Lesen des IVR. Genau das holen wir hier
-	 * einmal nach, damit die Quelle wieder scharf wird. Steht nichts
-	 * an, kostet die Stelle zwei Registerlesevorgaenge.
-	 */
-	mvb_drain_ivr(d, MVBC_IVR1, 16);
-	mvb_drain_ivr(d, MVBC_IVR0, 0);
 
 	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
 		d->brd_id, d->status.hw_version);
@@ -1521,31 +1535,257 @@ static int mvb_conf_ports(struct mvblli_dev *d, PixyMvblliConfigLpPrt *list,
 	return 0;
 }
 
+/*
+ * PIT und PCS vollstaendig leeren, so weit, wie HWINIT sie beschrieben
+ * hat: (prt_addr_max + 1) Eintraege PIT, (prt_indx_max + 1) PCS.
+ */
+static void lp_clear_tables(struct mvblli_dev *d)
+{
+	tm_memset16(d, d->off_la_pit, 0,
+		    d->pit_type ? (d->prt_addr_max + 1u)
+				: (d->prt_addr_max + 1u) / 2);
+	tm_memset16(d, d->off_la_pcs, 0, (d->prt_indx_max + 1u) * 4);
+}
+
+/*
+ * Das Original laesst die Portliste durch lp_init_pd() laufen. Das leert
+ * PIT und PCS vor jeder Konfiguration ausser der ersten nach HWINIT -
+ * die hat HWINIT schon geleert - und ebenso nach jedem Fehlschlag, damit
+ * keine halbe Konfiguration stehen bleibt. Eine leere Liste ist gueltig
+ * und ergibt STSR = 0x1004.
+ *
+ * Fehlercodes wie im Original: alles vor der Konfiguration selbst
+ * (Kopieren, Speicher) ist EINVAL, ein Fehler beim Eintragen EIO.
+ */
 static int mvblli_do_pd_conf(struct mvblli_dev *d, void __user *uarg)
 {
 	PixyMvblliConfigLpPrt *list;
 	u16 count = 0;
 	int ret;
 
-	if (get_user(count, (u16 __user *)uarg))
-		return -EFAULT;
-	if (!count || count > TM_PORT_COUNT)
+	if (copy_from_user(&count, uarg, sizeof(count)))
 		return -EINVAL;
 
-	list = kcalloc(count, sizeof(*list), GFP_KERNEL);
+	list = kcalloc(count ? count : 1, sizeof(*list), GFP_KERNEL);
 	if (!list)
-		return -ENOMEM;
+		return -EINVAL;
 
 	if (copy_from_user(list, (u8 __user *)uarg + sizeof(u16),
 			   (size_t)count * sizeof(*list))) {
 		kfree(list);
-		return -ENOMEM;
+		return -EINVAL;
 	}
+
+	if (d->lp_state == 1 && count)
+		lp_clear_tables(d);
 
 	ret = mvb_conf_ports(d, list, count);
 	kfree(list);
 
-	return ret ? -EIO : 0;
+	if (ret) {
+		lp_clear_tables(d);
+		return -EIO;
+	}
+
+	d->lp_state = 1;
+	return 0;
+}
+
+/*
+ * HWINIT, im Original mvb_conf_lpts() mit lp_create() darunter.
+ *
+ * Von der uebergebenen Struktur zaehlen nur ownership, ts_type und
+ * auto_reset_rld. prt_addr_max und prt_indx_max leitet das Original aus
+ * der Groesse des Traffic Memory ab und uebergeht die Werte des
+ * Aufrufers. ts_type muss 1 sein, sonst EIO - erst nach dem Uebernehmen
+ * der Grenzen, genau wie in lp_ts_create().
+ */
+static int mvb_rec_desubscribe_all(struct mvblli_dev *d);
+
+static int mvb_conf_lpts(struct mvblli_dev *d, void __user *uarg)
+{
+	PixyMvblliConfigLpTs ts;
+
+	if (copy_from_user(&ts, uarg, sizeof(ts)))
+		return -EINVAL;
+
+	d->auto_reset_rld = ts.auto_reset_rld;
+
+	/*
+	 * Zaehler auf null, in Hardware wie im Statusblock. Das Original
+	 * macht das hier und sonst nur noch im PD_NSDB-Pfad; ohne Anwendung
+	 * fasst sie also niemand an. Ein gesaettigter Framezaehler bleibt
+	 * dann stehen und FEV meldet sich nie wieder - genau der Zustand,
+	 * in dem die Karte beim Geraetetest hing.
+	 */
+	sa_w16(d, MVBC_FC, 0);
+	mvb_clear_counters(d, true, true, true);
+	d->status.frames = 0;
+	d->status.errors = 0;
+	d->status.errors_a = 0;
+	d->status.errors_b = 0;
+
+	if (mvb_rec_desubscribe_all(d))
+		return -EIO;
+
+	d->prt_addr_max = 0xfff;
+	if (d->mcm == 2)
+		d->prt_indx_max = 0xff;
+	else if (d->mcm == 3 || d->mcm == 4)
+		d->prt_indx_max = 0x3ff;
+	else
+		d->prt_indx_max = 0x3f;
+	d->ts_type = ts.ts_type;
+
+	if (ts.ts_type != 1)
+		return -EIO;
+
+	d->ownership = ts.ownership;
+	if (ts.ownership == 1)
+		lp_clear_tables(d);
+
+	mvb_set_device_status_word(d, 0x0002, 0);
+	return 0;
+}
+
+/*
+ * DISABLE_PORT, im Original apd_port_disable(): wirkt nur auf eine
+ * Quelle und nimmt ihr dort die Typbits im PCS - der Port bleibt
+ * eingetragen, sendet aber nicht mehr. Unbekannter Port (8) und
+ * Nicht-Quelle (9) werden vom ioctl zu EIO.
+ */
+static int apd_port_disable(struct mvblli_dev *d, u16 port)
+{
+	u16 idx = lp_port_index(d, port);
+	u32 pcs;
+	u16 w0;
+
+	if (!idx || idx > d->prt_indx_max)
+		return 8;
+
+	pcs = lp_pcs_off(d, idx);
+	w0 = tm_r16(d, pcs);
+	if (((w0 >> TM_PCS_TYPE_OFF) & 3) != 2)
+		return 9;
+
+	tm_w16(d, pcs, w0 & 0xf3ff);
+	return 0;
+}
+
+/* ------------------------------------------------ Ereignisaufzeichnung */
+
+/*
+ * REC_CONF meldet einen Senkenport zur Aufzeichnung an: das DTI-Feld
+ * seines PCS bekommt den Wert 7, beim ersten Port wird zusaetzlich DTI7
+ * freigegeben. Die Daten sammelt das Original in einem Ringpuffer, den
+ * aber keine Schnittstelle ausliest (siehe mvb_run_int_handler) - nach
+ * aussen sichtbar sind nur PCS, IMR0 und die Rueckgabewerte. Genau die
+ * werden hier nachgebildet.
+ */
+#define MVB_PCS_DTI_REC		0x00e0	/* (6 + 1) << 5 */
+
+static int apd_rec_subscribe(struct mvblli_dev *d, u16 port, bool first)
+{
+	u16 idx = lp_port_index(d, port);
+	u32 pcs;
+	u16 w0;
+
+	if (!idx || idx > d->prt_indx_max)
+		return 8;
+
+	pcs = lp_pcs_off(d, idx);
+	w0 = tm_r16(d, pcs);
+	if (((w0 >> TM_PCS_TYPE_OFF) & 3) != 1)
+		return 10;
+
+	if (first)
+		mvb_int_connect(d, MVB_INT_DTI7);
+	tm_w16(d, pcs, w0 | MVB_PCS_DTI_REC);
+	return 0;
+}
+
+/*
+ * Wie im Original ohne Pruefung des Index: steht der Port nicht mehr in
+ * der PIT, trifft das Loeschen den PCS-Eintrag 0.
+ */
+static void apd_rec_desubscribe(struct mvblli_dev *d, u16 port, bool last)
+{
+	u32 pcs = lp_pcs_off(d, lp_port_index(d, port));
+
+	tm_w16(d, pcs, tm_r16(d, pcs) & 0xff1f);
+	if (last)
+		mvb_int_disconnect(d, MVB_INT_DTI7);
+}
+
+static int mvb_rec_desubscribe_all(struct mvblli_dev *d)
+{
+	int i;
+
+	for (i = 0; i < MVB_REC_SLOTS; i++) {
+		u16 port = d->rec_port[i];
+
+		if (!port)
+			continue;
+		d->rec_used--;
+		d->rec_port[i] = 0;
+		apd_rec_desubscribe(d, port, d->rec_used == 0);
+	}
+
+	return 0;
+}
+
+static long mvb_conf_rec_event(struct mvblli_dev *d, void __user *uarg)
+{
+	mvb_rec_event ev;
+	int i;
+
+	if (copy_from_user(&ev, uarg, sizeof(ev)))
+		return -EINVAL;
+
+	if (d->rec_used >= MVB_REC_SLOTS)
+		return -ENOSPC;
+	if ((u16)(ev.ts_port - 1) > 0xffe || !ev.buf_len ||
+	    ev.buf_len > MVB_REC_BUF_SIZE)
+		return -EINVAL;
+
+	/* erster freier Platz; ein Doppel davor ist EBUSY */
+	for (i = 0; i < MVB_REC_SLOTS; i++) {
+		if (d->rec_port[i] == ev.ts_port)
+			return -EBUSY;
+		if (d->rec_port[i])
+			continue;
+
+		if (apd_rec_subscribe(d, ev.ts_port, d->rec_used == 0))
+			return -EIO;
+		d->rec_used++;
+		d->rec_port[i] = ev.ts_port;
+		return 0;
+	}
+
+	return -ENOSPC;
+}
+
+static long mvb_del_rec_event(struct mvblli_dev *d, void __user *uarg)
+{
+	mvb_rec_event ev;
+	int i;
+
+	if (copy_from_user(&ev, uarg, sizeof(ev)))
+		return -EINVAL;
+	if (!ev.ts_port)
+		return -EINVAL;
+
+	for (i = 0; i < MVB_REC_SLOTS; i++) {
+		if (d->rec_port[i] != ev.ts_port)
+			continue;
+
+		d->rec_used--;
+		d->rec_port[i] = 0;
+		apd_rec_desubscribe(d, ev.ts_port, d->rec_used == 0);
+		return 0;
+	}
+
+	return -EINVAL;
 }
 
 /* ------------------------------------------------------------- fops */
@@ -1735,6 +1975,20 @@ static __poll_t pixy_mvblli_poll(struct file *filp, poll_table *wait)
 	return mask;
 }
 
+/*
+ * access_ok() mit der Groesse, die das Original an der jeweiligen Stelle
+ * prueft. Auch bei den drei Wert-ioctls (WRITE_DEV_ADDR, WRITE_DSW,
+ * DISABLE_PORT) laeuft die Pruefung ueber den Wert selbst - sinnlos, aber
+ * so steht es im Original, und fuer kleine Werte ist sie immer erfuellt.
+ */
+#define MVB_UARG_OK(arg, n)	access_ok((void __user *)(arg), (n))
+
+/*
+ * Verteiler, Fall fuer Fall nach dem Disassembly des Originals: dieselbe
+ * Reihenfolge der Pruefungen, dieselben Fehlercodes. Der Dekompilierer
+ * hat in den abgespaltenen Fallfunktionen die Register falsch zugeordnet
+ * und das an drei Stellen verschleiert - massgeblich ist der Maschinencode.
+ */
 static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 			      unsigned long arg)
 {
@@ -1749,58 +2003,64 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	if (_IOC_TYPE(cmd) != PIXY_PIXY_MVBLLI_IOCTL_MAGIC ||
 	    _IOC_NR(cmd) > PIXY_PIXY_MVBLLI_MAX_IOCTL_NR)
 		return -ENOTTY;
-	/*
-	 * Alle ioctls bis auf die beiden ohne Argument brauchen einen
-	 * Zeiger. Das Original faellt bei arg == 0 in den EINVAL-Zweig,
-	 * nicht in EFAULT.
-	 */
-	if (!uarg && cmd != IOCTL_PIXY_MVBLLI_START &&
-	    cmd != IOCTL_PIXY_MVBLLI_STOP &&
-	    cmd != IOCTL_PIXY_MVBLLI_MD_FLUSH_QUEUE)
-		return -EINVAL;
 
 	switch (cmd) {
 	case IOCTL_PIXY_MVBLLI_READ_DEV_ADDR:
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 2))
+			return -EFAULT;
 		v16 = mvb_get_device_address(d);
-		if (put_user(v16, (u16 __user *)uarg))
+		d->mvb_addr = v16;
+		if (copy_to_user(uarg, &v16, 2))
 			ret = -EINVAL;
 		break;
 
+	/*
+	 * Die Adresse kommt als Wert, nicht ueber einen Zeiger - obwohl der
+	 * Kopf _IOW(..., uint16_t) sagt. Damit ist 0 nicht setzbar: arg == 0
+	 * faellt vorher in EINVAL. Gemerkt wird sie vor dem Schreiben, auch
+	 * wenn das anschliessend scheitert.
+	 */
 	case IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR:
-		if (d->status.is_active || get_user(v16, (u16 __user *)uarg))
-			ret = -EFAULT;
-		else if (v16 > 0xfff)
-			ret = -EINVAL;
-		else
-			ret = mvb_set_device_address(d, v16) ? -EIO : 0;
+		if (!arg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 2) || d->status.is_active)
+			return -EFAULT;
+		if (arg > 0xfff)
+			return -EINVAL;
+		d->mvb_addr = (u16)arg;
+		if (mvb_set_device_address(d, (u16)arg))
+			ret = -EIO;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_DSW:
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 2))
+			return -EFAULT;
 		v16 = sa_r16(d, SA_PP_DATA +
 			     tm_dock_offset(TM_PP_FC15,
 					    (sa_r16(d, SA_PP_PCS + TM_PP_FC15 * 8 + 2)
 					     & TM_PCS_VP_MSK) ? 1 : 0));
-		if (put_user(v16, (u16 __user *)uarg))
+		if (copy_to_user(uarg, &v16, 2))
 			ret = -EINVAL;
 		break;
 
 	/*
-	 * Das Argument ist bewusst 32 Bit breit: oberes Wort Maske, unteres
-	 * Wort Wert. Nur die maskierten Bits werden veraendert. Wird dabei
-	 * das RLD-Bit angefasst, raeumt das Original im Zweileitungsbetrieb
-	 * zuvor die gespeicherte Stoerungsmeldung weg.
+	 * Ebenfalls als Wert: oberes Wort Maske, unteres Wort Wert. Nur die
+	 * maskierten Bits werden veraendert. Steht RLD im Wert, raeumt das
+	 * Original im Zweileitungsbetrieb zuvor die Stoerungsmeldung weg.
 	 */
 	case IOCTL_PIXY_MVBLLI_WRITE_DSW:
-		if (get_user(v32, (u32 __user *)uarg)) {
-			ret = -EFAULT;
-		} else {
-			if ((v32 & MVB_DSW_RLD) &&
-			    d->line_config == MVB_LINE_BOTH)
-				mvb_reset_rlds(d);
-
-			mvb_set_device_status_word(d, (u16)(v32 >> 16),
-						   (u16)v32);
-		}
+		if (!arg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 4))
+			return -EFAULT;
+		v32 = (u32)arg;
+		if ((v32 & MVB_DSW_RLD) && d->line_config == MVB_LINE_BOTH)
+			mvb_reset_rlds(d);
+		mvb_set_device_status_word(d, (u16)(v32 >> 16), (u16)v32);
 		break;
 
 	/*
@@ -1810,31 +2070,34 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 	 */
 	case IOCTL_PIXY_MVBLLI_START:
 		if (d->status.is_active)
-			ret = -EALREADY;
-		else if ((u16)(d->mvb_addr - 1) >= 0x1000)
-			ret = -EINVAL;
-		else
-			ret = mvb_go(d) ? -EIO : 0;
+			return -EALREADY;
+		if ((u16)(d->mvb_addr - 1) >= 0x1000)
+			return -EINVAL;
+		ret = mvb_go(d) ? -EIO : 0;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_STOP:
 		if (!d->status.is_active)
-			ret = -ENETDOWN;
-		else
-			ret = mvb_stop(d) ? -EIO : 0;
+			return -ENETDOWN;
+		ret = mvb_stop(d) ? -EIO : 0;
 		break;
 
 	/*
 	 * Der Watchdog gehoert zum MVBC1S. Auf dem MVBC02D dieser Karte
-	 * lehnt das Original den Aufruf ab, statt ihn stillschweigend zu
-	 * schlucken.
+	 * lehnt das Original den Aufruf ab, noch vor jeder Pruefung des
+	 * Arguments.
 	 */
 	case IOCTL_PIXY_MVBLLI_RETRIGGER:
 		ret = -EINVAL;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_STATS: {
-		mvb_stat st = d->status;
+		mvb_stat st;
+
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(st)))
+			return -EFAULT;
 
 		/*
 		 * Die Zaehler im Statusblock tragen die Summe aller bereits
@@ -1843,6 +2106,7 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		 * Wert bleibt dabei unberuehrt, sonst wuerde zyklisches
 		 * Abfragen doppelt zaehlen.
 		 */
+		st = d->status;
 		st.mvb_addr  = d->mvb_addr;
 		st.frames   += mvb_read_counter(d, MVB_CNT_FRAMES);
 		st.errors   += mvb_read_counter(d, MVB_CNT_ERRORS);
@@ -1853,78 +2117,94 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	}
 
+	/*
+	 * Die Aufzeichnung hat im Original immer zwei Plaetze; EPERM
+	 * (mvb_rec == 0) kommt deshalb nie vor.
+	 */
+	case IOCTL_PIXY_MVBLLI_REC_CONF:
+	case IOCTL_PIXY_MVBLLI_REC_DEL:
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(mvb_rec_event)))
+			return -EFAULT;
+		if (cmd == IOCTL_PIXY_MVBLLI_REC_CONF)
+			ret = mvb_conf_rec_event(d, uarg);
+		else
+			ret = mvb_del_rec_event(d, uarg);
+		break;
+
+	/*
+	 * PD_NSDB ist im Original vorhanden, wird von diesem Geraet aber
+	 * nachweislich nicht benutzt (STSR und dti belegen den
+	 * PD_CONF-Pfad). Was das Original schon beim Einlesen ablehnt, lehnt
+	 * der Nachbau genauso ab; eine formal brauchbare Datenbank meldet er
+	 * deutlich mit ENOSYS, statt still etwas Falsches zu tun.
+	 */
+	case IOCTL_PIXY_MVBLLI_PD_NSDB: {
+		mvb_config_nsdb nsdb;
+
+		if (d->status.is_active)
+			return -EALREADY;
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(nsdb)))
+			return -EFAULT;
+		if (copy_from_user(&nsdb, uarg, sizeof(nsdb)))
+			return -EINVAL;
+		if (!nsdb.length || nsdb.length > MVBLLI_NSDB_SIZE ||
+		    !nsdb.nsdb)
+			return -EINVAL;
+		pr_warn_once(DRV_NAME
+			     ": NSDB configuration is not implemented\n");
+		ret = -ENOSYS;
+		break;
+	}
+
 	case IOCTL_PIXY_MVBLLI_PD_CONF:
 		if (d->status.is_active)
-			ret = -EALREADY;
-		else
-			ret = mvblli_do_pd_conf(d, uarg);
+			return -EALREADY;
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 2))
+			return -EFAULT;
+		ret = mvblli_do_pd_conf(d, uarg);
 		break;
 
 	case IOCTL_PIXY_MVBLLI_MD_CONF: {
 		PixyMvblliConfigMex mex;
 
-		if (d->status.is_active) {
-			ret = -EALREADY;
-		} else if (copy_from_user(&mex, uarg, sizeof(mex))) {
-			ret = -EINVAL;
-		} else {
-			d->q_tq_priority = mex.q_tq_priority;
-			d->status.has_md = 1;
-		}
+		if (d->status.is_active)
+			return -EALREADY;
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(mex)))
+			return -EFAULT;
+		if (copy_from_user(&mex, uarg, sizeof(mex)))
+			return -EINVAL;
+		d->q_tq_priority = mex.q_tq_priority;
+		d->status.has_md = 1;
 		break;
 	}
 
-	case IOCTL_PIXY_MVBLLI_HWINIT: {
-		PixyMvblliConfigLpTs ts;
-
-		if (d->status.is_active ||
-		    copy_from_user(&ts, uarg, sizeof(ts))) {
-			ret = -EFAULT;
-			break;
-		}
-		d->ownership = ts.ownership;
-		d->ts_type = ts.ts_type;
-		d->auto_reset_rld = ts.auto_reset_rld;
-		if (ts.prt_addr_max)
-			d->prt_addr_max = ts.prt_addr_max;
-		if (ts.prt_indx_max)
-			d->prt_indx_max = ts.prt_indx_max;
-
-		/*
-		 * Zaehler auf null, in Hardware wie im Statusblock. Das
-		 * Original macht das hier und sonst nur noch im
-		 * PD_NSDB-Pfad; ohne Anwendung fasst sie also niemand an.
-		 * Ein gesaettigter Framezaehler bleibt dann stehen und FEV
-		 * meldet sich nie wieder - genau der Zustand, in dem die
-		 * Karte beim Geraetetest hing.
-		 */
-		sa_w16(d, MVBC_FC, 0);
-		mvb_clear_counters(d, true, true, true);
-		d->status.frames = 0;
-		d->status.errors = 0;
-		d->status.errors_a = 0;
-		d->status.errors_b = 0;
-		break;
-	}
-
+	/* Wert, nicht Zeiger - wie WRITE_DEV_ADDR */
 	case IOCTL_PIXY_MVBLLI_DISABLE_PORT:
-		if (get_user(v16, (u16 __user *)uarg)) {
-			ret = -EFAULT;
-		} else if (v16 >= TM_PORT_COUNT) {
-			ret = -EINVAL;
-		} else {
-			u16 idx = lp_port_index(d, v16);
-
-			if (idx)
-				tm_w16(d, lp_pcs_off(d, idx), 0);
-			if (d->pit_type)
-				tm_w16(d, d->off_la_pit + v16 * 2, 0);
-		}
+		if (!arg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 2))
+			return -EFAULT;
+		if (arg > 0xfff)
+			return -EINVAL;
+		ret = apd_port_disable(d, (u16)arg) ? -EIO : 0;
 		break;
 
 	case IOCTL_PIXY_MVBLLI_READ_TM: {
 		mvb_tm tm;
 
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(tm)))
+			return -EFAULT;
+		memset(&tm, 0, sizeof(tm));
 		tm.ts_id = d->ts_id;
 		tm.address = (u16 *)d->p_tm;
 		tm.size_id = d->mcm;
@@ -1933,13 +2213,36 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	}
 
+	/* ohne Argument - ein Argument ungleich 0 ist EINVAL */
 	case IOCTL_PIXY_MVBLLI_MD_FLUSH_QUEUE:
+		if (arg)
+			return -EINVAL;
 		mvb_md_flush_send_queue(d);
 		break;
 
+	/*
+	 * Das Original liest ein 32-Bit-Wort ein und prueft, dass in beiden
+	 * Haelften nur die Bits 0..2 stehen. Als selector und reset reicht
+	 * es dann aber nicht dieses Wort weiter, sondern den Zeiger selbst:
+	 * Bits 16..31 der Adresse sind der selector, Bits 0..15 reset.
+	 * Zurueck kommen 2 Byte, nicht 4.
+	 *
+	 * Das ist ein Fehler im Original. Er wird hier bewusst nachgebaut:
+	 * die Anwendung laeuft seit Jahren mit genau diesem Verhalten, und
+	 * welche Statusbits sie sieht und welche dabei zurueckgesetzt werden,
+	 * haengt davon ab.
+	 */
 	case IOCTL_PIXY_MVBLLI_MD_GET_STATUS:
-		v32 = mvb_md_get_status(d, 0xffff, 0);
-		if (put_user(v32, (u32 __user *)uarg))
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 4))
+			return -EFAULT;
+		if (copy_from_user(&v32, uarg, 4))
+			return -EINVAL;
+		if ((v32 | (v32 >> 16)) & 0xfff8)
+			return -EINVAL;
+		v16 = (u16)mvb_md_get_status(d, (u16)(arg >> 16), (u16)arg);
+		if (copy_to_user(uarg, &v16, 2))
 			ret = -EINVAL;
 		break;
 
@@ -1956,21 +2259,19 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		u16 treply, line;
 		bool keep_treply = false;
 
-		if (copy_from_user(&ctrl, uarg, sizeof(ctrl))) {
-			ret = -EINVAL;
-			break;
-		}
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(ctrl)))
+			return -EFAULT;
+		if (copy_from_user(&ctrl, uarg, sizeof(ctrl)))
+			return -EINVAL;
 		cmd8 = *(u8 *)&ctrl.command;
 
 		if (ctrl.dev_addr < 0x1000) {
-			if (d->status.is_active) {
-				ret = -EFAULT;
-				break;
-			}
-			if (mvb_set_device_address(d, ctrl.dev_addr)) {
-				ret = -EIO;
-				break;
-			}
+			if (d->status.is_active)
+				return -EFAULT;
+			if (mvb_set_device_address(d, ctrl.dev_addr))
+				return -EIO;
 		}
 
 		if (ctrl.t_ignore == 0)
@@ -1998,13 +2299,18 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		else
 			line = d->line_config;
 
-		if (mvb_hardw_config(d, line, treply)) {
-			ret = -EIO;
-			break;
-		}
-		if ((cmd8 & 0x0c) == 0x0c) {
-			sa_w16(d, MVBC_DR, sa_r16(d, MVBC_DR) | TM_DR_LS);
-			mvb_set_laa_rld();
+		/*
+		 * Aendert sich weder Antwortfenster noch Leitung, ruft das
+		 * Original mvb_hardw_config() gar nicht erst auf.
+		 */
+		if (!keep_treply || (cmd8 & 0x0c)) {
+			if (mvb_hardw_config(d, line, treply))
+				return -EIO;
+			if ((cmd8 & 0x0c) == 0x0c) {
+				sa_w16(d, MVBC_DR,
+				       sa_r16(d, MVBC_DR) | TM_DR_LS);
+				mvb_set_laa_rld();
+			}
 		}
 
 		/* cla/clb setzen die Fehlerzaehler zurueck */
@@ -2023,46 +2329,32 @@ static long pixy_mvblli_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	}
 
+	case IOCTL_PIXY_MVBLLI_HWINIT:
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, sizeof(PixyMvblliConfigLpTs)) ||
+		    d->status.is_active)
+			return -EFAULT;
+		ret = mvb_conf_lpts(d, uarg);
+		break;
+
 	case IOCTL_PIXY_MVBLLI_USERS:
+		if (!uarg)
+			return -EINVAL;
+		if (!MVB_UARG_OK(arg, 4))
+			return -EFAULT;
 		v32 = d->users;
-		if (put_user(v32, (u32 __user *)uarg))
+		if (copy_to_user(uarg, &v32, 4))
 			ret = -EINVAL;
 		break;
 
 	/*
-	 * PD_NSDB ist im Original vorhanden, wird von diesem Geraet aber
-	 * nachweislich nicht benutzt (STSR und dti belegen den
-	 * PD_CONF-Pfad). Der Nachbau meldet sich deutlich ab, statt still
-	 * etwas Falsches zu tun.
+	 * Alles andere mit dem richtigen Magic und einer Nummer bis 22 -
+	 * darunter MD_NSDB und BA_NSDB, die im Kopf stehen, im Verteiler
+	 * des Originals aber fehlen - endet dort in EINVAL, nicht ENOTTY.
 	 */
-	case IOCTL_PIXY_MVBLLI_PD_NSDB:
-		if (d->status.is_active) {
-			ret = -EALREADY;
-		} else {
-			pr_warn_once(DRV_NAME
-				     ": NSDB configuration is not implemented\n");
-			ret = -ENOSYS;
-		}
-		break;
-
-	/*
-	 * MD_NSDB und BA_NSDB stehen zwar im Kopf, kommen aber schon im
-	 * Original im ioctl-Verteiler nicht vor und laufen dort in den
-	 * EINVAL-Zweig. Ebenso die Ereignisaufzeichnung, solange kein
-	 * Aufzeichnungspuffer eingerichtet ist - dafuer gibt es EPERM.
-	 */
-	case IOCTL_PIXY_MVBLLI_MD_NSDB:
-	case IOCTL_PIXY_MVBLLI_BA_NSDB:
-		ret = -EINVAL;
-		break;
-
-	case IOCTL_PIXY_MVBLLI_REC_CONF:
-	case IOCTL_PIXY_MVBLLI_REC_DEL:
-		ret = -EPERM;
-		break;
-
 	default:
-		ret = -ENOTTY;
+		ret = -EINVAL;
 		break;
 	}
 

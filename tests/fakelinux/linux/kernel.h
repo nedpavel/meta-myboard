@@ -167,6 +167,8 @@ struct file_operations {
 #define copy_from_user(d, s, n)		(memcpy((d), (s), (n)), 0)
 #define get_user(v, p)			((v) = *(p), 0)
 #define put_user(v, p)			(*(p) = (v), 0)
+#define access_ok(p, n)			((unsigned long)(p) <= \
+					 0x00007ffffffff000UL - (unsigned long)(n))
 
 #define cdev_init(c, f)			do { } while (0)
 #define cdev_add(c, d, n)		(0)

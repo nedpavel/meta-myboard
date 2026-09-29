@@ -110,9 +110,11 @@ IOC = {
     "USERS":           0x80044C16,
 }
 
-# Diese Schritte duerfen sich unterscheiden: der Nachbau baut die
-# NSDB-Wege bewusst nicht nach und meldet sich dort ab.
-KNOWN_DIFF = {"PD_NSDB"}
+# Diese Schritte duerfen sich unterscheiden. Seit der Nachbau die
+# Eingabepruefung von PD_NSDB uebernimmt, ist das keiner mehr; eine
+# gueltige NSDB wuerde sich unterscheiden, die schickt dieses Skript
+# aber nicht.
+KNOWN_DIFF = set()
 
 # Portliste fuer PD_CONF. (Adresse, Groesse in Byte, Typ: 1 = Senke,
 # 2 = Quelle)
@@ -164,7 +166,7 @@ LIFESIGN = {
 }
 
 WRITE_PORT, WRITE_SIZE = 491, 4
-DISABLE_PORT_ADDR = 902          # wird abgeschaltet, danach nicht mehr lesbar
+DISABLE_PORT_ADDR = 902          # Senke: DISABLE_PORT muss EIO liefern
 
 TEST_ADDR = 240          # die eigene Adresse des Geraets
 
@@ -332,9 +334,14 @@ def run(outdir, allow_md, go):
     call(log, "READ_DEV_ADDR", lambda: io(IOC["READ_DEV_ADDR"], b, True))
     log.line("     Adresse vorher: 0x%04X" % struct.unpack("<H", b)[0])
 
-    call(log, "WRITE_DEV_ADDR",
+    # Die Adresse geht als Wert, nicht als Zeiger - so steht es im
+    # Maschinencode des Originals. Ein Zeiger ist eine grosse Zahl und
+    # ergibt EINVAL; das wird gleich mitgeprueft.
+    call(log, "WRITE_DEV_ADDR Zeiger",
          lambda: io(IOC["WRITE_DEV_ADDR"],
                     bytearray(struct.pack("<H", TEST_ADDR)), True))
+    call(log, "WRITE_DEV_ADDR",
+         lambda: io(IOC["WRITE_DEV_ADDR"], TEST_ADDR))
     snapshot(mm, outdir, log.step, "devaddr")
 
     b2 = bytearray(2)
@@ -342,9 +349,13 @@ def run(outdir, allow_md, go):
     log.line("     Adresse nachher: 0x%04X" % struct.unpack("<H", b2)[0])
 
     # pb_mwd, ownership, ts_type, prt_addr_max, prt_indx_max, auto_reset_rld
-    # Lauter Nullen lehnt das Original mit EIO ab - die Grenzen muessen
-    # gesetzt sein.
-    hw = bytearray(struct.pack("<QBBHHB x", 0, 0, 0, 0xFFF, 0xFFF, 0))
+    # ts_type muss 1 sein, sonst EIO (lp_ts_create). Die Grenzen nimmt
+    # das Original nicht vom Aufrufer, sondern aus der Groesse des
+    # Traffic Memory. Ohne erfolgreiches HWINIT stuerzt das Original
+    # bei PD_CONF ab ("Killed") - das war der Absturz der ersten Runde.
+    hw0 = bytearray(struct.pack("<QBBHHB x", 0, 0, 0, 0xFFF, 0xFFF, 0))
+    call(log, "HWINIT ts_type 0", lambda: io(IOC["HWINIT"], hw0, True))
+    hw = bytearray(struct.pack("<QBBHHB x", 0, 1, 1, 0xFFF, 0xFFF, 0))
     call(log, "HWINIT", lambda: io(IOC["HWINIT"], hw, True))
     snapshot(mm, outdir, log.step, "hwinit")
 
@@ -392,9 +403,9 @@ def run(outdir, allow_md, go):
 
     # ---- Schreibende Zugriffe, Controller bleibt gestoppt ----
     log.line("\n--- Schreibende Zugriffe ---")
+    # Wert, nicht Zeiger: oberes Wort Maske, unteres Wort Wert
     call(log, "WRITE_DSW",
-         lambda: io(IOC["WRITE_DSW"],
-                    bytearray(struct.pack("<I", 0x00FF0011)), True))
+         lambda: io(IOC["WRITE_DSW"], 0x00FF0011))
     snapshot(mm, outdir, log.step, "writedsw")
 
     # Kommandobyte 0x03 = cla|clb: setzt nur die Fehlerzaehler zurueck.
@@ -430,11 +441,35 @@ def run(outdir, allow_md, go):
         log.line("   (Message-Daten uebersprungen, --md erlaubt sie)")
 
     if not NO_PD:
-        call(log, "DISABLE_PORT",
-             lambda: io(IOC["DISABLE_PORT"],
-                        bytearray(struct.pack("<H", DISABLE_PORT_ADDR)),
-                        True))
+        # Ereignisaufzeichnung: setzt im PCS das DTI-Feld auf 7 und gibt
+        # beim ersten Port DTI7 frei. Vor START wieder abgemeldet.
+        sink = [q[0] for q in PORTS if q[2] == 1][0]
+        ev = lambda port, n: bytearray(struct.pack("<HH", port, n))
+        call(log, "REC_CONF Senke",
+             lambda: io(IOC["REC_CONF"], ev(sink, 20), True))
+        snapshot(mm, outdir, log.step, "recconf")
+        call(log, "REC_CONF doppelt",
+             lambda: io(IOC["REC_CONF"], ev(sink, 20), True))
+        call(log, "REC_CONF Quelle",
+             lambda: io(IOC["REC_CONF"], ev(WRITE_PORT, 20), True))
+        call(log, "REC_CONF 21 Eintr.",
+             lambda: io(IOC["REC_CONF"], ev(sink, 21), True))
+        call(log, "REC_DEL",
+             lambda: io(IOC["REC_DEL"], ev(sink, 0), True))
+        snapshot(mm, outdir, log.step, "recdel")
+        call(log, "REC_DEL nochmal",
+             lambda: io(IOC["REC_DEL"], ev(sink, 0), True))
+
+        # DISABLE_PORT, ebenfalls als Wert: auf einer Senke EIO, auf der
+        # Quelle werden nur die Typbits im PCS geloescht.
+        call(log, "DISABLE_PORT Senke",
+             lambda: io(IOC["DISABLE_PORT"], DISABLE_PORT_ADDR))
+        call(log, "DISABLE_PORT Quelle",
+             lambda: io(IOC["DISABLE_PORT"], WRITE_PORT))
         snapshot(mm, outdir, log.step, "disable")
+
+    call(log, "MD_FLUSH_QUEUE arg",
+         lambda: io(IOC["MD_FLUSH_QUEUE"], 1))
 
     # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
     if go:
@@ -474,8 +509,6 @@ def run(outdir, allow_md, go):
             for a_, sz, t in PORTS:
                 if NO_PD or t != 1:
                     continue
-                if a_ == DISABLE_PORT_ADDR:
-                    continue        # vorher per DISABLE_PORT abgeschaltet
                 buf = mvb_port(1, a_)
                 try:
                     pd_read(fd, buf, sz)
@@ -650,7 +683,7 @@ def main():
                 src = [q for q in PORTS if q[2] == 2]
                 if src:
                     WRITE_PORT, WRITE_SIZE = src[0][0], src[0][1]
-                DISABLE_PORT_ADDR = PORTS[-1][0]
+                DISABLE_PORT_ADDR = [q for q in PORTS if q[2] == 1][-1][0]
                 print("Portliste aus %s: %d Ports" % (sys.argv[i + 1], len(PORTS)))
         run(sys.argv[2], "--md" in sys.argv, "--go" in sys.argv)
     elif len(sys.argv) == 4 and sys.argv[1] == "compare":
