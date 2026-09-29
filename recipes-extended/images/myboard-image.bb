@@ -35,6 +35,7 @@ RDEPENDS:${PN}:remove:i686 = "ovmf"
 IMAGE_INSTALL:append = " kernel-modules"
 IMAGE_INSTALL:append = " \
     xf86-video-fbdev \
+    xf86-video-modesetting \
     xorg-conf-myboard \
     "
 IMAGE_INSTALL:append = " udev-rules-myboard"

@@ -1,0 +1,46 @@
+# ALTERNATIVE Grafikkonfiguration — standardmaessig INAKTIV.
+#
+# Xorg liest in xorg.conf.d nur Dateien mit der Endung ".conf"; durch das
+# angehaengte ".disabled" wird diese Datei ignoriert.
+#
+# Aktiv ist normalerweise 20-fbdev.conf (fbdev auf /dev/fb0). Das ist die
+# konservative Variante, die auch beim INC-100 lief. Sollte X damit nicht
+# starten (schwarzer Bildschirm), hier umschalten — ohne neues Image:
+#
+#   rm  /etc/X11/xorg.conf.d/20-fbdev.conf
+#   mv  /etc/X11/xorg.conf.d/20-modesetting.conf.disabled \
+#       /etc/X11/xorg.conf.d/20-modesetting.conf
+#   systemctl restart myboard-gui
+#
+# modesetting ist auf Apollo Lake (HD Graphics 500, Gen9) der eigentlich
+# passende Treiber und beherrscht im Gegensatz zu fbdev echtes Mode-Setting.
+#
+# Bleibt es auch damit schwarz, zusaetzlich die Beschleunigung abschalten —
+# in der Device-Section einfuegen:
+#       Option "AccelMethod" "none"
+# Genau glamor war beim INC-100 (Bay Trail) die Ursache der GPU-Haenger.
+
+Section "Device"
+    Identifier "Grafik"
+    Driver "modesetting"
+EndSection
+
+Section "Screen"
+    Identifier "Default Screen"
+    Device "Grafik"
+    Monitor "Default Monitor"
+    DefaultDepth 24
+EndSection
+
+# Kiosk: Bildschirm darf nie schwarz werden / abschalten.
+Section "ServerFlags"
+    Option "BlankTime"   "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime"     "0"
+EndSection
+
+Section "Monitor"
+    Identifier "Default Monitor"
+    Option "DPMS" "false"
+EndSection
