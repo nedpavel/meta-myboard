@@ -24,4 +24,5 @@ SRC_URI:append = " \
     file://touch-penmount.cfg \
     file://network-i210.cfg \
     file://efi-gpt.cfg \
+    file://pixy1000-hw.cfg \
     "
