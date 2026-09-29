@@ -113,12 +113,41 @@ Lage und Wert dieser Worte, das `SCR` beim Löschen und einen Abzug nach
 `close()` (`99_zu`); damit wird `mvb_deinit_board` in Phase 3 direkt
 vergleichbar.
 
+## Ergebnis Lauf 2 (`p2-orig` gegen `p2-neu`)
+
+**Alle 14 Speicherabzüge bis einschließlich `99_ende` gleich, alle
+Register gleich.** Die beiden Korrekturen aus Lauf 1 sind am Gerät
+bestätigt.
+
+Einziger Unterschied: der Zustand **nach `close()`**. Das Original setzt
+in `mvb_deinit` `SCR = 0`; der Controller geht in RESET, der
+Registerblock springt an den Grundplatz `TM + 0x3C00` zurück (gemessen
+bei `0x3F80…`: `SCR 0700`, `MCR 2880`, `DR 0008`, `TCR 0022`). Der
+Nachbau stoppte nur (`IL = CONFIG`) und ließ den Controller konfiguriert
+und hörend am Bus. Das waren auch die „8 Worte nach dem Löschen“: sie
+stammten jeweils vom zuvor geschlossenen *Original*.
+
+Behoben: `mvb_deinit_board` in der Reihenfolge des Originals (BCR-
+Interruptnummer löschen, Quellen abmelden, Dienst austragen,
+`mvb_stop`, `SCR = 0`); `mvb_stop` löscht wie im Original nur Bit 1 des
+IL-Felds.
+
+Zwei Fehler im Werkzeug, ebenfalls behoben:
+- Das Löschen sparte nur den Registerblock bei `0xFF80` aus. Nach dem
+  `close()` des Originals liegt er bei `0x3F80` und bekam Nullen ab
+  (folgenlos, weil `open()` ihn neu aufsetzt). Jetzt bleiben alle drei
+  möglichen Plätze unberührt; der lebende Block wird an `MCR` erkannt
+  (Version 5, `mcm` passend zum Platz).
+- Der Protokollvergleich lief Zeile gegen Zeile und geriet durch die
+  zusätzlichen Zeilen außer Tritt. Jetzt wird ausgerichtet, und der
+  Vorzustand (vom zuvor geschlossenen Treiber) steht getrennt.
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1 `PD_CONF` nach `lp_ts_open_port` erledigt, 2.2 erledigt, Ringbelegung korrigiert; 2.3 Gegenlesen offen |
+| 2 | 2.1 `PD_CONF`, 2.2, Ringbelegung und Schließen (`mvb_deinit_board`) erledigt und bis auf das Schließen am Gerät bestätigt; 2.3 Gegenlesen offen |
 | 3 | offen |
 | 4 | offen |
 | 5 | offen |

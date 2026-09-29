@@ -47,6 +47,7 @@ Vergleich der Abzuege ist dann nicht mehr aussagekraeftig - dort zaehlt
 das Protokoll: Rueckgaben, gelesene Daten, freshness, Zaehlerstaende.
 """
 
+import difflib
 import errno as E
 import fcntl
 import glob
@@ -65,6 +66,13 @@ TM = ISA + 0x40000
 SA_OFF = 0x0FC00
 REG = 0x380
 IVR = (0x3C8, 0x3CC)
+
+# Moegliche Plaetze der Service Area (TM_SERVICE_OFFSETS). Nach einem
+# RESET (SCR = 0, so schliesst das Original) liegt der Registerblock am
+# Grundplatz 0x3C00, erst MCR schiebt ihn an 0xFC00. Geloescht wird
+# deshalb an keinem dieser Plaetze.
+SA_CANDIDATES = (0x03C00, 0x07C00, 0x0FC00)
+SA_FOR_MCM = (0x03C00, 0x07C00, 0x0FC00, 0x0FC00, 0x0FC00)
 
 # Traffic Memory ohne den Registerblock: zwei Stuecke mit einer Luecke
 CHUNKS = ((0x00000, 0x0FF80), (0x10000, 0x30000))
@@ -107,6 +115,10 @@ DR_SAMPLES = 2000
 
 # Protokollzeilen mit diesen Merkmalen haengen am laufenden Bus.
 VOLATILE_LOG = ("frames ", "FC ", "Stichprobe", "fresh ")
+
+# Protokollzeilen ueber den Zustand VOR dem Lauf - der stammt vom zuvor
+# geschlossenen Treiber und gehoert nicht zum Vergleich.
+PRESTATE_LOG = ("Traffic Memory geloescht", "Vorzustand")
 
 # Die drei Message-Ringe: Name, Byteoffset im TM, Zahl der LLR. Die
 # Puffer liegen hinter dem LLR-Feld, auf 32 Byte ausgerichtet; LLR k
@@ -278,13 +290,15 @@ def call(log, name, fn):
 
 
 # ------------------------------------------------------------- Abzuege
-def snapshot(mm, outdir, step, name):
-    parts = []
-    for off, ln in CHUNKS:
-        parts.append(mm[TM + off:TM + off + ln])
-    with open(os.path.join(outdir, "%02d_%s.bin" % (step, name)), "wb") as f:
-        for p in parts:
-            f.write(p)
+def snapshot(mm, outdir, step, name, sa_off=SA_OFF, tm=True):
+    if tm:
+        parts = []
+        for off, ln in CHUNKS:
+            parts.append(mm[TM + off:TM + off + ln])
+        with open(os.path.join(outdir, "%02d_%s.bin" % (step, name)),
+                  "wb") as f:
+            for p in parts:
+                f.write(p)
 
     lines = []
     for off in range(REG, 0x400, 4):
@@ -292,7 +306,7 @@ def snapshot(mm, outdir, step, name):
         if off in IVR:
             lines.append("SA+0x%03X  ----  %-5s uebersprungen" % (off, nm))
         else:
-            v = struct.unpack_from("<H", mm, TM + SA_OFF + off)[0]
+            v = struct.unpack_from("<H", mm, TM + sa_off + off)[0]
             lines.append("SA+0x%03X  %04X  %s" % (off, v, nm))
     with open(os.path.join(outdir, "%02d_%s.regs" % (step, name)), "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -348,34 +362,62 @@ def wipe_tm(log):
     finally:
         os.close(fb)
 
-    scr = struct.unpack_from("<H", mw, TM + SA_OFF + 0x380)[0]
-    if scr & 3 == 3:
+    scrs = scr_all(mw)
+    live = live_sa(mw)
+    if any(scrs[sa] & 3 == 3 for sa in live):
         mw.close()
-        log.line("ABBRUCH: Controller laeuft (SCR 0x%04X) - nicht geloescht"
-                 % scr)
+        log.line("ABBRUCH: Controller laeuft (%s) - nicht geloescht"
+                 % fmt_scr(scrs, live))
         return False
 
-    skip_lo = (SA_OFF + REG) // 2
-    skip_hi = (SA_OFF + 0x400) // 2
+    skip = set()
+    for sa in SA_CANDIDATES:
+        skip.update(range((sa + REG) // 2, (sa + 0x400) // 2))
     view = memoryview(mw)[TM:TM + 0x40000].cast("H")
     for i in range(0x20000):
-        if not skip_lo <= i < skip_hi:
+        if i not in skip:
             view[i] = 0
     rest = [(i * 2, view[i]) for i in range(0x20000)
-            if not skip_lo <= i < skip_hi and view[i]]
+            if i not in skip and view[i]]
     view.release()
     mw.close()
 
     log.line("Traffic Memory geloescht: %d Worte, danach ungleich 0: %d"
-             % (0x20000 - (skip_hi - skip_lo), len(rest)))
+             % (0x20000 - len(skip), len(rest)))
     # Was nach dem Loeschen sofort wieder beschrieben ist, schreibt der
-    # Controller selbst - das zeigt, in welchem Zustand der zuletzt
-    # geschlossene Treiber ihn hinterlassen hat.
-    log.line("     SCR beim Loeschen 0x%04X" % scr)
+    # Controller selbst. Vorzustand: das hat der zuvor geschlossene
+    # Treiber hinterlassen, nicht der, der jetzt getestet wird.
+    log.line("     Vorzustand %s" % fmt_scr(scrs, live))
     for off, v in rest[:16]:
-        log.line("     danach TM+0x%05X  %-40s %04X"
+        log.line("     Vorzustand TM+0x%05X  %-40s %04X"
                  % (off, describe(off, ({}, {})), v))
     return True
+
+
+def scr_all(m):
+    """SCR an jedem moeglichen Platz der Service Area."""
+    return {sa: struct.unpack_from("<H", m, TM + sa + REG)[0]
+            for sa in SA_CANDIDATES}
+
+
+def live_sa(m):
+    """Plaetze, an denen wirklich der Registerblock steht. An den anderen
+    liegt gewoehnlicher Speicher mit beliebigem Inhalt. Erkennungszeichen:
+    MCR traegt die Version MVBC02D (5), und sein mcm-Feld verweist auf
+    genau diesen Platz."""
+    out = []
+    for sa in SA_CANDIDATES:
+        mcr = struct.unpack_from("<H", m, TM + sa + REG + 4)[0]
+        mcm = mcr & 7
+        if mcr >> 11 == 5 and mcm < len(SA_FOR_MCM) and SA_FOR_MCM[mcm] == sa:
+            out.append(sa)
+    return out
+
+
+def fmt_scr(scrs, live=()):
+    return "  ".join("SCR@%04X %04X%s" % (sa, v, "*" if sa in live else "")
+                     for sa, v in sorted(scrs.items())) + \
+        "   (* = Registerblock)"
 
 
 def sample_dr(mm, log, label):
@@ -700,9 +742,11 @@ def run(outdir, allow_md, go):
     # Zustand nach release(): was mvb_deinit_board hinterlaesst, findet
     # der naechste Treiber vor.
     time.sleep(0.2)
-    log.line("     SCR nach close 0x%04X"
-             % struct.unpack_from("<H", mm, TM + SA_OFF + 0x380)[0])
+    log.line("     nach close %s" % fmt_scr(scr_all(mm), live_sa(mm)))
     snapshot(mm, outdir, 99, "zu")
+    # Nach einem RESET steht der Registerblock am Grundplatz
+    snapshot(mm, outdir, 99, "zu_grundplatz", sa_off=SA_CANDIDATES[0],
+             tm=False)
     mm.close()
     log.close()
 
@@ -828,27 +872,43 @@ def compare(da, db):
     la = open(os.path.join(da, "log.txt")).read().splitlines()
     lb = open(os.path.join(db, "log.txt")).read().splitlines()
 
+    def pre(L):
+        return [x.strip() for x in L if any(k in x for k in PRESTATE_LOG)]
+
+    def core(L):
+        return [x for x in L
+                if not x.startswith("Treiber:") and not volatile_line(x)
+                and not any(k in x for k in PRESTATE_LOG)]
+
     print("=== Protokoll ===")
     diff = 0
-    for a, b in zip(la, lb):
-        if a == b or a.startswith("Treiber:") or volatile_line(a):
+    ca, cb = core(la), core(lb)
+    sm = difflib.SequenceMatcher(a=ca, b=cb, autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
             continue
-        tag = ""
-        if any(k in a for k in KNOWN_DIFF):
-            tag = "   (bekannter Unterschied)"
-        else:
-            diff += 1
-        print("  A: %s\n  B: %s%s" % (a, b, tag))
-    if len(la) != len(lb):
-        print("  Protokolle verschieden lang: %d gegen %d" % (len(la), len(lb)))
-        diff += 1
+        for k in range(max(i2 - i1, j2 - j1)):
+            a = ca[i1 + k] if i1 + k < i2 else "(fehlt)"
+            b = cb[j1 + k] if j1 + k < j2 else "(fehlt)"
+            tag = ""
+            if any(x in a for x in KNOWN_DIFF):
+                tag = "   (bekannter Unterschied)"
+            else:
+                diff += 1
+            print("  A: %s\n  B: %s%s" % (a, b, tag))
     print("  %d Abweichungen" % diff)
     rc += diff
 
+    print("\n=== Vorzustand (vom zuvor geschlossenen Treiber, nicht verglichen) ===")
+    for tag, L in (("A", la), ("B", lb)):
+        for x in pre(L):
+            print("  %s: %s" % (tag, x))
+
     print("\n=== Stichproben (nicht verglichen) ===")
-    for a, b in zip(la, lb):
-        if "Stichprobe" in a:
-            print("  A: %s\n  B: %s" % (a.strip(), b.strip()))
+    for tag, L in (("A", la), ("B", lb)):
+        for x in L:
+            if "Stichprobe" in x:
+                print("  %s: %s" % (tag, x.strip()))
 
     print("\n=== Speicherabzuege ===")
     fa = sorted(os.path.basename(p) for p in glob.glob(os.path.join(da, "*.bin")))

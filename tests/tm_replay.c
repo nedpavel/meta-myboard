@@ -1086,6 +1086,41 @@ static void test_ring_layout(void)
 	}
 }
 
+/* ---------------------------------------------------------- Test 14 */
+/*
+ * Schliessen wie im Original: mvb_stop loescht nur Bit 1 des IL-Felds,
+ * mvb_deinit setzt SCR = 0 (RESET), das BCR verliert die
+ * Interruptnummer. Am Geraet stand der Nachbau danach noch in CONFIG.
+ */
+static void test_deinit(void)
+{
+	/* ISA-Fenster im ungenutzten da_data-Bereich der Attrappe */
+	u8 *isa = fake_tm + 0x3F000;
+
+	printf("\n--- Test 14: Controller nach close() ---\n");
+
+	sa_w16(&dev, MVBC_SCR, 0x87C7);
+	mvb_stop(&dev);
+	check(sa_r16(&dev, MVBC_SCR) == 0x87C5, "mvb_stop: SCR 0x%04x",
+	      sa_r16(&dev, MVBC_SCR));
+
+	dev.pisa = isa;
+	iowrite16(0x2611, isa + ISA_BCR);
+	sa_w16(&dev, MVBC_SCR, 0x87C7);
+	sa_w16(&dev, MVBC_IMR0, 0x0043);
+	dev.status.is_init = 1;
+	dev.irq_attached = 0;
+	mvb_deinit_board(&dev);
+	check(sa_r16(&dev, MVBC_SCR) == 0, "SCR nach close 0x%04x statt 0",
+	      sa_r16(&dev, MVBC_SCR));
+	check(ioread16(isa + ISA_BCR) == 0x2600, "BCR 0x%04x statt 0x2600",
+	      ioread16(isa + ISA_BCR));
+	check(sa_r16(&dev, MVBC_IMR0) == 0, "IMR0 nicht geleert");
+	check(!dev.status.is_init, "Status nicht geleert");
+	printf("  mvb_stop 0x87C7 -> 0x87C5; close: SCR 0x%04x, BCR 0x%04x\n",
+	       sa_r16(&dev, MVBC_SCR), ioread16(isa + ISA_BCR));
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -1114,6 +1149,7 @@ int main(int argc, char **argv)
 	test_ivr_drain();
 	test_ioctl_abi();
 	test_ring_layout();
+	test_deinit();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
 	return fails ? 1 : 0;

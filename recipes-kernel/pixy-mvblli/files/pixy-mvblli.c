@@ -537,11 +537,13 @@ static int mvb_go(struct mvblli_dev *d)
 	return 0;
 }
 
+/*
+ * Wie im Original nur Bit 1 des IL-Felds loeschen: aus RUNNING (3) wird
+ * CONFIG (1), aus TEST (2) wuerde RESET (0).
+ */
 static int mvb_stop(struct mvblli_dev *d)
 {
-	u16 scr = sa_r16(d, MVBC_SCR);
-
-	sa_w16(d, MVBC_SCR, (scr & ~TM_SCR_IL_MASK) | TM_SCR_IL_CONFIG);
+	sa_w16(d, MVBC_SCR, sa_r16(d, MVBC_SCR) & ~0x0002);
 	d->status.is_active = 0;
 
 	return 0;
@@ -1430,7 +1432,17 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 	if (!d->status.is_init)
 		return;
 
-	mvb_stop(d);
+	/*
+	 * Reihenfolge wie im Original: Interruptnummer aus dem BCR nehmen,
+	 * Quellen abmelden, Dienst beim Board-Treiber austragen, dann
+	 * mvb_stop() und mvb_deinit(). Letzteres schreibt SCR = 0: der
+	 * Controller geht in RESET, und der Registerblock springt an den
+	 * Grundplatz TM + 0x3C00 zurueck. Am Geraet gemessen - nach close()
+	 * des Originals stehen SCR, MCR, DR und TCR bei TM + 0x3F80. Ohne
+	 * das blieb der Controller konfiguriert und hoerend am Bus.
+	 */
+	iowrite16(ioread16(d->pisa + ISA_BCR) & 0xff00, d->pisa + ISA_BCR);
+
 	sa_w16(d, MVBC_IMR0, 0);
 	sa_w16(d, MVBC_IMR1, 0);
 	d->int_mask[0] = 0;
@@ -1438,6 +1450,9 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 
 	d->configured = 0;
 	mvblli_detach_board(d);
+
+	mvb_stop(d);
+	sa_w16(d, MVBC_SCR, 0);
 
 	kfree(d->rcv_ring);
 	d->rcv_ring = NULL;
