@@ -22,7 +22,17 @@ dem das erlaubt ist:
 
     --md    Message-Daten senden
     --go    Controller starten (MVB_GO), Prozessdaten im Betrieb lesen,
-            Zaehler und Interrupts ueber drei Minuten beobachten
+            Zaehler und Interrupts ueber eine Minute beobachten
+
+Dazu:
+
+    --no-pd       PD_CONF und alle Prozessdatenzugriffe auslassen, der
+                  Rest laeuft vollstaendig, START eingeschlossen. Fuer den
+                  Interruptvergleich mit dem Original, das bei PD_CONF
+                  abstuerzt. (--stop-after taugt dafuer nicht: es
+                  ueberspringt alles danach, auch START.)
+    --stop-after N  nach Schritt N nur noch protokollieren
+    --ports DATEI   Portliste "adresse groesse typ" statt der eingebauten
 
 Mit --go veraendert der laufende Bus den Traffic Memory staendig. Der
 Vergleich der Abzuege ist dann nicht mehr aussagekraeftig - dort zaehlt
@@ -212,6 +222,7 @@ def errname(n):
 
 
 STOP_AFTER = None
+NO_PD = False
 
 
 def call(log, name, fn):
@@ -344,8 +355,12 @@ def run(outdir, allow_md, go):
     cfg = struct.pack("<H", len(PORTS))
     for a, s, t in PORTS:
         cfg += struct.pack("<HHH", a, s, t)
-    call(log, "PD_CONF", lambda: io(IOC["PD_CONF"], bytearray(cfg), True))
-    snapshot(mm, outdir, log.step, "pdconf")
+    if NO_PD:
+        log.line("   (PD_CONF uebersprungen, --no-pd)")
+    else:
+        call(log, "PD_CONF",
+             lambda: io(IOC["PD_CONF"], bytearray(cfg), True))
+        snapshot(mm, outdir, log.step, "pdconf")
 
     # ---- Abfragen ----
     log.line("\n--- Abfragen ---")
@@ -391,7 +406,7 @@ def run(outdir, allow_md, go):
     snapshot(mm, outdir, log.step, "writectrl")
 
     # Prozessdaten schreiben: zweimal, damit die Seitenumschaltung sichtbar wird
-    for n, pat in ((1, 0xA5), (2, 0x5A)):
+    for n, pat in (() if NO_PD else ((1, 0xA5), (2, 0x5A))):
         port = mvb_port(1, WRITE_PORT)
         for i in range(WRITE_SIZE // 2):
             struct.pack_into("<H", port, 4 + i * 2, pat << 8 | pat)
@@ -399,8 +414,9 @@ def run(outdir, allow_md, go):
              lambda p=port: pd_write(fd, p, WRITE_SIZE))
         snapshot(mm, outdir, log.step, "writepd%d" % n)
 
-    rd = mvb_port(1, WRITE_PORT)
-    st, _ = call(log, "read() PD", lambda: pd_read(fd, rd, WRITE_SIZE))
+    if not NO_PD:
+        rd = mvb_port(1, WRITE_PORT)
+        call(log, "read() PD", lambda: pd_read(fd, rd, WRITE_SIZE))
 
     if allow_md:
         md = mvb_port(3, 6)
@@ -413,10 +429,12 @@ def run(outdir, allow_md, go):
     else:
         log.line("   (Message-Daten uebersprungen, --md erlaubt sie)")
 
-    call(log, "DISABLE_PORT",
-         lambda: io(IOC["DISABLE_PORT"],
-                    bytearray(struct.pack("<H", DISABLE_PORT_ADDR)), True))
-    snapshot(mm, outdir, log.step, "disable")
+    if not NO_PD:
+        call(log, "DISABLE_PORT",
+             lambda: io(IOC["DISABLE_PORT"],
+                        bytearray(struct.pack("<H", DISABLE_PORT_ADDR)),
+                        True))
+        snapshot(mm, outdir, log.step, "disable")
 
     # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
     if go:
@@ -440,8 +458,10 @@ def run(outdir, allow_md, go):
         changed = set()
         c0 = counters()
         r0 = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
-              for o in (0x390, 0x394)]
-        log.line("     FC %04X  EC %04X" % tuple(r0))
+              for o in (0x390, 0x394, 0x3B8, 0x3BC, 0x3B0, 0x3B4,
+                        0x3C0, 0x3C4)]
+        log.line("     FC %04X  EC %04X  IMR0 %04X IMR1 %04X  "
+                 "IPR0 %04X IPR1 %04X  ISR0 %04X ISR1 %04X" % tuple(r0))
 
         for round_ in range(3):
             time.sleep(20)
@@ -452,7 +472,7 @@ def run(outdir, allow_md, go):
                      % ((round_ + 1) * 20, r[0], r[1], r[2], r[3], r[4], r[5]))
 
             for a_, sz, t in PORTS:
-                if t != 1:
+                if NO_PD or t != 1:
                     continue
                 if a_ == DISABLE_PORT_ADDR:
                     continue        # vorher per DISABLE_PORT abgeschaltet
@@ -611,7 +631,9 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        global STOP_AFTER, PORTS, WRITE_PORT, WRITE_SIZE, DISABLE_PORT_ADDR
+        global STOP_AFTER, NO_PD, PORTS, WRITE_PORT, WRITE_SIZE
+        global DISABLE_PORT_ADDR
+        NO_PD = "--no-pd" in sys.argv
         for i, a_ in enumerate(sys.argv):
             if a_ == "--stop-after":
                 STOP_AFTER = int(sys.argv[i + 1])
