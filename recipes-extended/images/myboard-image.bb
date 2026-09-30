@@ -49,6 +49,9 @@ IMAGE_INSTALL:append = " nfs-utils"
 IMAGE_INSTALL:append = " nfs-devmount"
 IMAGE_INSTALL:append = " timesync-myboard"
 IMAGE_INSTALL:append = " tzdata"
+# Webserver (aus meta-openembedded/meta-webserver — die Layer muss in
+# bblayers.conf eingetragen sein, siehe build-conf/bblayers.conf).
+IMAGE_INSTALL:append = " nginx"
 
 # Board timezone = build host's zone (Europe/Zurich). NTP/timesyncd only syncs
 # the UTC clock; the timezone is a separate static setting that controls how the
