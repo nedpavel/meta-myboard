@@ -1,4 +1,21 @@
 #!/bin/sh
 export QT_QPA_PLATFORM_PLUGIN_PATH=/usr/lib/plugins
 export QT_QPA_PLATFORM=xcb
+
+# Auf den X-Server warten, bevor die Anwendung startet.
+#
+# xinit startet zwar erst den Client, wenn der Server den Socket angelegt
+# hat — der Screen ist dann aber noch nicht zwingend fertig konfiguriert.
+# Die Anwendung bekam so eine unbrauchbare Bildschirmgroesse und blieb
+# unsichtbar (schwarzer Schirm trotz laufendem X). Bewusst ohne
+# Zusatzwerkzeuge wie xdpyinfo, die im Image nicht vorhanden sind.
+i=0
+while [ ! -e /tmp/.X11-unix/X0 ] && [ $i -lt 50 ]; do
+    sleep 0.2
+    i=$((i + 1))
+done
+
+# Kurz nachsetzen, damit der Screen wirklich eingerichtet ist.
+sleep 1
+
 exec /usr/bin/myboard-gui

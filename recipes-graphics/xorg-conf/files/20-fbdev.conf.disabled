@@ -1,0 +1,46 @@
+# RUECKFALL-Konfiguration — standardmaessig INAKTIV.
+#
+# Xorg liest in xorg.conf.d nur Dateien mit der Endung ".conf"; das
+# angehaengte ".disabled" haelt diese Datei aus dem Spiel.
+#
+# Aktiv ist 20-modesetting.conf. fbdev war der Treiber des INC-100
+# (Bay Trail) und dort ein Workaround gegen GPU-Haenger mit glamor.
+#
+# ACHTUNG: Auf dem Pixy 1000 funktioniert fbdev NICHT. /dev/fb0 ist dort
+# nur die DRM-Emulation von i915, und der Treiber scheitert an der
+# Farbtabelle:
+#       FBDEV(0): FBIOPUTCMAP: Invalid argument     (30x im Xorg-Log)
+# Ergebnis: schwarzer Bildschirm bei laufendem X-Server.
+#
+# Diese Datei bleibt nur als Rueckfalloption fuer andere Hardware im Image.
+# Aktivieren:
+#   rm /etc/X11/xorg.conf.d/20-modesetting.conf
+#   mv /etc/X11/xorg.conf.d/20-fbdev.conf.disabled \
+#      /etc/X11/xorg.conf.d/20-fbdev.conf
+#   systemctl restart myboard-gui
+
+Section "Device"
+    Identifier "Framebuffer"
+    Driver "fbdev"
+    Option "fbdev" "/dev/fb0"
+EndSection
+
+Section "Screen"
+    Identifier "Default Screen"
+    Device "Framebuffer"
+    Monitor "Default Monitor"
+    DefaultDepth 24
+EndSection
+
+# Kiosk: Bildschirm darf nie schwarz werden / abschalten.
+Section "ServerFlags"
+    Option "BlankTime"   "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime"     "0"
+EndSection
+
+Section "Monitor"
+    Identifier "Default Monitor"
+    Option "DPMS" "false"
+EndSection
