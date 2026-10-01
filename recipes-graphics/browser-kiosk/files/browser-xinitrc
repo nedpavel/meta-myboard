@@ -1,0 +1,11 @@
+#!/bin/sh
+# X-Sitzung fuer den Browser-Betrieb.
+#
+# Warum ein Window-Manager: ohne ihn bekommt das GTK-Fenster von surf nur
+# seine Wunschgroesse und fuellt den Bildschirm nicht. matchbox ist winzig
+# und maximiert die Anwendung automatisch — das ist der uebliche Weg fuer
+# Kiosk-Betrieb. Die Qt-Oberflaeche braucht ihn nicht, weil sie ihre
+# Geometrie selbst setzt.
+matchbox-window-manager -use_titlebar no &
+
+exec surf "${BROWSER_URL:-http://localhost/}"

@@ -51,7 +51,14 @@ IMAGE_INSTALL:append = " timesync-myboard"
 IMAGE_INSTALL:append = " tzdata"
 # Webserver (aus meta-openembedded/meta-webserver — die Layer muss in
 # bblayers.conf eingetragen sein, siehe build-conf/bblayers.conf).
-IMAGE_INSTALL:append = " nginx"
+# php-fpm fuehrt die PHP-Seiten aus; ohne ihn liefert nginx sie als Text.
+# myboard-web bringt die Seiten (Datenstrom-Empfang + Anzeige) mit.
+IMAGE_INSTALL:append = " nginx php-fpm php-cli myboard-web"
+
+# Browser-Betrieb: surf (WebKitGTK) im Vollbild anstelle der Qt-Oberflaeche,
+# zu starten mit "browser-start". matchbox-wm wird gebraucht, weil ein
+# GTK-Fenster ohne Window-Manager den Bildschirm nicht fuellt.
+IMAGE_INSTALL:append = " surf matchbox-wm browser-kiosk"
 
 # Board timezone = build host's zone (Europe/Zurich). NTP/timesyncd only syncs
 # the UTC clock; the timezone is a separate static setting that controls how the

@@ -1,0 +1,41 @@
+# Default server configuration — MyBoard
+#
+# Ersetzt die Vorlage des nginx-Rezepts (per bbappend) und ergaenzt sie um
+# die PHP-Anbindung sowie die Einstellungen fuer den Datenstrom-Upload.
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/localhost/html;
+
+    index index.php index.html index.htm;
+
+    server_name _;
+
+    # redirect server error pages to the static page /50x.html
+    error_page 500 502 503 504 /50x.html;
+
+    # --- PHP ueber FastCGI an php-fpm --------------------------------
+    # php-fpm lauscht laut seiner mitgelieferten Konfiguration auf
+    # 127.0.0.1:9000. Ohne diesen Block liefert nginx .php-Dateien
+    # unausgefuehrt als Text aus.
+    location ~ \.php$ {
+        include       fastcgi_params;
+        fastcgi_pass  127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+
+        # WICHTIG fuer den Datenstrom: nginx puffert einen Request sonst
+        # vollstaendig, bevor es ihn an PHP weitergibt. Bei einer lange
+        # stehenden Stream-Verbindung wuerde das Skript also nie
+        # anlaufen. Mit 'off' kommen die Daten laufend an.
+        fastcgi_request_buffering off;
+
+        # Keine Groessenbegrenzung, grosszuegige Zeitlimits — damit eine
+        # dauerhafte Verbindung nicht nach 60 s abgeschnitten wird.
+        client_max_body_size 0;
+        fastcgi_read_timeout 3600;
+        fastcgi_send_timeout 3600;
+    }
+}

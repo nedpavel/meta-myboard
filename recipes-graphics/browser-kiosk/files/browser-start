@@ -1,0 +1,24 @@
+#!/bin/sh
+# browser-start — zeigt eine Webseite im Vollbild, anstelle der Qt-Oberflaeche.
+#
+#   browser-start                        -> http://localhost/
+#   browser-start http://10.0.0.5/x.php
+#
+# Qt-Oberflaeche und Browser koennen sich den Bildschirm nicht teilen
+# (beide wollen vt1), deshalb wird myboard-gui zuerst gestoppt.
+# Zurueck zur Oberflaeche:  systemctl start myboard-gui
+set -e
+
+BROWSER_URL="${1:-http://localhost/}"
+export BROWSER_URL
+
+echo "Stoppe myboard-gui ..."
+systemctl stop myboard-gui 2>/dev/null || true
+
+# Reste einer vorherigen X-Sitzung aufraeumen, sonst scheitert der Start
+# mit "Server is already active" oder einem belegten vt1.
+pkill -x surf 2>/dev/null || true
+rm -f /tmp/.X0-lock
+
+echo "Starte Browser: $BROWSER_URL"
+exec xinit /etc/browser-xinitrc -- /usr/bin/Xorg :0 vt1

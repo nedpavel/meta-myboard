@@ -1,0 +1,3 @@
+# Datenverzeichnis fuer den Datenstrom. php-fpm laeuft als Benutzer
+# "nobody" (siehe php-fpm.conf) und muss hier schreiben duerfen.
+d /var/www/localhost/data 0775 nobody www-data -
