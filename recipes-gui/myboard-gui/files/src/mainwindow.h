@@ -30,7 +30,11 @@ class MainWindow : public QWidget
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    /* screen = tatsaechliche Bildschirmgroesse. Daraus wird der
+       Skalierungsfaktor abgeleitet, damit dieselbe Oberflaeche auf dem
+       INC-100 (640x480) und dem Pixy 1000 (1024x768) passt — beide sind
+       4:3, ein einheitlicher Faktor genuegt also. */
+    explicit MainWindow(const QSize &screen, QWidget *parent = nullptr);
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;   /* Hardware-Tasten */
@@ -42,6 +46,14 @@ private slots:
     void onCanFrame(quint32 canId, const QByteArray &data); /* CAN-Telegramm dekodieren + anzeigen */
 
 private:
+    /* --- Skalierung ---------------------------------------------------
+       Alle Groessen im Code sind fuer 640x480 notiert (Basis-Layout des
+       INC-100). px()/pt() rechnen sie auf den tatsaechlichen Bildschirm
+       um. Bei 1024x768 ergibt das den Faktor 1.6. */
+    qreal m_scale = 1.0;
+    int   px(int v)    const { return qRound(v * m_scale); }   /* Pixel  */
+    qreal pt(qreal v)  const { return v * m_scale; }           /* Schrift */
+
     QWidget *buildHeader();      /* Kopfzeile: Datum | Titel | Zuginfo  */
     QWidget *buildMainMenu();    /* Seite 0: Hauptmenü                  */
     QWidget *buildContent();     /* leere Arbeitsfläche im Hauptmenü    */

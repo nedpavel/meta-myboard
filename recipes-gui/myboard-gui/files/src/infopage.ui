@@ -58,6 +58,7 @@ QLabel { color: #2B2B2B; background: transparent; border: none; }</string>
      </item>
      <item row="0" column="1">
       <widget class="QLabel" name="lblBoardVal">
+       <property name="wordWrap"><bool>true</bool></property>
        <property name="font"><font><pointsize>12</pointsize><bold>true</bold></font></property>
        <property name="text"><string>MyBoard – Bahn-Bediendisplay</string></property>
       </widget>
@@ -70,6 +71,7 @@ QLabel { color: #2B2B2B; background: transparent; border: none; }</string>
      </item>
      <item row="1" column="1">
       <widget class="QLabel" name="lblMachineVal">
+       <property name="wordWrap"><bool>true</bool></property>
        <property name="font"><font><pointsize>12</pointsize><bold>true</bold></font></property>
        <property name="text"><string>intel-corei7-64 (x86-64)</string></property>
       </widget>
@@ -82,6 +84,7 @@ QLabel { color: #2B2B2B; background: transparent; border: none; }</string>
      </item>
      <item row="2" column="1">
       <widget class="QLabel" name="lblAppVal">
+       <property name="wordWrap"><bool>true</bool></property>
        <property name="font"><font><pointsize>12</pointsize><bold>true</bold></font></property>
        <property name="text"><string>myboard-gui 1.0</string></property>
       </widget>
@@ -94,6 +97,7 @@ QLabel { color: #2B2B2B; background: transparent; border: none; }</string>
      </item>
      <item row="3" column="1">
       <widget class="QLabel" name="lblCanVal">
+       <property name="wordWrap"><bool>true</bool></property>
        <property name="font"><font><pointsize>12</pointsize><bold>true</bold></font></property>
        <property name="text"><string>can0 · Matrix + CANopen-Decoder</string></property>
       </widget>
@@ -106,6 +110,7 @@ QLabel { color: #2B2B2B; background: transparent; border: none; }</string>
      </item>
      <item row="4" column="1">
       <widget class="QLabel" name="lblMadeVal">
+       <property name="wordWrap"><bool>true</bool></property>
        <property name="font"><font><pointsize>12</pointsize><bold>true</bold></font></property>
        <property name="text"><string>Qt Designer (.ui) → uic → Yocto-Build</string></property>
       </widget>

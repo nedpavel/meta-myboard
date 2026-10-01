@@ -45,7 +45,11 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
-    MainWindow window;
+    /* Erst die Bildschirmgroesse abwarten, dann das Fenster bauen — die
+       Oberflaeche skaliert sich danach (640x480 beim INC-100, 1024x768
+       beim Pixy 1000). */
+    const QRect geometrie = wartenAufBildschirm(app);
+    MainWindow window(geometrie.size());
 
     /* Vollbild — Kiosk-Verhalten, keine Fensterdekoration.
        Wir laufen unter bare X ohne Window-Manager (xinit -> Xorg -> GUI);
@@ -53,7 +57,7 @@ int main(int argc, char *argv[])
        Fenster bliebe auf seiner Size-Hint (zu klein). Darum die Bildschirm-
        geometrie explizit setzen, damit es den Schirm komplett fuellt. */
     window.setWindowFlags(Qt::FramelessWindowHint);
-    window.setGeometry(wartenAufBildschirm(app));
+    window.setGeometry(geometrie);
     window.show();
 
     return app.exec();

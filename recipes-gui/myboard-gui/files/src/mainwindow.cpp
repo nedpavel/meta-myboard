@@ -103,9 +103,17 @@ private:
 /* Konstruktor                                                          */
 /* ------------------------------------------------------------------ */
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(const QSize &screen, QWidget *parent)
     : QWidget(parent), m_selectedCar(0), m_usbPresent(false)
 {
+    /* Skalierung aus der Bildschirmhoehe ableiten. Basis ist das
+       640x480-Layout des INC-100; das Pixy 1000 hat 1024x768, also
+       Faktor 1.6. Beide sind 4:3, daher genuegt ein Faktor fuer beide
+       Richtungen. */
+    if (screen.height() > 0)
+        m_scale = screen.height() / 480.0;
+    if (m_scale < 0.5) m_scale = 1.0;    /* unplausibel -> Basis-Layout */
+
     setStyleSheet(QString("background-color: %1;").arg(COL_BG));
 
     /* Fenster nimmt Tastatur-Eingaben entgegen */
@@ -116,8 +124,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_canMatrix.loadFromResource(QStringLiteral(":/can/can_matrix.tsv"));
 
     QVBoxLayout *root = new QVBoxLayout(this);
-    root->setContentsMargins(2, 2, 2, 2);
-    root->setSpacing(0);
+    root->setContentsMargins(px(2), px(2), px(2), px(2));
+    root->setSpacing(px(0));
 
     /* Kopfzeile bleibt immer sichtbar */
     root->addWidget(buildHeader());
@@ -209,23 +217,23 @@ QWidget *MainWindow::buildHeader()
     header->setStyleSheet(
         QString("QFrame { background-color: %1; border: 1px solid %2; }")
             .arg(COL_CELL).arg(COL_BORDER));
-    header->setFixedHeight(47);          /* ~2/3 der vorherigen Höhe (70) */
+    header->setFixedHeight(px(47));          /* ~2/3 der vorherigen Höhe (70) */
 
     QHBoxLayout *lay = new QHBoxLayout(header);
-    lay->setContentsMargins(0, 0, 0, 0);
-    lay->setSpacing(0);
+    lay->setContentsMargins(px(0), px(0), px(0), px(0));
+    lay->setSpacing(px(0));
 
     QFrame *dateBox = new QFrame();
     dateBox->setStyleSheet(
         QString("border-right: 1px solid %1;").arg(COL_BORDER));
-    dateBox->setFixedWidth(180);
+    dateBox->setFixedWidth(px(180));
     QVBoxLayout *dateLay = new QVBoxLayout(dateBox);
-    dateLay->setContentsMargins(12, 3, 12, 3);
-    dateLay->setSpacing(0);
+    dateLay->setContentsMargins(px(12), px(3), px(12), px(3));
+    dateLay->setSpacing(px(0));
 
     m_dateLabel = new QLabel("01.02.86");
     m_timeLabel = new QLabel("01:49:30");
-    QFont dtFont; dtFont.setPointSize(10);
+    QFont dtFont; dtFont.setPointSizeF(pt(10));
     m_dateLabel->setFont(dtFont);
     m_timeLabel->setFont(dtFont);
     m_dateLabel->setStyleSheet(
@@ -239,7 +247,7 @@ QWidget *MainWindow::buildHeader()
 
     /* Titel — wird beim Seitenwechsel aktualisiert */
     m_titleLabel = new QLabel("Hauptmenü");
-    QFont titleFont; titleFont.setPointSize(13);
+    QFont titleFont; titleFont.setPointSizeF(pt(13));
     m_titleLabel->setFont(titleFont);
     m_titleLabel->setAlignment(Qt::AlignCenter);
     m_titleLabel->setStyleSheet(
@@ -248,15 +256,15 @@ QWidget *MainWindow::buildHeader()
 
     QFrame *infoBox = new QFrame();
     infoBox->setStyleSheet("border: none;");
-    infoBox->setFixedWidth(220);
+    infoBox->setFixedWidth(px(220));
     QVBoxLayout *infoLay = new QVBoxLayout(infoBox);
-    infoLay->setContentsMargins(12, 2, 12, 2);
-    infoLay->setSpacing(0);
+    infoLay->setContentsMargins(px(12), px(2), px(12), px(2));
+    infoLay->setSpacing(px(0));
 
     m_halbzugLabel   = new QLabel("1. Halbzug");
     m_zugNumberLabel = new QLabel("1 500 012-3");
     QLabel *l3 = new QLabel("mm:ss");
-    QFont infoFont; infoFont.setPointSize(9); infoFont.setBold(true);
+    QFont infoFont; infoFont.setPointSizeF(pt(9)); infoFont.setBold(true);
     for (QLabel *l : { m_halbzugLabel, m_zugNumberLabel, l3 }) {
         l->setFont(infoFont);
         l->setAlignment(Qt::AlignCenter);
@@ -282,8 +290,8 @@ QWidget *MainWindow::buildMainMenu()
 {
     QWidget *page = new QWidget();
     QVBoxLayout *lay = new QVBoxLayout(page);
-    lay->setContentsMargins(0, 0, 0, 0);
-    lay->setSpacing(0);
+    lay->setContentsMargins(px(0), px(0), px(0), px(0));
+    lay->setSpacing(px(0));
 
     lay->addWidget(buildContent(), 1);
     lay->addWidget(buildCarRow());
@@ -317,11 +325,11 @@ QWidget *MainWindow::buildCarRow()
     row->setStyleSheet(
         QString("QFrame { border-left: 1px solid %1; "
                 "border-right: 1px solid %1; }").arg(COL_BORDER));
-    row->setFixedHeight(32);          /* ~halbe Höhe wie vorher (64) */
+    row->setFixedHeight(px(32));          /* ~halbe Höhe wie vorher (64) */
 
     QHBoxLayout *lay = new QHBoxLayout(row);
-    lay->setContentsMargins(0, 1, 0, 1);   /* linksbündig zur Buttonleiste */
-    lay->setSpacing(0);
+    lay->setContentsMargins(px(0), px(1), px(0), px(1));   /* linksbündig zur Buttonleiste */
+    lay->setSpacing(px(0));
 
     m_carNumbers[0] = "1 500 012-3";
     m_carNumbers[1] = "2 500 012-1";
@@ -333,13 +341,13 @@ QWidget *MainWindow::buildCarRow()
         ":/img/ICN_Office_2.jpg",
     };
 
-    QFont carFont; carFont.setPointSize(7);   /* passt in die buttonbündige Zelle */
+    QFont carFont; carFont.setPointSizeF(pt(7));   /* passt in die buttonbündige Zelle */
 
     for (int i = 0; i < CAR_COUNT; i++) {
         QFrame *car = new QFrame();
         QVBoxLayout *c = new QVBoxLayout(car);
-        c->setContentsMargins(1, 0, 1, 0);
-        c->setSpacing(0);
+        c->setContentsMargins(px(1), px(0), px(1), px(0));
+        c->setSpacing(px(0));
 
         QLabel *img = new QLabel();
         img->setPixmap(QPixmap(carImages[i]));
@@ -416,25 +424,26 @@ QWidget *MainWindow::buildButtonRow()
     QFrame *row = new QFrame();
     row->setStyleSheet(
         QString("QFrame { border: 1px solid %1; }").arg(COL_BORDER));
-    row->setFixedHeight(43);          /* ~2/3 der vorherigen Höhe (64) */
+    row->setFixedHeight(px(43));          /* ~2/3 der vorherigen Höhe (64) */
 
     QHBoxLayout *lay = new QHBoxLayout(row);
-    lay->setContentsMargins(0, 0, 0, 0);
-    lay->setSpacing(0);
+    lay->setContentsMargins(px(0), px(0), px(0), px(0));
+    lay->setSpacing(px(0));
 
     QString btnStyle = QString(
         "QPushButton {"
         "  background-color: %1;"
         "  color: %2;"
         "  border: 1px solid %3;"
-        "  font-size: 10px;"
+        "  font-size: %5px;"
         "  padding: 0px;"
         "}"
         "QPushButton:pressed {"
         "  background-color: %4;"
         "  color: white;"
         "}")
-        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE);
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE)
+        .arg(px(10));
 
     /* Diese vier Tasten öffnen Unterseiten.
        pageIndex = Seitenindex im Stack (1..4), passend zu den Hardware-
@@ -501,11 +510,11 @@ QWidget *MainWindow::createSubPage(const QString &title,
             .arg(COL_BG).arg(COL_BORDER));
 
     QVBoxLayout *lay = new QVBoxLayout(page);
-    lay->setContentsMargins(24, 24, 24, 24);
-    lay->setSpacing(20);
+    lay->setContentsMargins(px(24), px(24), px(24), px(24));
+    lay->setSpacing(px(20));
 
     QLabel *titleLabel = new QLabel(title);
-    QFont tf; tf.setPointSize(22); tf.setBold(true);
+    QFont tf; tf.setPointSizeF(pt(22)); tf.setBold(true);
     titleLabel->setFont(tf);
     titleLabel->setStyleSheet(
         QString("color: %1; border: none;").arg(COL_BLUE));
@@ -518,7 +527,7 @@ QWidget *MainWindow::createSubPage(const QString &title,
 
     QLabel *prose = new QLabel(prosa);
     prose->setWordWrap(true);
-    QFont pf; pf.setPointSize(14);
+    QFont pf; pf.setPointSizeF(pt(14));
     prose->setFont(pf);
     prose->setStyleSheet(
         QString("color: %1; border: none;").arg(COL_TEXT));
@@ -527,7 +536,7 @@ QWidget *MainWindow::createSubPage(const QString &title,
 
     QLabel *hint = new QLabel("(Diese Seite ist noch leer — Inhalte folgen.)");
     hint->setWordWrap(true);   /* sonst erzwingt der Text >640px Fensterbreite */
-    QFont hf; hf.setPointSize(12); hf.setItalic(true);
+    QFont hf; hf.setPointSizeF(pt(12)); hf.setItalic(true);
     hint->setFont(hf);
     hint->setStyleSheet("color: #888888; border: none;");
     lay->addWidget(hint);
@@ -541,15 +550,16 @@ QWidget *MainWindow::createSubPage(const QString &title,
         "  background-color: %1;"
         "  color: %2;"
         "  border: 1px solid %3;"
-        "  font-size: 16px;"
-        "  padding: 10px 24px;"
+        "  font-size: %5px;"
+        "  padding: %6px %7px;"
         "}"
         "QPushButton:pressed {"
         "  background-color: %4;"
         "  color: white;"
         "}")
-        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE));
-    back->setFixedWidth(220);
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE)
+        .arg(px(16)).arg(px(10)).arg(px(24)));
+    back->setFixedWidth(px(220));
     back->setFocusPolicy(Qt::NoFocus);
     connect(back, &QPushButton::clicked, this, &MainWindow::backToMenu);
 
@@ -573,18 +583,18 @@ QWidget *MainWindow::buildProzesswertPage()
             .arg(COL_BG).arg(COL_BORDER));
 
     QVBoxLayout *lay = new QVBoxLayout(page);
-    lay->setContentsMargins(8, 6, 8, 6);
-    lay->setSpacing(5);
+    lay->setContentsMargins(px(8), px(6), px(8), px(6));
+    lay->setSpacing(px(5));
 
     QLabel *titleLabel = new QLabel("Prozesswerte (CAN live)");
-    QFont tf; tf.setPointSize(14); tf.setBold(true);
+    QFont tf; tf.setPointSizeF(pt(14)); tf.setBold(true);
     titleLabel->setFont(tf);
     titleLabel->setStyleSheet(QString("color: %1; border: none;").arg(COL_BLUE));
     lay->addWidget(titleLabel);
 
     m_pwStatus = new QLabel("CAN: initialisiere …");
     m_pwStatus->setWordWrap(true);
-    QFont sf; sf.setPointSize(9);
+    QFont sf; sf.setPointSizeF(pt(9));
     m_pwStatus->setFont(sf);
     m_pwStatus->setStyleSheet("color: #888888; border: none;");
     lay->addWidget(m_pwStatus);
@@ -594,11 +604,17 @@ QWidget *MainWindow::buildProzesswertPage()
     QStringList headers;
     headers << "CAN-ID" << "Signal" << "Wert" << "Einh.";
     m_pwTable->setHorizontalHeaderLabels(headers);
+    /* Die Tabelle darf das Fenster NICHT aufweiten: ihre Vorgabe-Mindest-
+       groesse (Spaltenbreiten x Spaltenzahl) zwang den QStackedWidget und
+       damit das ganze Fenster auf >800px — auf einem 640er Panel waere
+       rechts alles abgeschnitten. */
+    m_pwTable->setMinimumSize(0, 0);
+    m_pwTable->horizontalHeader()->setMinimumSectionSize(px(24));
     m_pwTable->verticalHeader()->setVisible(false);
     m_pwTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_pwTable->setSelectionMode(QAbstractItemView::NoSelection);
     m_pwTable->setFocusPolicy(Qt::NoFocus);
-    QFont tbf; tbf.setPointSize(9);
+    QFont tbf; tbf.setPointSizeF(pt(9));
     m_pwTable->setFont(tbf);
     m_pwTable->horizontalHeader()->setFont(tbf);
     m_pwTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
@@ -616,11 +632,12 @@ QWidget *MainWindow::buildProzesswertPage()
         "  background-color: %1;"
         "  color: %2;"
         "  border: 1px solid %3;"
-        "  font-size: 13px;"
-        "  padding: 5px 18px;"
+        "  font-size: %5px;"
+        "  padding: %6px %7px;"
         "}"
         "QPushButton:pressed { background-color: %4; color: white; }")
-        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE));
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE)
+        .arg(px(13)).arg(px(5)).arg(px(18)));
     back->setFocusPolicy(Qt::NoFocus);
     connect(back, &QPushButton::clicked, this, &MainWindow::backToMenu);
 
@@ -848,14 +865,14 @@ QWidget *MainWindow::buildUpdatePage()
             .arg(COL_BG).arg(COL_BORDER));
 
     QVBoxLayout *lay = new QVBoxLayout(page);
-    lay->setContentsMargins(0, 0, 0, 0);
-    lay->setSpacing(0);
+    lay->setContentsMargins(px(0), px(0), px(0), px(0));
+    lay->setSpacing(px(0));
 
     /* Frage — füllt den oberen Bereich */
     QLabel *q = new QLabel(
         "Soll die Applikation wirklich\nab USB-Stick upgedatet werden?");
     q->setWordWrap(true);   /* sonst erzwingt der Text >640px Fensterbreite */
-    QFont qf; qf.setPointSize(16); qf.setBold(true);
+    QFont qf; qf.setPointSizeF(pt(16)); qf.setBold(true);
     q->setFont(qf);
     q->setAlignment(Qt::AlignCenter);
     q->setStyleSheet(QString("color: %1; border: none;").arg(COL_TEXT));
@@ -864,13 +881,13 @@ QWidget *MainWindow::buildUpdatePage()
     /* Status-Hinweis (USB erkannt / kein USB / Update-Status) */
     m_usbHint = new QLabel();
     m_usbHint->setWordWrap(true);   /* Fehlermeldungen koennen lang sein */
-    QFont hf; hf.setPointSize(11);
+    QFont hf; hf.setPointSizeF(pt(11));
     m_usbHint->setFont(hf);
     m_usbHint->setAlignment(Qt::AlignCenter);
     m_usbHint->setStyleSheet("border: none;");
     lay->addWidget(m_usbHint);
 
-    lay->addSpacing(8);
+    lay->addSpacing(px(8));
 
     /* Untere Leiste: "Ja" über Taste 1, "Nein" über Taste 2 — gleiche
        10-Spalten-Aufteilung wie die Funktionsleiste, damit sie über den
@@ -878,14 +895,14 @@ QWidget *MainWindow::buildUpdatePage()
     QFrame *row = new QFrame();
     row->setStyleSheet(
         QString("QFrame { border: 1px solid %1; }").arg(COL_BORDER));
-    row->setFixedHeight(43);
+    row->setFixedHeight(px(43));
     QHBoxLayout *rl = new QHBoxLayout(row);
-    rl->setContentsMargins(0, 0, 0, 0);
-    rl->setSpacing(0);
+    rl->setContentsMargins(px(0), px(0), px(0), px(0));
+    rl->setSpacing(px(0));
 
     m_jaLabel   = new QLabel("Ja");
     m_neinLabel = new QLabel("Nein");
-    QFont bf; bf.setPointSize(13); bf.setBold(true);
+    QFont bf; bf.setPointSizeF(pt(13)); bf.setBold(true);
     for (QLabel *l : { m_jaLabel, m_neinLabel }) {
         l->setFont(bf);
         l->setAlignment(Qt::AlignCenter);
