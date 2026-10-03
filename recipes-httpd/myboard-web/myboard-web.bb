@@ -18,22 +18,29 @@ inherit systemd
 # Ohne Webserver und PHP-Laufzeit nutzlos
 RDEPENDS:${PN} = "nginx php-fpm"
 
-WWWDIR = "${localstatedir}/www/localhost/html"
+# Die Seiten liegen in einem eigenen Verzeichnis, NICHT direkt in
+# /var/www/localhost/html. Grund: RPM beansprucht automatisch jedes
+# Verzeichnis, in dem ein Paket Dateien ablegt ("All packages own the
+# directories their files are in", package_rpm.bbclass) — und
+# /var/www/localhost[/html] gehoert bereits dem nginx-Paket. do_rootfs
+# brach deshalb ab:
+#   "file /var/www/localhost conflicts between attempted installs of
+#    myboard-web and nginx"
+# Beim Boot werden die Seiten per tmpfiles-Symlink eingehaengt.
+PAGEDIR = "${datadir}/myboard-web"
 
 do_install() {
-    install -d ${D}${WWWDIR}
-    install -m 0644 ${UNPACKDIR}/index.php  ${D}${WWWDIR}/
-    install -m 0644 ${UNPACKDIR}/upload.php ${D}${WWWDIR}/
+    install -d ${D}${PAGEDIR}
+    install -m 0644 ${UNPACKDIR}/index.php  ${D}${PAGEDIR}/
+    install -m 0644 ${UNPACKDIR}/upload.php ${D}${PAGEDIR}/
 
-    # Das Datenverzeichnis wird zur Laufzeit angelegt — mit Besitzer
-    # "nobody", weil php-fpm unter diesem Benutzer schreibt.
+    # Datenverzeichnis und Verlinkung der Seiten zur Laufzeit herstellen.
     install -d ${D}${nonarch_libdir}/tmpfiles.d
     install -m 0644 ${UNPACKDIR}/myboard-web.tmpfiles \
         ${D}${nonarch_libdir}/tmpfiles.d/myboard-web.conf
 }
 
 FILES:${PN} = " \
-    ${WWWDIR}/index.php \
-    ${WWWDIR}/upload.php \
+    ${PAGEDIR} \
     ${nonarch_libdir}/tmpfiles.d/myboard-web.conf \
 "

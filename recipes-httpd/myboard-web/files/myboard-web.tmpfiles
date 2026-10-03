@@ -1,3 +1,10 @@
 # Datenverzeichnis fuer den Datenstrom. php-fpm laeuft als Benutzer
 # "nobody" (siehe php-fpm.conf) und muss hier schreiben duerfen.
 d /var/www/localhost/data 0775 nobody www-data -
+
+# Die Seiten liegen im Paket unter /usr/share/myboard-web und werden erst
+# beim Boot in die Web-Wurzel verlinkt. So beansprucht das Paket nicht
+# /var/www/localhost[/html] — das gehoert nginx, und RPM meldete sonst
+# einen Dateikonflikt.
+L+ /var/www/localhost/html/index.php  - - - - /usr/share/myboard-web/index.php
+L+ /var/www/localhost/html/upload.php - - - - /usr/share/myboard-web/upload.php
