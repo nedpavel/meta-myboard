@@ -228,6 +228,25 @@ nichts. **`mvbdiff --ping`** spielt diese Anfrage byteweise nach und
 wartet auf die Antwort; die löst DTI1 aus. Damit sind Interruptzustellung
 und Message-Empfang ohne laufende Anwendung prüfbar.
 
+### Beobachtung: nach `systemctl stop session-1.scope` keine Interrupts mehr
+
+Auch mit beiden Original-Modulen. Zwei Erklärungen sind möglich:
+
+1. **Die Anwendung ist die Quelle** – sie fragt an, die Antworten lösen
+   DTI1 aus. Ohne Anwendung keine Antworten, also keine Interrupts; die
+   Zustellung selbst ist in Ordnung.
+2. **Die Anwendung schaltet etwas frei**, das unsere Läufe nicht
+   nachbilden (GPIO-, ISA- oder PCI/MSI-Zustand, ein nicht genutzter
+   ioctl). Dann wäre die Zustellung nach dem Stoppen abgeschaltet.
+
+Prüfung: `irqstate.py` hält die ganze Kette fest (MVBC IPR/IMR/ISR, ISA
+BCR, alle GPIO-Register, PCI COMMAND und MSI-Capability, Kernelzähler),
+nur lesend, auch bei laufender Anwendung. Einmal mit laufender Anwendung,
+einmal nach dem Stoppen, und `mvbdiff --go` schreibt denselben Zustand
+nach `START` ins Protokoll. Unterscheiden sich die Zustände nicht, bleibt
+Erklärung 1 – und `--ping` belegt sie, indem es die Quelle ohne Anwendung
+erzeugt.
+
 ## Stand
 
 | Phase | Stand |

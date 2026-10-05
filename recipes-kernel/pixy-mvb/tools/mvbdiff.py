@@ -763,6 +763,14 @@ def run(outdir, allow_md, go):
         log.line("\n--- Betrieb (MVB_GO) ---")
         irq0 = irq_count()
         ok, _ = call(log, "START", lambda: io(IOC["START"]))
+        # Interruptkette vom MVBC bis zur CPU (irqstate.py im selben
+        # Verzeichnis); fehlt es, geht es ohne
+        try:
+            import irqstate
+            for ln in irqstate.capture()[1:]:
+                log.line("     Stichprobe Zustand: " + ln)
+        except Exception as e:
+            log.line("     Stichprobe Zustand: nicht erfasst (%s)" % e)
         snapshot(mm, outdir, log.step, "started")
 
         def counters():
