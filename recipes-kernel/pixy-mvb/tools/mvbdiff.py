@@ -31,9 +31,10 @@ dem das erlaubt ist:
 Dazu:
 
     --no-wipe       Traffic Memory vorher nicht nullen
-    --ping          (nur mit --go) eine echte Anfrage der Anwendung an
-                    Geraet 6 senden und auf die Antwort warten - erzeugt
-                    einen Empfangs-Interrupt ohne laufende Anwendung
+    --ping          (nur mit --go) einen Verbindungsaufbau an Geraet 6
+                    senden, wie Geraet 6 ihn sonst an uns schickt, und
+                    auf die Antwort warten - erzeugt einen Empfangs-
+                    Interrupt ohne laufende Anwendung
     --no-pd         PD_CONF und alle Prozessdatenzugriffe auslassen, der
                     Rest laeuft vollstaendig, START eingeschlossen.
                     (--stop-after taugt dafuer nicht: es ueberspringt
@@ -279,15 +280,19 @@ NO_PD = False
 WIPE = True
 PING = False
 
-# Eine echte Anfrage der Herstelleranwendung an Geraet 6, Funktion 210,
-# aus dem Produktivabzug (xmit_q1). Im Abzug steht sie dreimal mit
-# conn_ref 0x1512/0x1514/0x1515, und jedes Mal kam genau eine Antwort
-# zurueck (rcve_q). Byte 0..3 ueberschreibt der Treiber mit dem
-# Link_Header, der Rest wird unveraendert gesendet - auch die Reste
-# hinter SZ, wie im Original. conn_ref hier 0x1516.
+# Ein Verbindungsaufbau, wie Geraet 6 ihn im Produktivabzug an uns
+# geschickt hat (rcve_q, dreimal, SZ 27, MTC 0x80), jetzt in Gegen-
+# richtung: wir rufen Geraet 6. Die Anwendung hatte jeden dieser Anrufe
+# mit einem 6-Byte-Frame beantwortet (SZ 6 = DR/DC). Auf einen
+# Verbindungsaufbau antwortet ein Geraet in jedem Fall - bestaetigend
+# oder ablehnend -, und jede Antwort loest DTI1 aus. Byte 0..3
+# ueberschreibt der Treiber mit dem Link_Header. conn_ref hier 0x0016.
+#
+# (Erster Versuch war der 6-Byte-Frame selbst - eine Antwort auf einen
+# Anruf, den es nie gab; Geraet 6 hat ihn zu Recht ignoriert.)
 PING_DEST = 6
 PING_FRAME = bytes.fromhex(
-    "00000000 06 00d2 00d2 42 1516 000000457f000000f003000102ffff5505000123"
+    "00000000 1b 00d2 00d2 80 0016 000000457f000000f003000102ffff5505000123"
     .replace(" ", ""))
 
 
@@ -479,13 +484,15 @@ def ping(fd, mm, log):
     Die Antwort loest DTI1 aus. Mit irq > 0 holt der Treiber sie nur im
     Interrupt ab - kommt kein Interrupt an, steht sie zwar im Ring des
     Controllers (QDT rueckt vor), aber read() findet nichts."""
-    log.line("\n--- Message-Anfrage an Geraet %d (aus dem Produktivabzug) ---"
+    log.line("\n--- Verbindungsaufbau an Geraet %d (aus dem Produktivabzug) ---"
              % PING_DEST)
     q0, g0 = rcve_state(mm)
     i0 = irq_count()
+    tq_before = struct.unpack_from("<H", mm, TM + SA_OFF + 0x312)[0]
     req = mvb_port(3, PING_DEST)
     req[4:36] = PING_FRAME
     st, _ = call(log, "write() MD Anfrage", lambda: pd_write(fd, req, 32))
+    tq_after_write = struct.unpack_from("<H", mm, TM + SA_OFF + 0x312)[0]
 
     reply = None
     t0 = time.time()
@@ -499,7 +506,14 @@ def ping(fd, mm, log):
     dt = time.time() - t0
     q1, g1 = rcve_state(mm)
     i1 = irq_count()
+    tq_end = struct.unpack_from("<H", mm, TM + SA_OFF + 0x312)[0]
 
+    # Der Sendeeintrag xmit_q1 steht nach dem Einhaengen auf dem Frame und
+    # rueckt weiter, sobald der Controller ihn gesendet hat.
+    log.line("     Sendequeue xmit_q1: QDT %04X, nach write %04X, nach 5 s %04X"
+             " - %s" % (tq_before, tq_after_write, tq_end,
+                        "gesendet" if tq_end != tq_after_write
+                        else "NICHT gesendet"))
     log.line("     Empfangsqueue: QDT %04X -> %04X, Waechter LLR %s -> %s"
              % (q0, q1, g0, g1))
     log.line("     Interrupt-Stichprobe Anfrage: pixy-mvb %s"

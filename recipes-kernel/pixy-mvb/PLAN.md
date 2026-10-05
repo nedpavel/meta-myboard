@@ -247,6 +247,28 @@ nach `START` ins Protokoll. Unterscheiden sich die Zustände nicht, bleibt
 Erklärung 1 – und `--ping` belegt sie, indem es die Quelle ohne Anwendung
 erzeugt.
 
+### Ergebnis: Kette identisch, Interrupts nur in der Anlaufphase
+
+`irqstate.py` bei laufender Anwendung und `mvbdiff --go` mit
+Original-Modulen nach `START`: **identisch** – MVBC-Masken, `BCR 2677`
+(Interrupt 7; `2600` nur bei geschlossenem LLI), alle GPIO-Register,
+PCI COMMAND, MSI. Die Anwendung schaltet nichts frei.
+
+Auch bei laufender Anwendung blieb der Zähler über 34 s bei 331; kurz
+nach dem Booten waren es 292 → 303 in 10 s. Interrupts kommen vor allem
+in der Anlaufphase.
+
+Erster `--ping` empfing nichts: der nachgespielte Frame (SZ 6) war die
+*Antwort* der Anwendung auf einen Anruf von Gerät 6 (SZ 27, MTC 0x80),
+nicht eine Anfrage. `--ping` sendet jetzt den Anruf selbst und
+protokolliert zusätzlich, ob der Controller ihn gesendet hat (QDT
+xmit_q1).
+
+**Entscheidender Test** bleibt die Anwendung selbst auf den
+nachgebauten Modulen. Dafür vor dem Stoppen ihre Startparameter
+festhalten (`systemctl status session-1.scope`, `/proc/<pid>/cmdline`,
+`environ`, `cwd`) und sie nach dem Modultausch von Hand starten.
+
 ## Stand
 
 | Phase | Stand |
