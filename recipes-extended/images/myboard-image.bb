@@ -80,7 +80,14 @@ set_board_timezone() {
     ln -sf /usr/share/zoneinfo/Europe/Zurich ${IMAGE_ROOTFS}${sysconfdir}/localtime
     echo "Europe/Zurich" > ${IMAGE_ROOTFS}${sysconfdir}/timezone
 }
-IMAGE_INSTALL:append = " \	
+
+# Hinweis zur Touchscreen-Kalibrierung (xinput-calibrator weiter unten):
+# Unter X11 bedient libinput den PenMount, NICHT tslib. tslib wirkt nur bei
+# Anwendungen, die direkt auf den Framebuffer gehen — eine mit ts_calibrate
+# erzeugte Kalibrierung bliebe hier also wirkungslos. xinput_calibrator
+# ermittelt die Transformationsmatrix, die in
+# /etc/X11/xorg.conf.d/50-touchscreen.conf eingetragen wird.
+IMAGE_INSTALL:append = " \
 	ethtool \
 	curl \
 	iproute2 \
@@ -90,11 +97,6 @@ IMAGE_INSTALL:append = " \
 	alsa-utils \
 	alsa-state \
 	alsa-plugins \
-	# Touchscreen-Kalibrierung: unter X11 bedient libinput den PenMount,
-	# NICHT tslib. tslib wirkt nur bei Anwendungen, die direkt auf den
-	# Framebuffer gehen — ts_calibrate bliebe hier also wirkungslos.
-	# xinput_calibrator ermittelt die Transformationsmatrix, die in
-	# /etc/X11/xorg.conf.d/50-touchscreen.conf eingetragen wird.
 	xinput-calibrator \
 	tslib \
 	tslib-calibrate \
