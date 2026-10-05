@@ -1,0 +1,11 @@
+# tty1 gehoert der Qt-Oberflaeche (Xorg :0 vt1). Laeuft dort zusaetzlich
+# ein getty, beanspruchen zwei Dienste dieselbe Konsole und systemd
+# beendet myboard-gui per SIGTERM — schwarzer Bildschirm.
+#
+# Die kleine Nummer sorgt dafuer, dass diese Regel vor 90-systemd.preset
+# greift; systemd wertet Preset-Dateien in numerischer Reihenfolge aus und
+# die erste passende Regel gewinnt.
+#
+# Die Kommandozeile bleibt ueber die anderen Konsolen erreichbar
+# (Ctrl+Alt+F2 ...) sowie ueber die serielle Schnittstelle.
+disable getty@tty1.service

@@ -39,6 +39,8 @@ IMAGE_INSTALL:append = " \
     xorg-conf-myboard \
     "
 IMAGE_INSTALL:append = " udev-rules-myboard"
+# Preset-Regel, die getty@tty1 deaktiviert (tty1 gehoert der Oberflaeche)
+IMAGE_INSTALL:append = " getty-disable"
 # MVB vorerst deaktiviert (Zielgeraet Pixy 1000 ohne MVB-Nutzung).
 # Die Rezepte bleiben im Layer erhalten — zum Reaktivieren genuegt es,
 # die folgende Zeile wieder einzukommentieren. Achtung: der Treiber
@@ -70,9 +72,14 @@ IMAGE_INSTALL:append = " surf matchbox-wm browser-kiosk"
 # und es entstand nicht einmal ein Xorg.0.log. Von Hand funktionierte
 # derselbe Aufruf, weil dann kein Konflikt bestand.
 # Dasselbe Problem gab es bereits beim INC-100.
-ROOTFS_POSTPROCESS_COMMAND += "disable_getty_tty1;"
+# Der Symlink muss NACH 'systemctl preset-all' entfernt werden: preset-all
+# laeuft spaeter in do_rootfs und legt getty@tty1 sonst wieder an (im
+# Log nachweisbar: "Created symlink ... getty.target.wants/getty@tty1.service").
+# ROOTFS_POSTPROCESS_COMMAND:append haengt den Schritt ans Ende der Kette.
+ROOTFS_POSTPROCESS_COMMAND:append = " disable_getty_tty1;"
 disable_getty_tty1() {
     rm -f ${IMAGE_ROOTFS}${sysconfdir}/systemd/system/getty.target.wants/getty@tty1.service
+    rm -f ${IMAGE_ROOTFS}${systemd_system_unitdir}/getty.target.wants/getty@tty1.service
 }
 
 ROOTFS_POSTPROCESS_COMMAND += "set_board_timezone;"
