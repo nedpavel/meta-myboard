@@ -685,6 +685,12 @@ def run(outdir, allow_md, go):
     call(log, "WRITE_DSW",
          lambda: io(IOC["WRITE_DSW"], 0x00FF0011))
     snapshot(mm, outdir, log.step, "writedsw")
+    # Und wieder zurueck: das DSW sieht der Busmaster. Mit 0x0011 im
+    # unteren Byte meldet sich das Geraet womoeglich so, dass der Master
+    # keine Messages mit ihm austauscht - --ping sendete danach nicht.
+    dsw_orig = struct.unpack("<H", d)[0]
+    call(log, "WRITE_DSW zurueck",
+         lambda: io(IOC["WRITE_DSW"], 0xFFFF0000 | dsw_orig))
 
     # Kommandobyte 0x03 = cla|clb: setzt nur die Fehlerzaehler zurueck.
     # Die Leitungsbits 0x0C bleiben aus - die wuerden die Leitungswahl

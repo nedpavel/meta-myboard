@@ -269,6 +269,32 @@ nachgebauten Modulen. Dafür vor dem Stoppen ihre Startparameter
 festhalten (`systemctl status session-1.scope`, `/proc/<pid>/cmdline`,
 `environ`, `cwd`) und sie nach dem Modultausch von Hand starten.
 
+### `--ping` mit Verbindungsaufbau: nicht gesendet
+
+QDT xmit_q1 `0000 → 2050` beim Einhängen, danach unverändert: der
+Controller hat den Frame nie auf den Bus gebracht. Messages sendet ein
+MVB-Gerät erst, wenn der Busmaster es abfragt. Ein möglicher Grund liegt
+im Testablauf selbst: `mvbdiff` schrieb zuvor `0x0011` ins untere Byte
+des DSW, das der Busmaster sieht. Seitdem wird das DSW nach dem Test
+zurückgeschrieben.
+
+Künstliche Interruptquellen hängen damit an Annahmen über den Bus, die
+sich ohne Busanalyse nicht prüfen lassen. Der aussagekräftigere Test ist
+die Anwendung selbst auf den nachgebauten Modulen.
+
+### Anwendung auf den nachgebauten Modulen
+
+Aus `systemctl status session-1.scope`: `getty@tty1` meldet root an
+(`login -- root`), die Login-Shell startet `startx`, `.xinitrc` startet
+`xterm -e /opt/pixy/toolkit/scripts/toolkit/system.sh run mode pad`, das
+wiederum `/opt/project/start.sh` mit `./target` und `extApp 200`. Die
+Kette lässt sich mit `systemctl restart getty@tty1` neu anstoßen – wenn
+das Autologin dort eingerichtet ist.
+
+Ablauf: erst mit den Original-Modulen (Kontrolle, dass der Neustart so
+funktioniert, und Referenz für die Interrupts beim Hochfahren), dann
+dasselbe mit beiden Nachbauten.
+
 ## Stand
 
 | Phase | Stand |
