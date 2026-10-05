@@ -11,6 +11,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 SRC_URI = " \
     file://20-modesetting.conf \
     file://20-fbdev.conf.disabled \
+    file://50-touchscreen.conf \
 "
 S = "${UNPACKDIR}"
 
@@ -23,9 +24,13 @@ do_install() {
     # die Endung .disabled haelt die Datei aus dem Spiel.
     install -m 0644 ${UNPACKDIR}/20-fbdev.conf.disabled \
         ${D}${sysconfdir}/X11/xorg.conf.d/20-fbdev.conf.disabled
+    # Touchscreen-Kalibrierung (Transformationsmatrix fuer libinput)
+    install -m 0644 ${UNPACKDIR}/50-touchscreen.conf \
+        ${D}${sysconfdir}/X11/xorg.conf.d/50-touchscreen.conf
 }
 
 FILES:${PN} = " \
     ${sysconfdir}/X11/xorg.conf.d/20-modesetting.conf \
     ${sysconfdir}/X11/xorg.conf.d/20-fbdev.conf.disabled \
+    ${sysconfdir}/X11/xorg.conf.d/50-touchscreen.conf \
 "

@@ -70,6 +70,7 @@ set_board_timezone() {
 }
 IMAGE_INSTALL:append = " \	
 	ethtool \
+	curl \
 	iproute2 \
 	iproute2-tc \
 	iptables \
@@ -77,6 +78,12 @@ IMAGE_INSTALL:append = " \
 	alsa-utils \
 	alsa-state \
 	alsa-plugins \
+	# Touchscreen-Kalibrierung: unter X11 bedient libinput den PenMount,
+	# NICHT tslib. tslib wirkt nur bei Anwendungen, die direkt auf den
+	# Framebuffer gehen — ts_calibrate bliebe hier also wirkungslos.
+	# xinput_calibrator ermittelt die Transformationsmatrix, die in
+	# /etc/X11/xorg.conf.d/50-touchscreen.conf eingetragen wird.
+	xinput-calibrator \
 	tslib \
 	tslib-calibrate \
 	tslib-tests \

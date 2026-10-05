@@ -3,10 +3,29 @@ Description=MyBoard Qt Kiosk GUI
 After=systemd-user-sessions.service
 
 [Service]
+# xinit legt seine Autorisierungsdatei (.Xauthority) in $HOME ab. Der Dienst
+# erbt aber keine Login-Umgebung: HOME war nicht gesetzt, und /home/root
+# existierte auf dem Geraet gar nicht. xinit brach deshalb ab und riss den
+# X-Server mit — Ergebnis: schwarzer Bildschirm, 'pgrep Xorg' und
+# 'pgrep myboard-gui' beide leer. Von Hand funktionierte derselbe Aufruf,
+# weil die Login-Shell HOME mitbringt.
+# /var/lib/myboard statt /home/root, weil es sicher existiert (siehe
+# RuntimeDirectory-Ersatz unten) und nicht von einem Benutzerkonto abhaengt.
+Environment=HOME=/var/lib/myboard
+Environment=XAUTHORITY=/var/lib/myboard/.Xauthority
+WorkingDirectory=/var/lib/myboard
+
+# Verzeichnis anlegen, falls es fehlt — sonst scheitert xinit erneut.
+ExecStartPre=/bin/mkdir -p /var/lib/myboard
+
 ExecStart=/usr/bin/xinit /etc/xinitrc -- /usr/bin/Xorg :0 vt1
 Restart=on-failure
+RestartSec=2
 TTYPath=/dev/tty1
 StandardInput=tty
+# Ausgaben ins Journal, damit kuenftige Fehler sichtbar sind statt verworfen
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
