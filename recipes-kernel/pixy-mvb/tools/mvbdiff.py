@@ -31,6 +31,9 @@ dem das erlaubt ist:
 Dazu:
 
     --no-wipe       Traffic Memory vorher nicht nullen
+    --ping          (nur mit --go) eine echte Anfrage der Anwendung an
+                    Geraet 6 senden und auf die Antwort warten - erzeugt
+                    einen Empfangs-Interrupt ohne laufende Anwendung
     --no-pd         PD_CONF und alle Prozessdatenzugriffe auslassen, der
                     Rest laeuft vollstaendig, START eingeschlossen.
                     (--stop-after taugt dafuer nicht: es ueberspringt
@@ -274,6 +277,18 @@ def errname(n):
 STOP_AFTER = None
 NO_PD = False
 WIPE = True
+PING = False
+
+# Eine echte Anfrage der Herstelleranwendung an Geraet 6, Funktion 210,
+# aus dem Produktivabzug (xmit_q1). Im Abzug steht sie dreimal mit
+# conn_ref 0x1512/0x1514/0x1515, und jedes Mal kam genau eine Antwort
+# zurueck (rcve_q). Byte 0..3 ueberschreibt der Treiber mit dem
+# Link_Header, der Rest wird unveraendert gesendet - auch die Reste
+# hinter SZ, wie im Original. conn_ref hier 0x1516.
+PING_DEST = 6
+PING_FRAME = bytes.fromhex(
+    "00000000 06 00d2 00d2 42 1516 000000457f000000f003000102ffff5505000123"
+    .replace(" ", ""))
 
 
 def call(log, name, fn):
@@ -443,6 +458,59 @@ def irq_count():
     except OSError:
         pass
     return None
+
+
+def rcve_state(mm):
+    """QDT-Eintrag der Empfangsqueue (Hardwareposition) und das LLR mit
+    Datenzeiger 0 (Waechter = Softwareposition)."""
+    qdt = struct.unpack_from("<H", mm, TM + SA_OFF + 0x314)[0]
+    name, base, n = RINGS[2]
+    guard = None
+    for k in range(n):
+        if struct.unpack_from("<H", mm, TM + base + k * 4)[0] == 0:
+            guard = k
+            break
+    return qdt, guard
+
+
+def ping(fd, mm, log):
+    """Anfrage an Geraet 6 senden und auf die Antwort warten.
+
+    Die Antwort loest DTI1 aus. Mit irq > 0 holt der Treiber sie nur im
+    Interrupt ab - kommt kein Interrupt an, steht sie zwar im Ring des
+    Controllers (QDT rueckt vor), aber read() findet nichts."""
+    log.line("\n--- Message-Anfrage an Geraet %d (aus dem Produktivabzug) ---"
+             % PING_DEST)
+    q0, g0 = rcve_state(mm)
+    i0 = irq_count()
+    req = mvb_port(3, PING_DEST)
+    req[4:36] = PING_FRAME
+    st, _ = call(log, "write() MD Anfrage", lambda: pd_write(fd, req, 32))
+
+    reply = None
+    t0 = time.time()
+    while time.time() - t0 < 5.0 and reply is None:
+        rd = mvb_port(3, PING_DEST)
+        try:
+            pd_read(fd, rd, 32)
+            reply = bytes(rd[4:36])
+        except OSError:
+            time.sleep(0.05)
+    dt = time.time() - t0
+    q1, g1 = rcve_state(mm)
+    i1 = irq_count()
+
+    log.line("     Empfangsqueue: QDT %04X -> %04X, Waechter LLR %s -> %s"
+             % (q0, q1, g0, g1))
+    log.line("     Interrupt-Stichprobe Anfrage: pixy-mvb %s"
+             % ("+%d" % (i1 - i0) if i0 is not None and i1 is not None
+                else "nicht lesbar"))
+    if reply is None:
+        log.line("     Antwort: keine abgeholt in 5 s%s"
+                 % (" - aber im Ring des Controllers angekommen"
+                    if q1 != q0 else ""))
+    else:
+        log.line("     Antwort nach %.2f s: %s" % (dt, reply.hex(" ")))
 
 
 def sample_dr(mm, log, label):
@@ -788,6 +856,9 @@ def run(outdir, allow_md, go):
              lambda: io(IOC["MD_GET_STATUS"], g2, True))
         log.line("     status 0x%08X" % struct.unpack("<I", g2)[0])
 
+        if PING:
+            ping(fd, mm, log)
+
         snapshot(mm, outdir, log.step, "running")
         call(log, "STOP", lambda: io(IOC["STOP"]))
         snapshot(mm, outdir, log.step, "stopped")
@@ -1063,10 +1134,11 @@ def compare(da, db):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        global STOP_AFTER, NO_PD, WIPE, PORTS, WRITE_PORT, WRITE_SIZE
+        global STOP_AFTER, NO_PD, WIPE, PING, PORTS, WRITE_PORT, WRITE_SIZE
         global DISABLE_PORT_ADDR
         NO_PD = "--no-pd" in sys.argv
         WIPE = "--no-wipe" not in sys.argv
+        PING = "--ping" in sys.argv
         for i, a_ in enumerate(sys.argv):
             if a_ == "--stop-after":
                 STOP_AFTER = int(sys.argv[i + 1])

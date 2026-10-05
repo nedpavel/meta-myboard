@@ -212,12 +212,28 @@ derselbe `mvbdiff --go`-Lauf einmal mit Original-Board-Treiber, einmal
 mit dem Nachbau darunter, beide Male mit dem originalen LLI.
 `mvbdiff` zählt dafür jetzt `/proc/interrupts` über die 60 s Betrieb.
 
+### Gegenversuch ohne Anwendung (irq-A / irq-B)
+
+`mvbdiff --go --no-pd` mit originalem LLI, einmal auf dem
+Original-Board-Treiber (A), einmal auf dem Nachbau (B): **beide +0
+Interrupts in 60 s**, Register identisch (`IPR1 0080`, `ISR1 0000`). Ohne
+Anwendung gibt es keine Interruptquelle. Der Board-Treiber ist damit
+entlastet, aber nicht bewiesen.
+
+Woher die Interrupts im Produktivbetrieb kommen, zeigt der Produktivabzug:
+die Anwendung hat dreimal dieselbe Anfrage an Gerät 6 (Funktion 210)
+gesendet und jedes Mal genau eine Antwort erhalten. Unaufgefordert
+schickt niemand – in Lauf A war MD eingerichtet und der Bus lief, es kam
+nichts. **`mvbdiff --ping`** spielt diese Anfrage byteweise nach und
+wartet auf die Antwort; die löst DTI1 aus. Damit sind Interruptzustellung
+und Message-Empfang ohne laufende Anwendung prüfbar.
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); offen: Gegenversuch Board-Treiber |
+| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); Gegenversuch ohne Anwendung: beide 0; offen: `--ping` unter allen drei Kombinationen |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
 | 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush |
 | 5 | offen |
