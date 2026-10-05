@@ -63,6 +63,18 @@ IMAGE_INSTALL:append = " surf matchbox-wm browser-kiosk"
 # Board timezone = build host's zone (Europe/Zurich). NTP/timesyncd only syncs
 # the UTC clock; the timezone is a separate static setting that controls how the
 # local time (and thus the GUI clock) is displayed.
+# Auf tty1 laeuft die Qt-Oberflaeche (Xorg :0 vt1). Lief dort zusaetzlich
+# ein getty, beanspruchten zwei Dienste dieselbe Konsole und systemd
+# beendete myboard-gui per SIGTERM (ExecMainStatus=15, Result=success,
+# keine Neustarts) — der Bildschirm blieb schwarz, Xorg startete nie,
+# und es entstand nicht einmal ein Xorg.0.log. Von Hand funktionierte
+# derselbe Aufruf, weil dann kein Konflikt bestand.
+# Dasselbe Problem gab es bereits beim INC-100.
+ROOTFS_POSTPROCESS_COMMAND += "disable_getty_tty1;"
+disable_getty_tty1() {
+    rm -f ${IMAGE_ROOTFS}${sysconfdir}/systemd/system/getty.target.wants/getty@tty1.service
+}
+
 ROOTFS_POSTPROCESS_COMMAND += "set_board_timezone;"
 set_board_timezone() {
     ln -sf /usr/share/zoneinfo/Europe/Zurich ${IMAGE_ROOTFS}${sysconfdir}/localtime

@@ -1,29 +1,23 @@
 [Unit]
 Description=MyBoard Qt Kiosk GUI
 After=systemd-user-sessions.service
+# Die Oberflaeche belegt tty1. Laeuft dort zusaetzlich ein getty,
+# beanspruchen zwei Dienste dieselbe Konsole und systemd beendet diesen
+# hier per SIGTERM — der Bildschirm bleibt schwarz, Xorg startet nie.
+# Das Image entfernt getty@tty1 bereits (siehe myboard-image.bb); dieser
+# Konflikt-Eintrag sichert es zusaetzlich ab, falls der Dienst von Hand
+# gestartet wird.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
 
 [Service]
-# xinit legt seine Autorisierungsdatei (.Xauthority) in $HOME ab. Der Dienst
-# erbt aber keine Login-Umgebung: HOME war nicht gesetzt, und /home/root
-# existierte auf dem Geraet gar nicht. xinit brach deshalb ab und riss den
-# X-Server mit — Ergebnis: schwarzer Bildschirm, 'pgrep Xorg' und
-# 'pgrep myboard-gui' beide leer. Von Hand funktionierte derselbe Aufruf,
-# weil die Login-Shell HOME mitbringt.
-# /var/lib/myboard statt /home/root, weil es sicher existiert (siehe
-# RuntimeDirectory-Ersatz unten) und nicht von einem Benutzerkonto abhaengt.
-Environment=HOME=/var/lib/myboard
-Environment=XAUTHORITY=/var/lib/myboard/.Xauthority
-WorkingDirectory=/var/lib/myboard
-
-# Verzeichnis anlegen, falls es fehlt — sonst scheitert xinit erneut.
-ExecStartPre=/bin/mkdir -p /var/lib/myboard
-
 ExecStart=/usr/bin/xinit /etc/xinitrc -- /usr/bin/Xorg :0 vt1
 Restart=on-failure
 RestartSec=2
 TTYPath=/dev/tty1
 StandardInput=tty
-# Ausgaben ins Journal, damit kuenftige Fehler sichtbar sind statt verworfen
+# Ausgaben ins Journal, damit kuenftige Fehler sichtbar sind statt
+# spurlos verworfen zu werden.
 StandardOutput=journal
 StandardError=journal
 
