@@ -15,6 +15,7 @@ const ZEILEN   = 40;          /* so viele Verlaufszeilen anzeigen */
 $streamPfad = '/run/myboard-stream/latest.txt';
 $postPfad   = DATA_DIR . '/latest.txt';
 $logPfad    = DATA_DIR . '/stream.log';
+$dbPfad     = DATA_DIR . '/werte.db';
 
 $letztePfad = $postPfad;
 if (is_file($streamPfad)) {
@@ -24,8 +25,26 @@ if (is_file($streamPfad)) {
 }
 
 $letzte = is_file($letztePfad) ? trim(file_get_contents($letztePfad)) : '';
+/* Verlauf aus zwei moeglichen Quellen:
+   - werte.db  schreibt streamd (TCP) — gebuendelt, um die CFast zu schonen
+   - stream.log schreibt upload.php (HTTP-POST)
+   Die Datenbank hat Vorrang, sofern vorhanden. */
 $verlauf = [];
-if (is_file($logPfad)) {
+if (is_file($dbPfad)) {
+    try {
+        $db = new SQLite3($dbPfad, SQLITE3_OPEN_READONLY);
+        $db->busyTimeout(2000);     /* streamd schreibt parallel */
+        $res = $db->query('SELECT zeit, wert FROM werte
+                           ORDER BY id DESC LIMIT ' . ZEILEN);
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
+            $verlauf[] = $r['zeit'] . "\t" . $r['wert'];
+        }
+        $db->close();
+    } catch (Exception $e) {
+        /* Datenbank gerade nicht lesbar — dann eben ohne Verlauf */
+    }
+}
+if (!$verlauf && is_file($logPfad)) {
     $alle = file($logPfad, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     if ($alle !== false) {
         $verlauf = array_reverse(array_slice($alle, -ZEILEN));
