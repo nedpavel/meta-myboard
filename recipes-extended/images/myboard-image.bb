@@ -56,6 +56,10 @@ IMAGE_INSTALL:append = " tzdata"
 # php-fpm fuehrt die PHP-Seiten aus; ohne ihn liefert nginx sie als Text.
 # myboard-web bringt die Seiten (Datenstrom-Empfang + Anzeige) mit.
 IMAGE_INSTALL:append = " nginx php-fpm php-cli myboard-web"
+# streamd nimmt dauerhaft offene Datenstroeme per TCP (Port 9000) entgegen —
+# ueber PHP-FPM ist das nicht moeglich, da FPM einen Request erst
+# vollstaendig entgegennimmt, bevor er das Skript erreicht.
+IMAGE_INSTALL:append = " streamd"
 
 # Browser-Betrieb: surf (WebKitGTK) im Vollbild anstelle der Qt-Oberflaeche,
 # zu starten mit "browser-start". matchbox-wm wird gebraucht, weil ein
