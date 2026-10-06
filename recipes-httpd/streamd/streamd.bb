@@ -1,5 +1,5 @@
 SUMMARY = "TCP receiver for continuous data streams"
-DESCRIPTION = "Nimmt einen dauerhaft offenen Datenstrom per TCP (Port 9000) \
+DESCRIPTION = "Nimmt einen dauerhaft offenen Datenstrom per TCP (Port 9100) \
 zeilenweise entgegen und legt ihn fuer die Anzeige ab. Ergaenzt upload.php: \
 ueber PHP-FPM laesst sich eine stehende Verbindung nicht verarbeiten, weil \
 FPM einen Request erst vollstaendig entgegennimmt."

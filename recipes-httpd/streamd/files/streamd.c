@@ -7,7 +7,7 @@
  * deshalb einen eigenen Dienst auf einem eigenen Port.
  *
  * Sender, einmal verbinden und laufen lassen:
- *     while true; do echo "Wert $(date +%s%3N)"; sleep 0.01; done | nc <board> 9000
+ *     while true; do echo "Wert $(date +%s%3N)"; sleep 0.01; done | nc <board> 9100
  *
  * Gelesen wird zeilenweise; jede Zeile ist ein Wert. Mehrere Sender
  * gleichzeitig sind moeglich (bis MAX_CLIENTS).
@@ -35,7 +35,10 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-#define PORT_DEFAULT   9000
+/* NICHT 9000 verwenden — darauf lauscht php-fpm (siehe php-fpm.conf:
+   listen = 127.0.0.1:9000). streamd startete zuerst, belegte den Port und
+   php-fpm scheiterte mit "Address already in use". */
+#define PORT_DEFAULT   9100
 #define MAX_CLIENTS    8
 #define LINE_MAX_LEN   1024
 #define RX_BUF         8192

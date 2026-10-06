@@ -1,9 +1,13 @@
 [Unit]
 Description=MyBoard Datenstrom-Empfaenger (TCP)
 After=network.target
+# php-fpm lauscht auf 127.0.0.1:9000 — deshalb nutzt streamd 9100.
+# Der Dienst startete frueher zuerst, belegte 9000 und php-fpm scheiterte
+# mit "Address already in use".
+After=php-fpm.service
 
 [Service]
-ExecStart=/usr/bin/streamd 9000
+ExecStart=/usr/bin/streamd 9100
 Restart=always
 RestartSec=2
 
