@@ -92,6 +92,15 @@ set_board_timezone() {
     echo "Europe/Zurich" > ${IMAGE_ROOTFS}${sysconfdir}/timezone
 }
 
+# Hinweise zu einzelnen Paketen der folgenden Liste:
+#   iproute2-ss  "ss" liegt in einem eigenen Unterpaket und kommt mit
+#                iproute2 allein NICHT mit.
+#   net-tools    netstat, ifconfig, route — klassische Netzwerkwerkzeuge.
+#   sqlite3      Datenbank samt Kommandozeilenwerkzeug. PHP bringt die
+#                sqlite3-Erweiterung bereits mit (PACKAGECONFIG des
+#                php-Rezepts), die Seiten koennen also direkt darauf
+#                zugreifen.
+#
 # Hinweis zur Touchscreen-Kalibrierung (xinput-calibrator weiter unten):
 # Unter X11 bedient libinput den PenMount, NICHT tslib. tslib wirkt nur bei
 # Anwendungen, die direkt auf den Framebuffer gehen — eine mit ts_calibrate
@@ -103,7 +112,10 @@ IMAGE_INSTALL:append = " \
 	curl \
 	iproute2 \
 	iproute2-tc \
+	iproute2-ss \
+	net-tools \
 	iptables \
+	sqlite3 \
 	libftdi \
 	alsa-utils \
 	alsa-state \
