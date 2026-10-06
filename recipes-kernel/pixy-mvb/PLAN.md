@@ -433,36 +433,92 @@ dieselbe Selbstvergiftung. Der Befund „das Original hat denselben
 Fehler" bleibt richtig, nur ist es kein Fehler im Original, sondern die
 Wirkung des Werkzeugs auf beide.
 
-Offen ist, **welche** Leseoperation es ist. Verdächtig sind die Register
-neben IVR0/IVR1 (`ISR0` bei +0x3C0, `ISR1` bei +0x3C4, IVR liegt bei
-+0x3C8/+0x3CC) und die Register des GPIO-Blocks. `irqstate.py --bisect`
-liest jede Gruppe einzeln und fragt danach die Aufsicht ab.
+**Welche Leseoperation, ist geklärt - es sind die Cachezeilen.** `mmap`
+bildet das BAR gecacht ab (Original wie Nachbau), also holt die CPU je
+Zugriff 64 Byte vom Bus. Die Registerbasis liegt zeilenbündig bei BAR
+`0x204FF80`:
 
-### Aufsicht gegen die verlorene Flanke
+| Cachezeile | Register |
+|---|---|
+| `0x204FF80` = `SA+0x380…0x3BF` | SCR MCR DR STSR **FC EC MFR MFRE** MR MR2 DPR DPR2 IPR IMR |
+| `0x204FFC0` = `SA+0x3C0…0x3FF` | ISR0 ISR1 **IVR0 IVR1** DAOR DAOK TCR TR1 TR2 TC1 TC2 |
 
-Eine ausgefallene Flanke ist nicht reparabel, solange nur der Interrupt
-selbst IVR liest – genau das macht den Zustand endgültig. Deshalb sieht
-das LLI jetzt alle `irq_watchdog` Millisekunden (Vorgabe 200) nach, ob
-etwas Freigegebenes in IPR ansteht, ohne dass der Dienst läuft:
+`irqstate.py` las `ISR0` (+0x3C0), `ISR1` (+0x3C4) und `TCR` (+0x3E0) -
+alle drei in der Zeile von IVR. Jeder dieser Zugriffe holt `IVR0` und
+`IVR1` mit und nimmt dem Treiber die anstehenden Quellen weg.
 
-1. `IPR & IMR` leer → nichts tun, das ist der Normalfall.
-2. Etwas steht an → IVR leeren, also die Quittung nachholen (`dbg_watchdog`).
-3. Steht es danach noch → `IMR` kurz löschen und wieder setzen. Die
-   Leitung fällt und steigt neu, die fehlende Flanke entsteht
-   (`dbg_wd_toggle`).
+Zweiter, unabhängiger Beleg für die zeilenweise Übertragung: In der
+ersten Zeile liegen `FC`, `EC`, `MFR`, `MFRE`, die beim Lesen verfallen.
+Genau diese vier musste `mvbdiff` von Anfang an als flüchtig ausblenden,
+obwohl es sie nie einzeln gelesen hat.
 
-Das kostet zwei Registerlesevorgänge je Durchgang und macht den Empfang
-unabhängig davon, wer eine Flanke verschluckt hat. `irq_watchdog = 0`
-stellt das Verhalten des Originals her, auch zur Laufzeit. Dienst und
-Aufsicht schließen sich über `irq_lock` aus. Test 17 prüft alle vier
-Fälle.
+Behoben im Werkzeug, nicht im Treiber: `irqstate.py` liest aus der Zeile
+`SA+0x3C0…0x3FF` nichts mehr. Die erste Zeile bleibt drin - sie ist für
+den Interrupt harmlos und kostet nur die Statistikzähler der Anwendung.
+
+### Aufsicht gegen die verlorene Flanke - gebaut, aber nicht übernommen
+
+Für den Fall wurde eine Aufsicht gebaut (Commit `4e7e2ab`): alle
+`irq_watchdog` Millisekunden nachsehen, ob etwas Freigegebenes in IPR
+ansteht, ohne dass der Dienst läuft, dann die Quittung nachholen und
+nötigenfalls die Maske kurz löschen, damit die Leitung fällt und neu
+steigt. Test 17 prüft alle vier Fälle.
+
+**Nicht übernommen.** Zwei Gründe:
+
+1. Jeder beobachtete Stillstand ist auf `irqstate.py` zurückzuführen.
+   Ohne Leser auf `/dev/mvb0` lief der Interrupt durch (728 Stück, 576
+   DTI1, Messages in der Anzeige). Es gibt keinen Beleg für einen
+   Ausfall von selbst, und das Original läuft seit Jahren ohne jede
+   Vorkehrung.
+2. Die Aufsicht müsste IPR0/IPR1 zyklisch lesen. Das Original liest
+   diese Register **nie**. Da gerade die Nachbarschaft von IPR, ISR und
+   IVR im Verdacht steht, die Leitung hängen zu lassen, wäre die
+   Aufsicht möglicherweise selbst die Ursache des Fehlers, den sie
+   heilen soll.
+
+Der Code bleibt in `4e7e2ab` liegen. Wird je ein Stillstand ohne
+fremden Leser beobachtet, ist er in einer Minute wieder eingehängt. Für
+die Suche nach der schädlichen Leseoperation braucht `irqstate.py
+--bisect` diesen Bau; die Warnung im Werkzeug bleibt in jedem Fall.
+
+## Offizieller Rebuild
+
+Beide Module sind nachgebaut, am Gerät im Produktivbetrieb bestätigt und
+damit der Stand, der den Lieferanten ersetzt:
+
+| | srcversion | Größe | Stand |
+|---|---|---|---|
+| `pixy-mvb.ko` | `9DD4743F2973EC003DE83D5` | 360 712 B | Board-Treiber |
+| `pixy-mvblli.ko` | `EE452ED1FD9856506534C13` | 612 744 B | LLI, `md5 893e5014…` |
+
+Nachgewiesen am Gerät, mit der unveränderten Hersteller-Anwendung auf den
+Original-Bibliotheken:
+
+* Beide Module laden beim Booten über `/etc/modprobe.d/zz-mvb-nachbau.conf`.
+* udev legt `/dev/mvb` und `/dev/mvblli` an, `target` und `extApp` öffnen
+  das Gerät beim ersten Versuch.
+* Registerstand gleich dem Produktivstand mit den Originalen: `SCR 87C7`,
+  `MCR 2803`, `DR 150D`, `IMR0 0003`, `IMR1 0880`, `TCR 0022`, `BCR 2677`.
+* Prozessdaten in beide Richtungen: Quelle 491 zählt im Sekundentakt,
+  die Senken 181 und 471 kommen frisch an.
+* Message-Daten über den Interrupt: 576 DTI1, in der Anzeige sichtbar.
+* Der Interrupt-Stillstand tritt mit den Originalen genauso auf und ist
+  in beiden Fällen Folge eines fremden Lesers auf `/dev/mvb0`.
+
+Abweichungen vom Original, beide bewusst und abschaltbar:
+
+| Parameter | Vorgabe | Wirkung |
+|---|---|---|
+| `irq_rearm` | 1 | IVR1/IVR0 wiederholt leeren, bis ein Durchgang leer bleibt. Am Gerät nie ausgelöst (`dbg_rearm = 0`), schließt aber ein echtes Rennen. `0` = Original. |
+| `dbg_*` | — | Nur lesbare Zähler. Sie haben die Fehlersuche entschieden und kosten nichts; sie bleiben drin. |
 
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); Gegenversuch ohne Anwendung: beide 0; offen: `--ping` unter allen drei Kombinationen; Anwendung auf den Nachbauten (Läufe O/N ohne Aussage, nächster Versuch per Boot) |
+| 2 | erledigt. Anwendung läuft auf beiden Nachbauten, Prozess- und Message-Daten fließen (576 DTI1) |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
-| 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush |
-| 5 | offen |
+| 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush. Durch den Lauf mit der Anwendung überholt: Messages laufen im Betrieb über den Interrupt |
+| 5 | Module im Betrieb, Ladeweg über `modprobe.d` eingerichtet, Dokumentation steht. Offen: `--ping` gegen ein zweites Gerät, Portierung auf einen neueren Kernel |

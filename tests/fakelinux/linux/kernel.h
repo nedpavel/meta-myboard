@@ -164,12 +164,6 @@ struct file_operations {
 #define spin_lock_irqsave(l, f)		do { (void)(l); (f) = 0; } while (0)
 #define spin_unlock_irqrestore(l, f)	do { (void)(l); (void)(f); } while (0)
 #define mutex_init(m)			do { (void)(m); } while (0)
-
-#ifndef container_of
-#define container_of(ptr, type, member) \
-	((type *)((char *)(ptr) - offsetof(type, member)))
-#endif
-#define msecs_to_jiffies(ms)		(ms)
 #define mutex_lock(m)			do { (void)(m); } while (0)
 #define mutex_unlock(m)			do { (void)(m); } while (0)
 #define init_waitqueue_head(q)		do { (void)(q); } while (0)

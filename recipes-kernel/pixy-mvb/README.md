@@ -407,7 +407,28 @@ Diese Verhaltensweisen sehen nach Fehlern aus, sind aber vom Original
   erreichbar.
 - **Der Empfangsring verwirft bei Überlauf stillschweigend** — kein
   Fehler, kein Log, nur das Statusbit 4 von `MD_GET_STATUS`.
-- **`mmap` setzt die Seiten nicht auf uncached.**
+- **`mmap` setzt die Seiten nicht auf uncached.** Das hat eine scharfe
+  Folge für jedes Werkzeug, das die Register über `/dev/mvb0` liest: die
+  CPU holt je Zugriff eine ganze 64-Byte-Cachezeile vom Bus. Die
+  Registerbasis liegt zeilenbündig bei BAR `0x204FF80`, also
+
+  | Cachezeile | Register |
+  |---|---|
+  | `0x204FF80` = `SA+0x380…0x3BF` | SCR MCR DR STSR **FC EC MFR MFRE** MR MR2 DPR DPR2 IPR IMR |
+  | `0x204FFC0` = `SA+0x3C0…0x3FF` | ISR0 ISR1 **IVR0 IVR1** DAOR DAOK TCR TR1 TR2 TC1 TC2 |
+
+  Jedes Lesen in der zweiten Zeile – auch von `ISR` oder `TCR` – liest
+  `IVR0`/`IVR1` mit. Der Controller gibt dabei seine anstehenden
+  Interruptquellen heraus, der Treiber sieht sie nie, und weil der MSI
+  auf eine Flanke reagiert, bleibt die Leitung oben: **kein Interrupt
+  mehr, Message-Empfang tot bis zum Neustart.** Das ist am Gerät mit dem
+  Nachbau *und* mit dem Original passiert, verursacht durch
+  `irqstate.py`. Das Werkzeug liest diese Zeile deshalb nicht mehr.
+  Lesen in der ersten Zeile ist für den Interrupt harmlos, löscht aber
+  die vier Zähler `FC`, `EC`, `MFR`, `MFRE` – genau deshalb musste
+  `mvbdiff` sie als flüchtig ausblenden. `mvbdiff` selbst darf den
+  vollen Registersatz lesen: es läuft nur, wenn der Herstellerstack
+  nicht läuft.
 - **`open()` initialisiert den Controller, `close()` baut ihn ab.**
 
 ## Nicht implementiert

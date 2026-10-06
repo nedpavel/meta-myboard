@@ -2,27 +2,39 @@
 """Alles, was ueber die Zustellung eines MVB-Interrupts entscheidet - nur
 lesend.
 
-    irqstate.py [Datei]        Zustand aufnehmen
-    irqstate.py --bisect       die schaedliche Leseoperation einkreisen
+    irqstate.py [Datei]
 
-WARNUNG - Lesen ist hier nicht folgenlos. Am Geraet gemessen: nach einer
-Aufnahme bleibt der MSI aus, IPR steht mit freigegebenen Bits an, und der
-Message-Empfang ist tot. Irgendeine der Leseoperationen laesst die
-Interruptleitung oben haengen, so dass die naechste Flanke ausfaellt.
-Welche, klaert --bisect: jede Gruppe wird einzeln gelesen und danach
-gefragt, ob die Aufsicht im Treiber (dbg_watchdog) eingreifen musste.
-Das setzt ein pixy-mvblli mit irq_watchdog > 0 voraus - der Treiber holt
-die verlorene Flanke dann sofort nach, und es ist kein Neustart je
-Messung noetig.
+ACHTUNG, Cachezeilen - der Grund fuer die Auswahl der Register unten.
+mmap() auf /dev/mvb0 bildet das BAR gecacht ab (das Original tut es
+ebenso), also holt die CPU je Zugriff eine ganze 64-Byte-Zeile vom Bus.
+Die Registerbasis liegt bei BAR 0x204FF80 und damit zeilenbuendig:
+
+  Zeile 0x204FF80 = SA+0x380..0x3BF   SCR MCR DR STSR FC EC MFR MFRE
+                                      MR MR2 DPR DPR2 IPR IMR
+  Zeile 0x204FFC0 = SA+0x3C0..0x3FF   ISR0 ISR1 IVR0 IVR1 DAOR DAOK
+                                      TCR TR1 TR2 TC1 TC2
+
+Jedes Lesen in der zweiten Zeile liest IVR0 und IVR1 mit. Der Controller
+gibt dabei seine anstehenden Interruptquellen heraus - der Treiber sieht
+sie nie, die Interruptleitung bleibt oben, und weil der MSI auf eine
+Flanke reagiert, kommt nie wieder ein Interrupt. Der Message-Empfang ist
+dann tot bis zum Neustart. Genau das ist am Geraet passiert, mit dem
+Nachbau und mit dem Original. Aus dieser Zeile wird deshalb **nichts**
+gelesen, auch nicht ISR und TCR.
+
+Die erste Zeile ist fuer den Interrupt harmlos, kostet aber die vier
+Zaehler FC, EC, MFR und MFRE: die verfallen beim Lesen. Die Statistik der
+Anwendung ist nach einer Aufnahme also zurueckgesetzt.
 
 Gedacht fuer den Vergleich "Anwendung laeuft" gegen "Anwendung
 gestoppt" gegen "eigener Testlauf". Darf parallel zum Herstellerstack
-laufen: /dev/mvb0 ist nicht exklusiv, und IVR0/IVR1 werden nicht gelesen
-(das wuerde dem LLI Interrupts stehlen).
+laufen: /dev/mvb0 ist nicht exklusiv. Die Cachezeile von IVR0/IVR1 wird
+nicht angefasst - weder direkt noch ueber ein Nachbarregister, siehe
+oben.
 
 Festgehalten wird die ganze Kette vom MVBC bis zur CPU:
 
-  MVBC     IPR/IMR/ISR, SCR, MCR am lebenden Registerblock
+  MVBC     SCR, MCR, DR, STSR, DPR, IPR, IMR am lebenden Block
   ISA      BASR0/BASR1/BCR (Interruptnummer im unteren Byte)
   GPIO     alle acht Register, auch IMR/ICR/IER des GPIO-Blocks
   PCI      COMMAND (Bus Master), MSI-Capability (Enable, Adresse,
@@ -50,10 +62,12 @@ SA_CANDIDATES = (0x03C00, 0x07C00, 0x0FC00)
 SA_FOR_MCM = (0x03C00, 0x07C00, 0x0FC00, 0x0FC00, 0x0FC00)
 REG = 0x380
 
+# Nur Register aus der Zeile SA+0x380 - siehe Kopf. ISR0/ISR1 (+0x3C0,
+# +0x3C4) und TCR (+0x3E0) liegen bei IVR und sind deshalb draussen.
 MVBC_REGS = ((0x380, "SCR"), (0x384, "MCR"), (0x388, "DR"),
+             (0x38C, "STSR"), (0x3A8, "DPR"),
              (0x3B0, "IPR0"), (0x3B4, "IPR1"), (0x3B8, "IMR0"),
-             (0x3BC, "IMR1"), (0x3C0, "ISR0"), (0x3C4, "ISR1"),
-             (0x3E0, "TCR"))
+             (0x3BC, "IMR1"))
 GPIO_REGS = ("DAT", "ODR", "DIR", "RES", "IMR", "ICR1", "ICR2", "IER")
 
 # Quellen der Anwendung und zwei Senken mit Lebenszeichen (mcm = 3)
@@ -98,16 +112,6 @@ def lli_counters():
         except OSError:
             pass
     return out
-
-
-def kernel_irq_count():
-    try:
-        for ln in open("/proc/interrupts"):
-            if ln.rstrip().endswith("pixy-mvb"):
-                return sum(int(x) for x in ln.split()[1:] if x.isdigit())
-    except OSError:
-        pass
-    return -1
 
 
 def pci_device():
@@ -219,95 +223,7 @@ def capture():
     return lines
 
 
-# ------------------------------------------------------------------ Suche
-#
-# Jede Gruppe ist eine Leseoperation, wie capture() sie macht. Gefragt
-# wird nach jeder einzeln, ob der Interrupt danach gefehlt hat.
-
-def group_reads(mm, sa):
-    """Liste (Name, Funktion) - jede Funktion liest genau eine Gruppe."""
-    def reg(off, name):
-        return ("MVBC %-5s @%04X" % (name, sa + off),
-                lambda: struct.unpack_from("<H", mm, TM + sa + off)[0])
-
-    groups = [reg(off, name) for off, name in MVBC_REGS]
-    for cand in SA_CANDIDATES:
-        if cand != sa:
-            groups.append(("MCR-Suche   @%04X" % (cand + REG + 4),
-                           lambda c=cand: struct.unpack_from(
-                               "<H", mm, TM + c + REG + 4)[0]))
-    groups += [
-        ("ISA  BASR/BCR", lambda: struct.unpack_from("<HHH", mm, ISA + 0x320)),
-        ("GPIO acht Reg", lambda: struct.unpack_from("<8I", mm, GPIO)),
-        ("Ports PIT/PCS", lambda: port_lines(mm)),
-    ]
-    d = pci_device()
-    if d:
-        groups.append(("PCI  config  ", lambda: open(d + "/config", "rb").read()))
-    return groups
-
-
-def still_alive(settle):
-    """(Eingriffe der Aufsicht, Interrupts) ueber die Wartezeit."""
-    c0 = lli_counters()
-    n0 = kernel_irq_count()
-    time.sleep(settle)
-    c1 = lli_counters()
-    return (int(c1.get("dbg_watchdog", 0)) - int(c0.get("dbg_watchdog", 0)),
-            int(c1.get("dbg_wd_toggle", 0)) - int(c0.get("dbg_wd_toggle", 0)),
-            kernel_irq_count() - n0)
-
-
-def bisect(settle=2.0):
-    c = lli_counters()
-    if "irq_watchdog" not in c:
-        print("Kein pixy-mvblli mit Aufsicht geladen - abgebrochen.")
-        return 1
-    if c["irq_watchdog"] == "0":
-        print("irq_watchdog ist 0. Erst einschalten:")
-        print("  echo 200 > /sys/module/pixy_mvblli/parameters/irq_watchdog")
-        return 1
-
-    fb = os.open(BOARD, os.O_RDONLY)
-    try:
-        mm = mmap.mmap(fb, BAR_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
-    finally:
-        os.close(fb)
-    sa = live_sa(mm)
-    if sa is None:
-        print("Kein Registerblock erkannt - laeuft die Anwendung?")
-        return 1
-
-    print("Aufsicht alle %s ms, Wartezeit je Gruppe %.1f s\n"
-          % (c["irq_watchdog"], settle))
-    base = still_alive(settle)
-    print("%-16s  Aufsicht %2d  Flanke %2d  Interrupts %4d   (ohne Lesen)"
-          % ("Ruhe", base[0], base[1], base[2]))
-
-    schuldig = []
-    for name, fn in group_reads(mm, sa):
-        fn()
-        wd, tog, irqs = still_alive(settle)
-        mark = ""
-        if wd > base[0]:
-            mark = "  <== haengt die Leitung"
-            schuldig.append(name.strip())
-        print("%-16s  Aufsicht %2d  Flanke %2d  Interrupts %4d%s"
-              % (name, wd, tog, irqs, mark))
-    mm.close()
-
-    print("")
-    if schuldig:
-        print("Schaedlich: " + ", ".join(schuldig))
-    else:
-        print("Keine Gruppe hat die Leitung haengen lassen.")
-    return 0
-
-
 def main():
-    if "--bisect" in sys.argv[1:]:
-        sys.exit(bisect())
-
     lines = capture()
     c = lli_counters()
     if c:

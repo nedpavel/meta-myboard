@@ -18,7 +18,6 @@ u8 fake_tm[FAKE_TM_SIZE];
 struct fake_task fake_current = { (void *)1, (void *)1 };
 unsigned long fake_io_writes;
 int (*fake_ioread_hook)(unsigned long off, u16 *val);
-unsigned long fake_wq_queued, fake_wq_cancelled;
 
 #include "../recipes-kernel/pixy-mvblli/files/pixy-mvblli.c"
 
@@ -1239,17 +1238,10 @@ static void test_flush_and_irq_mode(void)
  */
 static u16 seq_ivr1[8], seq_ivr0[8];
 static int seq_n1, seq_n0, pos_ivr1, pos_ivr0;
-static unsigned long off_ivr1, off_ivr0, off_ipr0;
-
-static int ivr_clears_ipr;
+static unsigned long off_ivr1, off_ivr0;
 
 static int ivr_script(unsigned long off, u16 *val)
 {
-	if (ivr_clears_ipr && (off == off_ivr1 || off == off_ivr0)) {
-		/* Wie der Controller: die abgeholte Quelle verlaesst IPR */
-		fake_tm[off_ipr0] = 0;
-		fake_tm[off_ipr0 + 1] = 0;
-	}
 	if (off == off_ivr1) {
 		*val = pos_ivr1 < seq_n1 ? seq_ivr1[pos_ivr1] : 0;
 		pos_ivr1++;
@@ -1300,7 +1292,6 @@ static void test_irq_rearm(void)
 
 	off_ivr1 = (unsigned long)((u8 *)dev.p_sa - fake_tm) + MVBC_IVR1;
 	off_ivr0 = (unsigned long)((u8 *)dev.p_sa - fake_tm) + MVBC_IVR0;
-	off_ipr0 = (unsigned long)((u8 *)dev.p_sa - fake_tm) + MVBC_IPR0;
 	dev.enable = 1;
 	dev.status.is_init = 1;
 
@@ -1333,111 +1324,6 @@ static void test_irq_rearm(void)
 	dev.status.is_init = init;
 }
 
-/* ---------------------------------------------------------- Test 17 */
-/*
- * Aufsicht ueber die verlorene Flanke. Nachgestellt wird der Zustand,
- * der am Geraet die Messages gekostet hat: IPR traegt freigegebene
- * Bits, aber kein Interrupt kommt mehr. Der Waechter muss dann
- * quittieren; bleibt IPR stehen, muss er die Maske kurz loeschen, damit
- * die Leitung faellt und neu steigt.
- */
-static void test_irq_watchdog(void)
-{
-	int wd0, tog0, dti1_0;
-	int enable = dev.enable, init = dev.status.is_init;
-	int saved = irq_watchdog;
-	unsigned long q0;
-
-	printf("\n--- Test 17: Aufsicht holt die verlorene Flanke nach ---\n");
-
-	dev.enable = 1;
-	dev.status.is_init = 1;
-	dev.wd_stop = false;
-	irq_watchdog = 200;
-	dev.int_mask[0] = MVB_INT_BIT(MVB_INT_DTI1) | MVB_INT_BIT(MVB_INT_DTI2);
-	dev.int_mask[1] = MVB_INT_BIT(MVB_INT_FEV) | MVB_INT_BIT(MVB_INT_RQE);
-	sa_w16(&dev, MVBC_IMR0, dev.int_mask[0]);
-	sa_w16(&dev, MVBC_IMR1, dev.int_mask[1]);
-
-	/* Ruhe: nichts steht an, der Waechter darf nichts tun */
-	sa_w16(&dev, MVBC_IPR0, 0);
-	sa_w16(&dev, MVBC_IPR1, 0);
-	wd0 = dbg_watchdog;
-	q0 = fake_wq_queued;
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	check(dbg_watchdog == wd0, "Waechter wurde ohne Anlass taetig");
-	check(fake_wq_queued == q0 + 1, "Waechter hat sich nicht neu gestellt");
-
-	/* Nur ein nicht freigegebenes Bit: ebenfalls kein Anlass */
-	sa_w16(&dev, MVBC_IPR0, 0x4000);
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	check(dbg_watchdog == wd0, "gesperrtes Bit hat den Waechter geweckt");
-
-	/*
-	 * DTI1 steht an und ist freigegeben, das Vektorregister meldet es
-	 * auch: der Waechter muss quittieren, und zwar ohne Maskentrick -
-	 * die Nachstellung loescht IPR beim Leeren des IVR.
-	 */
-	seq_ivr1[0] = 0;
-	seq_n1 = 1;
-	seq_ivr0[0] = 0x100 | MVB_INT_DTI1;
-	seq_ivr0[1] = 0;
-	seq_n0 = 2;
-	pos_ivr1 = pos_ivr0 = 0;
-	ivr_clears_ipr = 1;
-	sa_w16(&dev, MVBC_IPR0, MVB_INT_BIT(MVB_INT_DTI1));
-	wd0 = dbg_watchdog;
-	tog0 = dbg_wd_toggle;
-	dti1_0 = dbg_dti1;
-	fake_ioread_hook = ivr_script;
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	fake_ioread_hook = NULL;
-	ivr_clears_ipr = 0;
-	check(dbg_watchdog == wd0 + 1, "Waechter hat nicht quittiert");
-	check(dbg_dti1 == dti1_0 + 1, "DTI1 wurde nicht nachgeholt");
-	check(dbg_wd_toggle == tog0, "Maske unnoetig umgeschaltet");
-	printf("  anstehendes DTI1 nachgeholt, Maske unberuehrt\n");
-
-	/* Bleibt IPR stehen, muss die Maske eine neue Flanke erzeugen */
-	seq_n1 = seq_n0 = 0;
-	pos_ivr1 = pos_ivr0 = 0;
-	sa_w16(&dev, MVBC_IPR0, MVB_INT_BIT(MVB_INT_DTI2));
-	wd0 = dbg_watchdog;
-	tog0 = dbg_wd_toggle;
-	fake_ioread_hook = ivr_script;
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	fake_ioread_hook = NULL;
-	check(dbg_watchdog == wd0 + 1, "Waechter hat nicht quittiert");
-	check(dbg_wd_toggle == tog0 + 1, "Maske wurde nicht umgeschaltet");
-	check(sa_r16(&dev, MVBC_IMR0) == dev.int_mask[0] &&
-	      sa_r16(&dev, MVBC_IMR1) == dev.int_mask[1],
-	      "Maske nach dem Umschalten nicht wiederhergestellt: %04x/%04x",
-	      sa_r16(&dev, MVBC_IMR0), sa_r16(&dev, MVBC_IMR1));
-	printf("  haengendes IPR: Maske aus und wieder an, Stand %04x/%04x\n",
-	       sa_r16(&dev, MVBC_IMR0), sa_r16(&dev, MVBC_IMR1));
-
-	/* Abgeschaltet verhaelt sich der Treiber wie das Original */
-	irq_watchdog = 0;
-	wd0 = dbg_watchdog;
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	check(dbg_watchdog == wd0, "Waechter laeuft trotz irq_watchdog = 0");
-
-	/* Haltekennzeichen: keine neue Runde mehr */
-	dev.wd_stop = true;
-	q0 = fake_wq_queued;
-	mvb_irq_watchdog_fn(&dev.irq_wd.work);
-	check(fake_wq_queued == q0,
-	      "Waechter stellt sich trotz wd_stop neu");
-	printf("  irq_watchdog = 0 untaetig, wd_stop beendet die Kette\n");
-
-	dev.wd_stop = false;
-	irq_watchdog = saved;
-	dev.enable = enable;
-	dev.status.is_init = init;
-	sa_w16(&dev, MVBC_IPR0, 0);
-	sa_w16(&dev, MVBC_IPR1, 0);
-}
-
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -1468,7 +1354,6 @@ int main(int argc, char **argv)
 	test_ring_layout();
 	test_flush_and_irq_mode();
 	test_irq_rearm();
-	test_irq_watchdog();
 	test_deinit();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);
