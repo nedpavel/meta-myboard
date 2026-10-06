@@ -295,6 +295,18 @@ Ablauf: erst mit den Original-Modulen (Kontrolle, dass der Neustart so
 funktioniert, und Referenz für die Interrupts beim Hochfahren), dann
 dasselbe mit beiden Nachbauten.
 
+### Neustart über getty@tty1: Anwendung läuft, Anzeige nicht
+
+`systemctl restart getty@tty1` bringt die ganze Kette wieder hoch
+(Xorg, xterm, system.sh, target, extApp). Mit den Original-Modulen:
+`target` hält `/dev/mvblli0`, `SCR 87C7`, `BCR 2677`, Interrupts kommen.
+Bild und Touch reagieren danach aber nicht – ein X-/Eingabeproblem nach
+dem Sitzungsneustart, unabhängig von den MVB-Treibern. Für den Test
+genügt der MVB-Zustand: `irqstate.py` zeigt jetzt zusätzlich die drei
+Quellports der Anwendung (491 trägt offenbar ihr Lebenszeichen) und zwei
+Lebenszeichen-Senken. Zwei Aufnahmen im Abstand von Sekunden zeigen, ob
+die Anwendung schreibt und empfängt.
+
 ## Stand
 
 | Phase | Stand |

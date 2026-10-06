@@ -17,6 +17,10 @@ Festgehalten wird die ganze Kette vom MVBC bis zur CPU:
   PCI      COMMAND (Bus Master), MSI-Capability (Enable, Adresse,
            Daten, Maske, Pending)
   Kernel   pixy-mvb in /proc/interrupts, Modulparameter
+  Ports    die drei Quellports der Anwendung und zwei Lebenszeichen-
+           Senken: PCS und die gerade sichtbare Seite. Zweimal im
+           Abstand von ein paar Sekunden aufgenommen zeigt das, ob die
+           Anwendung schreibt und empfaengt - auch ohne Anzeige.
 """
 
 import glob
@@ -41,6 +45,11 @@ MVBC_REGS = ((0x380, "SCR"), (0x384, "MCR"), (0x388, "DR"),
              (0x3E0, "TCR"))
 GPIO_REGS = ("DAT", "ODR", "DIR", "RES", "IMR", "ICR1", "ICR2", "IER")
 
+# Quellen der Anwendung und zwei Senken mit Lebenszeichen (mcm = 3)
+PORTS = ((491, "Quelle"), (492, "Quelle"), (498, "Quelle"),
+         (181, "FLG1 Lebenszeichen"), (471, "DDA1 Lebenszeichen"))
+LA_PIT, LA_DATA, LA_PCS = 0x00000, 0x10000, 0x30000
+
 
 def live_sa(mm):
     for sa in SA_CANDIDATES:
@@ -49,6 +58,24 @@ def live_sa(mm):
         if mcr >> 11 == 5 and mcm < len(SA_FOR_MCM) and SA_FOR_MCM[mcm] == sa:
             return sa
     return None
+
+
+def port_lines(mm):
+    out = []
+    for port, what in PORTS:
+        idx = struct.unpack_from("<H", mm, TM + LA_PIT + port * 2)[0]
+        if not idx or idx > 0x3FF:
+            out.append("Port     %4d %-19s nicht konfiguriert" % (port, what))
+            continue
+        w0, w1, tack, _ = struct.unpack_from("<4H", mm, TM + LA_PCS + idx * 8)
+        typ = ("passiv", "Senke", "Quelle", "?")[(w0 >> 10) & 3]
+        size = 2 << (w0 >> 12) if (w0 >> 12) <= 4 else 0
+        page = 1 if w1 & 0x40 else 0
+        off = TM + LA_DATA + (idx >> 2) * 64 + page * 32 + (idx & 3) * 8
+        data = mm[off:off + min(size, 8)]
+        out.append("Port     %4d %-19s idx %3d %-6s tack %04X  %s"
+                   % (port, what, idx, typ, tack, data.hex(" ")))
+    return out
 
 
 def pci_device():
@@ -149,6 +176,8 @@ def capture():
         g = struct.unpack_from("<8I", mm, GPIO)
         lines.append("GPIO     " + "  ".join(
             "%s %08X" % (n, v) for n, v in zip(GPIO_REGS, g)))
+        if sa == 0x0FC00:
+            lines += port_lines(mm)
     finally:
         mm.close()
     d = pci_device()
