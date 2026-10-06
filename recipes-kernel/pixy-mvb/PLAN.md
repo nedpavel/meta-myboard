@@ -408,9 +408,54 @@ nicht.
 Abhilfe (Abweichung vom Original, Parameter `irq_rearm`, Vorgabe 1, zur
 Laufzeit änderbar): IVR1 und IVR0 so lange wiederholt leeren, bis ein
 ganzer Durchgang über beide nichts mehr findet. Höchstens 8 Durchgänge.
-`dbg_rearm` zählt die Durchgänge, die noch etwas fanden. Liegt er über 0,
-ist das Rennen am Gerät nachgewiesen. Mit `irq_rearm=0` verhält sich der
-Nachbau wie das Original. Test 16 in `tm_replay` stellt das Rennen nach.
+`dbg_rearm` zählt die Durchgänge, die noch etwas fanden. Mit
+`irq_rearm=0` verhält sich der Nachbau wie das Original. Test 16 in
+`tm_replay` stellt das Rennen nach.
+
+### Die Ursache war das Messwerkzeug
+
+`dbg_rearm = 0` – das Rennen oben ist am Gerät **nicht** aufgetreten, die
+Erklärung war falsch. Der Lauf mit `irq_rearm` zeigt stattdessen:
+
+* 728 Interrupts, davon 576 DTI1. Die Anwendung bekam die MVB-Messages
+  und zeigte sie an. **Der Message-Empfang des Nachbaus arbeitet.**
+* Die erste Aufnahme ist sauber: `IPR0 0000`, `IPR1 0000`.
+* Ab der zweiten Aufnahme steht der Zähler bei 728 und `IPR0` trägt
+  `0302`, später `4303`. Der Betreiber sieht es an der Anzeige: Die
+  Messages kamen, **bis die Abfrage über SSH lief**, danach nicht mehr.
+
+Damit ist `irqstate.py` selbst der Auslöser. Eine seiner Leseoperationen
+lässt die Interruptleitung oben hängen, die nächste Flanke fällt aus, und
+da niemand IVR mehr liest, bleibt es so. Jede frühere Messung, die
+„Interrupts nur in der Anlaufphase" zeigte – auch die mit den
+Originalmodulen (`zustand-laeuft.txt`, 331 bei `IPR0 0302`) – ist
+dieselbe Selbstvergiftung. Der Befund „das Original hat denselben
+Fehler" bleibt richtig, nur ist es kein Fehler im Original, sondern die
+Wirkung des Werkzeugs auf beide.
+
+Offen ist, **welche** Leseoperation es ist. Verdächtig sind die Register
+neben IVR0/IVR1 (`ISR0` bei +0x3C0, `ISR1` bei +0x3C4, IVR liegt bei
++0x3C8/+0x3CC) und die Register des GPIO-Blocks. `irqstate.py --bisect`
+liest jede Gruppe einzeln und fragt danach die Aufsicht ab.
+
+### Aufsicht gegen die verlorene Flanke
+
+Eine ausgefallene Flanke ist nicht reparabel, solange nur der Interrupt
+selbst IVR liest – genau das macht den Zustand endgültig. Deshalb sieht
+das LLI jetzt alle `irq_watchdog` Millisekunden (Vorgabe 200) nach, ob
+etwas Freigegebenes in IPR ansteht, ohne dass der Dienst läuft:
+
+1. `IPR & IMR` leer → nichts tun, das ist der Normalfall.
+2. Etwas steht an → IVR leeren, also die Quittung nachholen (`dbg_watchdog`).
+3. Steht es danach noch → `IMR` kurz löschen und wieder setzen. Die
+   Leitung fällt und steigt neu, die fehlende Flanke entsteht
+   (`dbg_wd_toggle`).
+
+Das kostet zwei Registerlesevorgänge je Durchgang und macht den Empfang
+unabhängig davon, wer eine Flanke verschluckt hat. `irq_watchdog = 0`
+stellt das Verhalten des Originals her, auch zur Laufzeit. Dienst und
+Aufsicht schließen sich über `irq_lock` aus. Test 17 prüft alle vier
+Fälle.
 
 ## Stand
 

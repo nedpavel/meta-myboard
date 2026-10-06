@@ -2,7 +2,18 @@
 """Alles, was ueber die Zustellung eines MVB-Interrupts entscheidet - nur
 lesend.
 
-    irqstate.py [Datei]
+    irqstate.py [Datei]        Zustand aufnehmen
+    irqstate.py --bisect       die schaedliche Leseoperation einkreisen
+
+WARNUNG - Lesen ist hier nicht folgenlos. Am Geraet gemessen: nach einer
+Aufnahme bleibt der MSI aus, IPR steht mit freigegebenen Bits an, und der
+Message-Empfang ist tot. Irgendeine der Leseoperationen laesst die
+Interruptleitung oben haengen, so dass die naechste Flanke ausfaellt.
+Welche, klaert --bisect: jede Gruppe wird einzeln gelesen und danach
+gefragt, ob die Aufsicht im Treiber (dbg_watchdog) eingreifen musste.
+Das setzt ein pixy-mvblli mit irq_watchdog > 0 voraus - der Treiber holt
+die verlorene Flanke dann sofort nach, und es ist kein Neustart je
+Messung noetig.
 
 Gedacht fuer den Vergleich "Anwendung laeuft" gegen "Anwendung
 gestoppt" gegen "eigener Testlauf". Darf parallel zum Herstellerstack
@@ -76,6 +87,27 @@ def port_lines(mm):
         out.append("Port     %4d %-19s idx %3d %-6s tack %04X  %s"
                    % (port, what, idx, typ, tack, data.hex(" ")))
     return out
+
+
+def lli_counters():
+    """Zaehler des LLI, rein aus sysfs - ohne Zugriff auf die Karte."""
+    out = {}
+    for f in glob.glob("/sys/module/pixy_mvblli/parameters/*"):
+        try:
+            out[os.path.basename(f)] = open(f).read().strip()
+        except OSError:
+            pass
+    return out
+
+
+def kernel_irq_count():
+    try:
+        for ln in open("/proc/interrupts"):
+            if ln.rstrip().endswith("pixy-mvb"):
+                return sum(int(x) for x in ln.split()[1:] if x.isdigit())
+    except OSError:
+        pass
+    return -1
 
 
 def pci_device():
@@ -187,11 +219,105 @@ def capture():
     return lines
 
 
+# ------------------------------------------------------------------ Suche
+#
+# Jede Gruppe ist eine Leseoperation, wie capture() sie macht. Gefragt
+# wird nach jeder einzeln, ob der Interrupt danach gefehlt hat.
+
+def group_reads(mm, sa):
+    """Liste (Name, Funktion) - jede Funktion liest genau eine Gruppe."""
+    def reg(off, name):
+        return ("MVBC %-5s @%04X" % (name, sa + off),
+                lambda: struct.unpack_from("<H", mm, TM + sa + off)[0])
+
+    groups = [reg(off, name) for off, name in MVBC_REGS]
+    for cand in SA_CANDIDATES:
+        if cand != sa:
+            groups.append(("MCR-Suche   @%04X" % (cand + REG + 4),
+                           lambda c=cand: struct.unpack_from(
+                               "<H", mm, TM + c + REG + 4)[0]))
+    groups += [
+        ("ISA  BASR/BCR", lambda: struct.unpack_from("<HHH", mm, ISA + 0x320)),
+        ("GPIO acht Reg", lambda: struct.unpack_from("<8I", mm, GPIO)),
+        ("Ports PIT/PCS", lambda: port_lines(mm)),
+    ]
+    d = pci_device()
+    if d:
+        groups.append(("PCI  config  ", lambda: open(d + "/config", "rb").read()))
+    return groups
+
+
+def still_alive(settle):
+    """(Eingriffe der Aufsicht, Interrupts) ueber die Wartezeit."""
+    c0 = lli_counters()
+    n0 = kernel_irq_count()
+    time.sleep(settle)
+    c1 = lli_counters()
+    return (int(c1.get("dbg_watchdog", 0)) - int(c0.get("dbg_watchdog", 0)),
+            int(c1.get("dbg_wd_toggle", 0)) - int(c0.get("dbg_wd_toggle", 0)),
+            kernel_irq_count() - n0)
+
+
+def bisect(settle=2.0):
+    c = lli_counters()
+    if "irq_watchdog" not in c:
+        print("Kein pixy-mvblli mit Aufsicht geladen - abgebrochen.")
+        return 1
+    if c["irq_watchdog"] == "0":
+        print("irq_watchdog ist 0. Erst einschalten:")
+        print("  echo 200 > /sys/module/pixy_mvblli/parameters/irq_watchdog")
+        return 1
+
+    fb = os.open(BOARD, os.O_RDONLY)
+    try:
+        mm = mmap.mmap(fb, BAR_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
+    finally:
+        os.close(fb)
+    sa = live_sa(mm)
+    if sa is None:
+        print("Kein Registerblock erkannt - laeuft die Anwendung?")
+        return 1
+
+    print("Aufsicht alle %s ms, Wartezeit je Gruppe %.1f s\n"
+          % (c["irq_watchdog"], settle))
+    base = still_alive(settle)
+    print("%-16s  Aufsicht %2d  Flanke %2d  Interrupts %4d   (ohne Lesen)"
+          % ("Ruhe", base[0], base[1], base[2]))
+
+    schuldig = []
+    for name, fn in group_reads(mm, sa):
+        fn()
+        wd, tog, irqs = still_alive(settle)
+        mark = ""
+        if wd > base[0]:
+            mark = "  <== haengt die Leitung"
+            schuldig.append(name.strip())
+        print("%-16s  Aufsicht %2d  Flanke %2d  Interrupts %4d%s"
+              % (name, wd, tog, irqs, mark))
+    mm.close()
+
+    print("")
+    if schuldig:
+        print("Schaedlich: " + ", ".join(schuldig))
+    else:
+        print("Keine Gruppe hat die Leitung haengen lassen.")
+    return 0
+
+
 def main():
-    text = "\n".join(capture()) + "\n"
+    if "--bisect" in sys.argv[1:]:
+        sys.exit(bisect())
+
+    lines = capture()
+    c = lli_counters()
+    if c:
+        lines.append("LLI      " + "  ".join(
+            "%s=%s" % (k, c[k]) for k in sorted(c) if k.startswith(("dbg_", "irq_"))))
+    text = "\n".join(lines) + "\n"
     sys.stdout.write(text)
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], "w") as f:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if args:
+        with open(args[0], "w") as f:
             f.write(text)
 
 

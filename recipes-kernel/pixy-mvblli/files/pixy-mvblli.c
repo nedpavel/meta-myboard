@@ -34,6 +34,7 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include "pixy-mvb.h"
 #include "pixy-mvblli.h"
@@ -130,6 +131,36 @@ MODULE_PARM_DESC(irq_rearm,
 static int dbg_rearm;		/* Durchgaenge, die noch etwas fanden */
 module_param(dbg_rearm, int, 0444);
 
+/*
+ * Waechter gegen eine verlorene Flanke (Abweichung vom Original).
+ *
+ * Der MSI der Karte reagiert auf eine Flanke. Faellt eine einzige aus -
+ * weil jemand IVR nebenbei gelesen hat, oder weil eine neue Quelle genau
+ * zwischen Quittung und Ruecksprung eintrifft -, bleibt die Leitung oben
+ * und es kommt nie wieder ein Interrupt. Am Geraet beobachtet: IPR steht
+ * mit freigegebenen Bits an, /proc/interrupts steht, der Message-Empfang
+ * ist tot, und nur ein Neustart hilft. Das Original hat dagegen keine
+ * Vorkehrung.
+ *
+ * Der Waechter sieht alle irq_watchdog Millisekunden nach, ob etwas
+ * Freigegebenes ansteht, ohne dass der Interruptdienst laeuft, und holt
+ * es nach. Bleibt IPR danach stehen, wird die Maske kurz aus- und wieder
+ * eingeschaltet; das erzeugt eine neue Flanke. irq_watchdog = 0 schaltet
+ * ihn ab und stellt das Verhalten des Originals her.
+ */
+static int irq_watchdog = 200;
+module_param(irq_watchdog, int, 0644);
+MODULE_PARM_DESC(irq_watchdog,
+	"Abstand der Interruptaufsicht in ms, 0 = aus (Vorgabe 200)");
+
+#define MVB_WD_MIN_MS		20
+#define MVB_WD_IDLE_MS		1000
+
+static int dbg_watchdog;	/* nachgeholte Quittungen          */
+static int dbg_wd_toggle;	/* davon mit erzwungener Flanke    */
+module_param(dbg_watchdog, int, 0444);
+module_param(dbg_wd_toggle, int, 0444);
+
 #define MVB_IRQ_MAX_PASSES	8
 
 struct mvblli_dev {
@@ -206,6 +237,11 @@ struct mvblli_dev {
 	 */
 	int md_rcv_irq_dispatched;
 	int md_rcv_irq_signaled;
+
+	/* Interruptquittung: Dienst und Waechter schliessen sich aus */
+	spinlock_t irq_lock;
+	struct delayed_work irq_wd;
+	bool wd_stop;			/* der Waechter stellt sich nicht neu */
 
 	struct mutex lock;
 };
@@ -1170,20 +1206,15 @@ static int mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
 	return guard;
 }
 
-static void mvblli_irq_server(void *arg)
+/*
+ * Reihenfolge wie im Original: erst IVR1, dann IVR0. Mit irq_rearm
+ * weiter, bis ein Durchgang ueber beide Register nichts mehr findet.
+ * Der Aufrufer haelt irq_lock.
+ */
+static void mvb_irq_drain_all(struct mvblli_dev *d)
 {
-	struct mvblli_dev *d = arg;
 	int pass, found;
 
-	dbg_irq++;
-
-	if (!d->enable || !d->status.is_init)
-		return;
-
-	/*
-	 * Reihenfolge wie im Original: erst IVR1, dann IVR0. Mit irq_rearm
-	 * weiter, bis ein Durchgang ueber beide Register nichts mehr findet.
-	 */
 	for (pass = 0; pass < MVB_IRQ_MAX_PASSES; pass++) {
 		found = mvb_drain_ivr(d, MVBC_IVR1, 16);
 		found += mvb_drain_ivr(d, MVBC_IVR0, 0);
@@ -1192,6 +1223,69 @@ static void mvblli_irq_server(void *arg)
 		if (pass)
 			dbg_rearm++;
 	}
+}
+
+static void mvblli_irq_server(void *arg)
+{
+	struct mvblli_dev *d = arg;
+	unsigned long flags;
+
+	dbg_irq++;
+
+	if (!d->enable || !d->status.is_init)
+		return;
+
+	spin_lock_irqsave(&d->irq_lock, flags);
+	mvb_irq_drain_all(d);
+	spin_unlock_irqrestore(&d->irq_lock, flags);
+}
+
+/* Was ansteht und freigegeben ist. Die Maske kommt aus dem Spiegel. */
+static u16 mvb_irq_pending(struct mvblli_dev *d)
+{
+	return (sa_r16(d, MVBC_IPR0) & d->int_mask[0]) |
+	       (sa_r16(d, MVBC_IPR1) & d->int_mask[1]);
+}
+
+static void mvb_irq_watchdog_fn(struct work_struct *w)
+{
+	struct mvblli_dev *d = container_of(w, struct mvblli_dev, irq_wd.work);
+	unsigned long flags;
+	int ms = irq_watchdog;
+
+	if (ms > 0 && d->enable && d->status.is_init) {
+		spin_lock_irqsave(&d->irq_lock, flags);
+		if (mvb_irq_pending(d)) {
+			dbg_watchdog++;
+			mvb_irq_drain_all(d);
+			/*
+			 * Was ueber IVR nicht abzuholen war, steht noch an.
+			 * Maske aus und wieder an laesst die Leitung fallen
+			 * und neu steigen - die Flanke, die gefehlt hat.
+			 */
+			if (mvb_irq_pending(d)) {
+				dbg_wd_toggle++;
+				sa_w16(d, MVBC_IMR0, 0);
+				sa_w16(d, MVBC_IMR1, 0);
+				sa_w16(d, MVBC_IMR0, d->int_mask[0]);
+				sa_w16(d, MVBC_IMR1, d->int_mask[1]);
+			}
+		}
+		spin_unlock_irqrestore(&d->irq_lock, flags);
+	}
+
+	if (ms > 0 && ms < MVB_WD_MIN_MS)
+		ms = MVB_WD_MIN_MS;
+
+	/*
+	 * Auch abgeschaltet weiterlaufen, nur traege: so wirkt ein
+	 * spaeteres Einschalten zur Laufzeit ohne Neuladen. Nur wd_stop
+	 * beendet die Kette - sonst koennte sich der Waechter nach dem
+	 * Abbruch im Abbau noch einmal selbst einreihen.
+	 */
+	if (!d->wd_stop)
+		schedule_delayed_work(&d->irq_wd,
+			msecs_to_jiffies(ms > 0 ? ms : MVB_WD_IDLE_MS));
 }
 
 /* -------------------------------------------- Anbindung an pixy-mvb */
@@ -1489,6 +1583,11 @@ static int mvb_init_board(struct mvblli_dev *d)
 		mvb_int_connect(d, MVB_INT_RQE);
 	}
 
+	d->wd_stop = false;
+	schedule_delayed_work(&d->irq_wd,
+			      msecs_to_jiffies(irq_watchdog > 0 ?
+					       irq_watchdog : MVB_WD_IDLE_MS));
+
 	pr_info("pixy_mvblli: MVB %s controller of board /dev/mvblli%d initialized\n",
 		d->media_type ? "EMD" : "ESD", d->brd_id);
 
@@ -1509,6 +1608,10 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 {
 	if (!d->status.is_init)
 		return;
+
+	/* Der Waechter darf nicht in den Abbau hineinlaufen */
+	d->wd_stop = true;
+	cancel_delayed_work_sync(&d->irq_wd);
 
 	/*
 	 * Reihenfolge wie im Original: Interruptnummer aus dem BCR nehmen,
@@ -2519,6 +2622,8 @@ static void mvb_add_board(int brd_id, void *arg)
 	memset(d, 0, sizeof(*d));
 	d->brd_id = brd_id;
 	spin_lock_init(&d->md_lock);
+	spin_lock_init(&d->irq_lock);
+	INIT_DELAYED_WORK(&d->irq_wd, mvb_irq_watchdog_fn);
 	mutex_init(&d->lock);
 	init_waitqueue_head(&d->wait_poll);
 
