@@ -307,12 +307,45 @@ Quellports der Anwendung (491 trägt offenbar ihr Lebenszeichen) und zwei
 Lebenszeichen-Senken. Zwei Aufnahmen im Abstand von Sekunden zeigen, ob
 die Anwendung schreibt und empfängt.
 
+### Läufe O und N: Anwendung hat das LLI nicht geöffnet
+
+Beide Läufe sagen nichts über die Treiber, weil die neu gestartete
+Anwendung `/dev/mvblli0` in keinem der beiden geöffnet hat:
+`SCR@3C00 0700` (Reset), `BCR 2600`, `fuser` leer, Interrupts +0.
+
+* **O (Originale):** Das alte `target` hielt das Gerät nach
+  `terminate-session` noch. Das neue bekam zweimal EBUSY
+  (`4447.99`, `4474.54`, 27 s Abstand); das alte schloss erst bei
+  `4527.23`. Danach kam innerhalb des Messfensters kein weiterer Versuch.
+  Beim Hochfahren lief es genauso ab: EBUSY `195.09`, Freigabe `195.77`,
+  erfolgreiches `open()` erst `292.97`, also rund 97 s später. Die
+  Anwendung versucht es also erneut, aber mit langem Abstand.
+  90 s Wartezeit reichen nicht.
+* **N (Nachbau):** keine Meldung des LLI, also auch kein EBUSY. Damit hat
+  die Anwendung entweder gar nicht versucht zu öffnen, oder sie ist an
+  etwas gescheitert, bevor sie `open()` aufruft.
+
+Beim Gegenlesen dazu gefunden: Der Nachbau meldete eine andere Kennung als
+das Original. Er gab `version=3.0.0` statt `1.0.3` zurück, und
+`sw_version` im Statusblock stand auf `pixy-mvblli v3.0.0 - MVB Link L…`
+statt `pixy-mvblli-V1.0.3-03.12.24`, das das Original mit `"%s-V%s-%s"`
+in `mvb_init_board` bildet. Prüft die Bibliothek eines von beiden, lehnt
+sie den Nachbau ab. Beides ist jetzt angeglichen, ebenso Beschreibung und
+Kernelmeldungen ("MVB ESD controller of board /dev/mvblli0 initialized",
+"Cannot open device /dev/mvblli0, already in use"). Damit greift dasselbe
+`grep` bei beiden Modulsätzen.
+
+Den Neustart über `getty@tty1` ersetzt ein Start mit den Nachbauten schon
+beim Booten (`install`-Zeilen in `/etc/modprobe.d`, Rückweg: Datei
+löschen, Reboot). Dann läuft die Anwendung genauso an wie im
+Produktivbetrieb, ohne alten Prozess, der das Gerät noch hält.
+
 ## Stand
 
 | Phase | Stand |
 |---|---|
 | 1 | erledigt, am Gerät bestätigt |
-| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); Gegenversuch ohne Anwendung: beide 0; offen: `--ping` unter allen drei Kombinationen |
+| 2 | 2.1, 2.2, Ringbelegung, Schließen am Gerät bestätigt; 2.3 Message-Daten und Interruptbetrieb gegengelesen und behoben. Interrupts im Produktivzustand gemessen (irq=7, ~1/s); Gegenversuch ohne Anwendung: beide 0; offen: `--ping` unter allen drei Kombinationen; Anwendung auf den Nachbauten (Läufe O/N ohne Aussage, nächster Versuch per Boot) |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
 | 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush |
 | 5 | offen |

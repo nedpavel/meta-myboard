@@ -40,7 +40,15 @@
 #include "mvbc-regs.h"
 
 #define DRV_NAME		"pixy-mvblli"
-#define DRV_VERSION_STR		"pixy-mvblli v3.0.0 - MVB Link Layer Interface"
+#define DRV_VERSION		"1.0.3"
+#define DRV_VERSION_STR		"pixy-mvblli v" DRV_VERSION \
+	" - Pixy-1000 MVB link layer interface Driver"
+/*
+ * Kennung im Statusblock (READ_STATUS), wie das Original sie bildet:
+ * "%s-V%s-%s" aus Modulname, Version und dem eingebauten Datumsfeld.
+ * Die Anwendung bekommt dieselbe Zeichenkette zu sehen wie beim Original.
+ */
+#define DRV_SW_VERSION		"pixy-mvblli-V" DRV_VERSION "-03.12.24"
 
 #define MVBLLI_MAX_DEV		3
 #define MVBLLI_MINOR_COUNT	0x2fd
@@ -1374,7 +1382,7 @@ static int mvb_init_board(struct mvblli_dev *d)
 	memset(&d->status, 0, sizeof(d->status));
 	scnprintf(d->status.hw_version, sizeof(d->status.hw_version),
 		  "MVBC02D %s", d->media_type ? "EMD" : "ESD");
-	strscpy(d->status.sw_version, DRV_VERSION_STR,
+	strscpy(d->status.sw_version, DRV_SW_VERSION,
 		sizeof(d->status.sw_version));
 
 	ret = mvb_config(d);
@@ -1443,8 +1451,8 @@ static int mvb_init_board(struct mvblli_dev *d)
 		mvb_int_connect(d, MVB_INT_RQE);
 	}
 
-	pr_info(DRV_NAME ": controller %d initialized (%s)\n",
-		d->brd_id, d->status.hw_version);
+	pr_info("pixy_mvblli: MVB %s controller of board /dev/mvblli%d initialized\n",
+		d->media_type ? "EMD" : "ESD", d->brd_id);
 
 	return 0;
 
@@ -1493,7 +1501,8 @@ static void mvb_deinit_board(struct mvblli_dev *d)
 
 	memset(&d->status, 0, sizeof(d->status));
 
-	pr_info(DRV_NAME ": controller %d deinitialized\n", d->brd_id);
+	pr_info("pixy_mvblli: MVB %s controller of /dev/mvblli%d deinitialized\n",
+		d->media_type ? "EMD" : "ESD", d->brd_id);
 }
 
 /* ------------------------------------------------- Portkonfiguration */
@@ -1881,7 +1890,8 @@ static int pixy_mvblli_open(struct inode *inode, struct file *filp)
 
 	/* exklusiver Zugriff - ein zweites open() bekommt EBUSY */
 	if (test_and_set_bit(MVBLLI_FLAG_BUSY, &d->dev_flags)) {
-		pr_info(DRV_NAME ": mvblli%d already in use\n", d->brd_id);
+		pr_err("pixy_mvblli: Cannot open device /dev/mvblli%d, already in use\n",
+		       d->brd_id);
 		return -EBUSY;
 	}
 
@@ -2656,5 +2666,5 @@ module_init(pixy_mvblli_init);
 module_exit(pixy_mvblli_exit);
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("MVB Link Layer Interface for the Pixy-1000 board");
-MODULE_VERSION("3.0.0");
+MODULE_DESCRIPTION("Pixy-1000 MVB link layer interface Driver");
+MODULE_VERSION(DRV_VERSION);
