@@ -1,0 +1,19 @@
+[Unit]
+Description=MyBoard Datenstrom-Empfaenger (TCP)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/streamd 9000
+Restart=always
+RestartSec=2
+
+# latest.txt liegt im RAM: bei 100 Werten/s waeren das sonst 100
+# Flash-Zugriffe pro Sekunde auf die CFast.
+RuntimeDirectory=myboard-stream
+RuntimeDirectoryMode=0755
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -7,8 +7,21 @@
 const DATA_DIR = '/var/www/localhost/data';
 const ZEILEN   = 40;          /* so viele Verlaufszeilen anzeigen */
 
-$letztePfad = DATA_DIR . '/latest.txt';
+/* Zwei moegliche Quellen fuer den aktuellen Wert:
+   - streamd (TCP, Port 9000) schreibt ins tmpfs, weil es bis zu
+     100 Werte/s sind und die CFast das nicht jedes Mal sehen soll
+   - upload.php (HTTP-POST) schreibt direkt ins Datenverzeichnis
+   Es gilt die jeweils neuere Datei. */
+$streamPfad = '/run/myboard-stream/latest.txt';
+$postPfad   = DATA_DIR . '/latest.txt';
 $logPfad    = DATA_DIR . '/stream.log';
+
+$letztePfad = $postPfad;
+if (is_file($streamPfad)) {
+    if (!is_file($postPfad) || filemtime($streamPfad) >= filemtime($postPfad)) {
+        $letztePfad = $streamPfad;
+    }
+}
 
 $letzte = is_file($letztePfad) ? trim(file_get_contents($letztePfad)) : '';
 $verlauf = [];
