@@ -362,6 +362,29 @@ Bootmenü kommt man nicht heran. Der Test läuft deshalb zur Laufzeit. Nach
 dem Modulwechsel kommen die Regeln wieder zurück, dann folgt
 `udevadm trigger --action=add` für beide Subsysteme.
 
+### Boot mit beiden Nachbauten: Anwendung läuft
+
+`install`-Zeilen in `/etc/modprobe.d/zz-mvb-nachbau.conf`, Module unter
+`/usr/local/lib/mvb-nachbau/`. Nach dem Reboot geladen: `9DD4743F…`
+(pixy-mvb) und `19962DCA…` (pixy-mvblli). Keine Kernel-Panik.
+
+* udev legt `/dev/mvb` und `/dev/mvblli` an, `target` und `extApp`
+  halten `/dev/mvblli0`. Das `open()` kam bei 15,9 s, gleich beim ersten
+  Versuch.
+* Registerstand gleich dem Produktivstand mit Originalen: `SCR 87C7`,
+  `MCR 2803`, `DR 150D`, `IMR0 0003`, `IMR1 0880`, `TCR 0022`, `BCR 2677`.
+* Prozessdaten fließen: Quelle 491 zählt in 10 s von `0x7C` auf `0x86`
+  hoch, die Senken 181 und 471 ändern sich, und ihre tacks sind frisch.
+* 208 Interrupts, alle vom Nachbau bearbeitet:
+  `dti1 72 + dti2 121 + fev 15 = 208`, `other 0`. Danach kommen keine
+  mehr (208 → 208 in 10 s), wie beim Original nach dem Anlauf.
+
+Offen: In der zweiten Aufnahme stehen `IPR0 0302` und `IPR1 0080`. DTI2
+und FEV stehen an und sind freigegeben, trotzdem steigt der Zähler nicht.
+Das ist entweder ein Zufall beim Abtasten oder eine hängende
+Interruptleitung. Zu klären mit Folgeaufnahmen und mit den
+`irqstate`-Dateien, die früher mit den Originalen aufgenommen wurden.
+
 ## Stand
 
 | Phase | Stand |
