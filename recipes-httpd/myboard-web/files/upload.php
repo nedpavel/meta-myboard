@@ -2,14 +2,27 @@
 /*
  * upload.php — nimmt den Datenstrom des sendenden Geraets per HTTP entgegen.
  *
- * Aufruf vom anderen Geraet, z.B.:
- *     curl -X POST --data-binary @- http://<board>/upload.php
- *     (oder dauerhaft offen gehalten, Zeile fuer Zeile)
+ * EMPFOHLENE VERWENDUNG — ein POST je Wert, periodisch wiederholt:
  *
- * nginx reicht den Request dank "fastcgi_request_buffering off" laufend
- * durch, dieses Skript liest ihn also Stueck fuer Stueck — es wartet
- * nicht, bis der Sender fertig ist. Das ist der Unterschied zwischen
- * Datei-Upload und Datenstrom.
+ *     while true; do
+ *         curl -s -X POST --data-binary "Wert $(date +%S)" \
+ *              http://<board>/upload.php
+ *         sleep 1
+ *     done
+ *
+ * Eine DAUERHAFT OFFENE Verbindung funktioniert hier NICHT, auch wenn
+ * nginx mit "fastcgi_request_buffering off" nicht puffert (per nginx -T
+ * geprueft). Der Puffer sitzt in PHP-FPM: FPM uebergibt einen Request
+ * erst dann an das Skript, wenn er vollstaendig vorliegt. Fuer stehende
+ * Stroeme ist PHP-FPM bauartbedingt nicht gemacht; braeuchte man das,
+ * waere ein eigener Dienst auf einem eigenen Port der richtige Weg.
+ *
+ * Die periodische Variante ist ohnehin robuster: Sie belegt keinen
+ * FPM-Arbeitsprozess dauerhaft, und ein Verbindungsabbruch kostet
+ * hoechstens einen Wert statt den ganzen Strom.
+ *
+ * Das Skript liest den Request dennoch stueckweise — so kostet ein
+ * groesserer Block keinen zusaetzlichen Speicher.
  *
  * Die Daten landen in zwei Dateien:
  *     data/latest.txt  — zuletzt empfangene Zeile (fuer die Anzeige)
