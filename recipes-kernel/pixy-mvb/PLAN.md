@@ -335,10 +335,32 @@ Kernelmeldungen ("MVB ESD controller of board /dev/mvblli0 initialized",
 "Cannot open device /dev/mvblli0, already in use"). Damit greift dasselbe
 `grep` bei beiden Modulsätzen.
 
-Den Neustart über `getty@tty1` ersetzt ein Start mit den Nachbauten schon
-beim Booten (`install`-Zeilen in `/etc/modprobe.d`, Rückweg: Datei
-löschen, Reboot). Dann läuft die Anwendung genauso an wie im
-Produktivbetrieb, ohne alten Prozess, der das Gerät noch hält.
+**Wahrscheinliche Ursache für Lauf N: die udev-Regeln.** Die echten
+Regeln (unter dem Bind-Mount gelesen) tun beim `add` mehr als nur
+`modprobe`:
+
+```
+40-mvb.rules:   SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB",
+                ENV{ID_BUS}="$attr{pci_id}", SYMLINK+="mvb", MODE="0666"
+                remove: RUN+="/usr/local/bin/pixy-mvb-module.sh $env{ID_BUS}"
+41-mvblli.rules: SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB",
+                RUN+="/usr/bin/modprobe pixy_mvblli"
+                SUBSYSTEM=="pixy-mvblli", SYMLINK+="mvblli", MODE="0666"
+```
+
+Die Symlinks `/dev/mvb` und `/dev/mvblli` legt nur udev an. In Lauf N
+waren beide Regeln beim `insmod` durch die leere Datei ersetzt. Damit
+fehlten die Symlinks, und eine Anwendung, die `/dev/mvblli` öffnet,
+scheitert an ENOENT, bevor der Treiber etwas davon sieht. Das passt zu
+"keine einzige Meldung". `mvbdiff` öffnet `/dev/mvblli0` direkt und war
+deshalb nie betroffen. Der Nachbau liefert Klassennamen (`pixy-mvb`,
+`pixy-mvblli`) und Attribute (`board_type`, `pci_id`) so, dass die
+Regeln greifen.
+
+Ein Start schon beim Booten geht nicht: `/` ist read-only, und an das
+Bootmenü kommt man nicht heran. Der Test läuft deshalb zur Laufzeit. Nach
+dem Modulwechsel kommen die Regeln wieder zurück, dann folgt
+`udevadm trigger --action=add` für beide Subsysteme.
 
 ## Stand
 
