@@ -42,32 +42,49 @@ if ($ein === false) {
     exit;
 }
 
+/* Eine empfangene Zeile ablegen. */
+function zeileSchreiben($zeile, $letztePfad, $logPfad)
+{
+    $zeile = trim($zeile);
+    if ($zeile === '') {
+        return 0;
+    }
+    $satz = date('Y-m-d H:i:s') . "\t" . $zeile . "\n";
+    file_put_contents($letztePfad, $satz, LOCK_EX);
+    file_put_contents($logPfad, $satz, FILE_APPEND | LOCK_EX);
+    return 1;
+}
+
 /* Zeilenweise lesen, damit auch eine dauerhaft offene Verbindung
    fortlaufend verarbeitet wird statt erst am Ende. */
 $zeilen = 0;
 $rest   = '';
 while (!feof($ein)) {
     $brocken = fread($ein, 8192);
+
+    /* fread liefert '' sowohl bei "noch nichts da" als auch am Ende des
+       Stroms. Ohne die feof-Pruefung hier wuerde die Schleife endlos
+       weiterdrehen, wenn der Sender die Verbindung schliesst. */
     if ($brocken === false || $brocken === '') {
+        if (feof($ein)) {
+            break;
+        }
         usleep(50000);          /* kurz warten statt heiss zu drehen */
         continue;
     }
     $rest .= $brocken;
 
     while (($pos = strpos($rest, "\n")) !== false) {
-        $zeile = rtrim(substr($rest, 0, $pos), "\r");
-        $rest  = substr($rest, $pos + 1);
-        if ($zeile === '') {
-            continue;
-        }
-        $stempel = date('Y-m-d H:i:s');
-        file_put_contents($letztePfad, $stempel . "\t" . $zeile . "\n", LOCK_EX);
-        file_put_contents($logPfad, $stempel . "\t" . $zeile . "\n",
-                          FILE_APPEND | LOCK_EX);
-        $zeilen++;
+        $zeilen += zeileSchreiben(substr($rest, 0, $pos), $letztePfad, $logPfad);
+        $rest = substr($rest, $pos + 1);
     }
 }
 fclose($ein);
+
+/* Rest ohne abschliessenden Zeilenumbruch nicht verwerfen. Genau das
+   passierte bei einem einzelnen Wert ohne \n — die Antwort lautete dann
+   "OK, 0 Zeile(n) uebernommen", obwohl Daten angekommen waren. */
+$zeilen += zeileSchreiben($rest, $letztePfad, $logPfad);
 
 /* Verlauf kuerzen, damit die Datei nicht unbegrenzt waechst. */
 if (is_file($logPfad)) {
