@@ -15,10 +15,14 @@
  * SCHREIBSTRATEGIE — wichtig bei 100 Werten/s:
  *   latest.txt  liegt im tmpfs (RAM) und wird bei JEDEM Wert aktualisiert.
  *               Die Anzeige liest immer den aktuellen Stand.
- *   stream.log  wird gesammelt und nur alle FLUSH_MS auf die CFast
- *               geschrieben. Bei 100 Werten/s waeren Einzelschreibvorgaenge
- *               sonst 100 Flash-Zugriffe pro Sekunde — das kostet
- *               Lebensdauer und Leistung.
+ *   werte.db    SQLite auf der CFast. Werte werden gesammelt und nur alle
+ *               FLUSH_MS in EINER Transaktion geschrieben. Einzeln waeren
+ *               es 100 Flash-Zugriffe pro Sekunde — das kostet Lebensdauer
+ *               und Leistung. Gebuendelt ist es einer pro Sekunde.
+ *
+ * Datenbank abfragen:
+ *     sqlite3 /var/www/localhost/data/werte.db \
+ *         "SELECT zeit, wert FROM werte ORDER BY id DESC LIMIT 20;"
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -34,6 +38,7 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sqlite3.h>
 
 /* NICHT 9000 verwenden — darauf lauscht php-fpm (siehe php-fpm.conf:
    listen = 127.0.0.1:9000). streamd startete zuerst, belegte den Port und
@@ -42,6 +47,7 @@
 #define MAX_CLIENTS    8
 #define LINE_MAX_LEN   1024
 #define RX_BUF         8192
+#define STEMPEL_LEN    40
 
 /* Pfade per -D ueberschreibbar, damit sich der Dienst ohne Systemrechte
    testen laesst. */
@@ -49,13 +55,13 @@
 /* latest.txt im RAM (tmpfs): wird 100x/s geschrieben */
 #define PATH_LATEST    "/run/myboard-stream/latest.txt"
 #endif
-#ifndef PATH_LOG
+#ifndef PATH_DB
 /* Verlauf auf der CFast: gesammelt, siehe FLUSH_MS */
-#define PATH_LOG       "/var/www/localhost/data/stream.log"
+#define PATH_DB        "/var/www/localhost/data/werte.db"
 #endif
-#define FLUSH_MS       1000       /* Verlauf hoechstens 1x/s schreiben   */
-#define LOG_MAX_LINES  5000       /* Verlauf begrenzen                   */
-#define PENDING_MAX    (256 * 1024)
+#define FLUSH_MS       1000       /* hoechstens 1 Transaktion pro Sekunde */
+#define DB_MAX_ZEILEN  100000     /* Verlauf begrenzen (Ringpuffer)       */
+#define PENDING_MAX    2000       /* gesammelte Werte je Transaktion      */
 
 static volatile sig_atomic_t laeuft = 1;
 static void beenden(int sig) { (void)sig; laeuft = 0; }
@@ -100,40 +106,75 @@ static void latest_schreiben(const char *stempel, const char *zeile)
     rename(tmp, PATH_LATEST);
 }
 
-/* Verlauf kuerzen, damit die Datei nicht unbegrenzt waechst. */
-static void log_kuerzen(void)
+/* --- SQLite ---------------------------------------------------------- */
+
+static sqlite3      *db;
+static sqlite3_stmt *stmt_einfuegen;
+
+static int db_oeffnen(void)
 {
-    FILE *f = fopen(PATH_LOG, "r");
-    if (!f)
-        return;
-    long zeilen = 0;
-    int c;
-    while ((c = fgetc(f)) != EOF)
-        if (c == '\n')
-            zeilen++;
-    if (zeilen <= LOG_MAX_LINES) {
-        fclose(f);
-        return;
+    if (sqlite3_open(PATH_DB, &db) != SQLITE_OK) {
+        fprintf(stderr, "streamd: %s: %s\n", PATH_DB, sqlite3_errmsg(db));
+        return -1;
     }
 
-    rewind(f);
-    long ueberspringen = zeilen - LOG_MAX_LINES;
-    while (ueberspringen > 0 && (c = fgetc(f)) != EOF)
-        if (c == '\n')
-            ueberspringen--;
-
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "%s.neu", PATH_LOG);
-    FILE *n = fopen(tmp, "w");
-    if (n) {
-        char puffer[4096];
-        size_t gelesen;
-        while ((gelesen = fread(puffer, 1, sizeof(puffer), f)) > 0)
-            fwrite(puffer, 1, gelesen, n);
-        fclose(n);
-        rename(tmp, PATH_LOG);
+    /* WAL schont die Karte zusaetzlich: Schreibvorgaenge gehen zuerst in
+       ein fortlaufendes Journal, statt die Datenbankdatei umzuschreiben.
+       synchronous=NORMAL spart je Transaktion ein fsync — bei Stromausfall
+       koennen die letzten Werte fehlen, die Datenbank bleibt aber heil. */
+    char *fehler = NULL;
+    const char *init =
+        "PRAGMA journal_mode=WAL;"
+        "PRAGMA synchronous=NORMAL;"
+        "CREATE TABLE IF NOT EXISTS werte ("
+        "  id   INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  zeit TEXT NOT NULL,"
+        "  wert TEXT NOT NULL);"
+        "CREATE INDEX IF NOT EXISTS werte_zeit ON werte(zeit);";
+    if (sqlite3_exec(db, init, NULL, NULL, &fehler) != SQLITE_OK) {
+        fprintf(stderr, "streamd: Tabelle anlegen: %s\n", fehler);
+        sqlite3_free(fehler);
+        return -1;
     }
-    fclose(f);
+
+    if (sqlite3_prepare_v2(db, "INSERT INTO werte (zeit, wert) VALUES (?, ?);",
+                           -1, &stmt_einfuegen, NULL) != SQLITE_OK) {
+        fprintf(stderr, "streamd: prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    return 0;
+}
+
+/* Gesammelte Werte in EINER Transaktion schreiben. */
+static void db_schreiben(char zeit[][STEMPEL_LEN],
+                         char wert[][LINE_MAX_LEN], size_t n)
+{
+    if (n == 0 || !db)
+        return;
+
+    sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
+    for (size_t i = 0; i < n; i++) {
+        sqlite3_bind_text(stmt_einfuegen, 1, zeit[i], -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt_einfuegen, 2, wert[i], -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt_einfuegen) != SQLITE_DONE)
+            fprintf(stderr, "streamd: insert: %s\n", sqlite3_errmsg(db));
+        sqlite3_reset(stmt_einfuegen);
+    }
+    sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+}
+
+/* Aelteste Eintraege entfernen, damit die Datenbank nicht unbegrenzt
+   waechst. Bei 100 Werten/s ist DB_MAX_ZEILEN nach gut 16 Minuten
+   erreicht — danach laeuft sie als Ringpuffer. */
+static void db_kuerzen(void)
+{
+    if (!db)
+        return;
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM werte WHERE id <= "
+             "(SELECT MAX(id) - %d FROM werte);", DB_MAX_ZEILEN);
+    sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
 int main(int argc, char **argv)
@@ -143,6 +184,9 @@ int main(int argc, char **argv)
     signal(SIGINT, beenden);
     signal(SIGTERM, beenden);
     signal(SIGPIPE, SIG_IGN);
+
+    if (db_oeffnen() != 0)
+        return 1;
 
     int lauscher = socket(AF_INET, SOCK_STREAM, 0);
     if (lauscher < 0) {
@@ -165,7 +209,8 @@ int main(int argc, char **argv)
         perror("listen");
         return 1;
     }
-    fprintf(stderr, "streamd: lausche auf Port %d\n", port);
+    fprintf(stderr, "streamd: lausche auf Port %d, Datenbank %s\n",
+            port, PATH_DB);
 
     struct pollfd fds[MAX_CLIENTS + 1];
     char rest[MAX_CLIENTS][LINE_MAX_LEN];
@@ -177,13 +222,11 @@ int main(int argc, char **argv)
     for (int i = 1; i <= MAX_CLIENTS; i++)
         fds[i].fd = -1;
 
-    /* Sammelpuffer fuer den Verlauf */
-    char *offen = malloc(PENDING_MAX);
-    size_t offenlen = 0;
-    if (!offen) {
-        perror("malloc");
-        return 1;
-    }
+    /* Sammelpuffer: zwischen zwei Transaktionen gepufferte Werte */
+    static char puf_zeit[PENDING_MAX][STEMPEL_LEN];
+    static char puf_wert[PENDING_MAX][LINE_MAX_LEN];
+    size_t offen = 0;
+
     long long letzter_flush = jetzt_ms();
     unsigned long gesamt = 0;
 
@@ -232,26 +275,32 @@ int main(int argc, char **argv)
                 char z = puffer[k];
                 if (z == '\n') {
                     size_t len = restlen[i - 1];
-                    /* \r von Windows-Sendern entfernen */
+                    /* \r von Windows-Sendern und Leerzeichen entfernen */
                     while (len > 0 && (rest[i - 1][len - 1] == '\r' ||
                                        rest[i - 1][len - 1] == ' '))
                         len--;
                     rest[i - 1][len] = '\0';
 
                     if (len > 0) {
-                        char stempel[40];
+                        char stempel[STEMPEL_LEN];
                         zeitstempel(stempel, sizeof(stempel));
                         latest_schreiben(stempel, rest[i - 1]);
                         gesamt++;
 
-                        /* Verlauf sammeln statt sofort zu schreiben */
-                        int geschrieben = snprintf(offen + offenlen,
-                                                   PENDING_MAX - offenlen,
-                                                   "%s\t%s\n", stempel,
-                                                   rest[i - 1]);
-                        if (geschrieben > 0 &&
-                            (size_t)geschrieben < PENDING_MAX - offenlen)
-                            offenlen += (size_t)geschrieben;
+                        /* fuer die Datenbank sammeln statt sofort schreiben.
+                           memcpy statt snprintf: die Laenge ist bekannt
+                           (len < LINE_MAX_LEN, oben begrenzt), und der
+                           Compiler kann das Abschneiden sonst nicht
+                           ausschliessen. */
+                        if (offen < PENDING_MAX) {
+                            size_t kopie = (len < LINE_MAX_LEN - 1)
+                                           ? len : LINE_MAX_LEN - 1;
+                            memcpy(puf_zeit[offen], stempel, STEMPEL_LEN);
+                            puf_zeit[offen][STEMPEL_LEN - 1] = '\0';
+                            memcpy(puf_wert[offen], rest[i - 1], kopie);
+                            puf_wert[offen][kopie] = '\0';
+                            offen++;
+                        }
                     }
                     restlen[i - 1] = 0;
                 } else if (restlen[i - 1] < LINE_MAX_LEN - 1) {
@@ -261,35 +310,29 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Verlauf gebuendelt wegschreiben */
+        /* gesammelte Werte gebuendelt in die Datenbank */
         long long jetzt = jetzt_ms();
-        if (offenlen > 0 && (jetzt - letzter_flush >= FLUSH_MS ||
-                             offenlen > PENDING_MAX / 2)) {
-            FILE *f = fopen(PATH_LOG, "a");
-            if (f) {
-                fwrite(offen, 1, offenlen, f);
-                fclose(f);
-            }
-            offenlen = 0;
+        if (offen > 0 && (jetzt - letzter_flush >= FLUSH_MS ||
+                          offen >= PENDING_MAX / 2)) {
+            db_schreiben(puf_zeit, puf_wert, offen);
+            offen = 0;
             letzter_flush = jetzt;
 
             static int zaehler = 0;
             if (++zaehler >= 60) {     /* etwa minuetlich kuerzen */
-                log_kuerzen();
+                db_kuerzen();
                 zaehler = 0;
             }
         }
     }
 
     /* beim Beenden den Rest noch sichern */
-    if (offenlen > 0) {
-        FILE *f = fopen(PATH_LOG, "a");
-        if (f) {
-            fwrite(offen, 1, offenlen, f);
-            fclose(f);
-        }
-    }
-    free(offen);
+    db_schreiben(puf_zeit, puf_wert, offen);
+
+    if (stmt_einfuegen)
+        sqlite3_finalize(stmt_einfuegen);
+    if (db)
+        sqlite3_close(db);
     for (int i = 1; i <= MAX_CLIENTS; i++)
         if (fds[i].fd >= 0)
             close(fds[i].fd);

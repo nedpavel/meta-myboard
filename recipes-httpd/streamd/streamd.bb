@@ -3,6 +3,8 @@ DESCRIPTION = "Nimmt einen dauerhaft offenen Datenstrom per TCP (Port 9100) \
 zeilenweise entgegen und legt ihn fuer die Anzeige ab. Ergaenzt upload.php: \
 ueber PHP-FPM laesst sich eine stehende Verbindung nicht verarbeiten, weil \
 FPM einen Request erst vollstaendig entgegennimmt."
+DEPENDS = "sqlite3"
+
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
@@ -22,7 +24,7 @@ RDEPENDS:${PN} += "myboard-web"
 
 do_compile() {
     ${CC} ${CFLAGS} ${LDFLAGS} -O2 -Wall -Wextra \
-        ${UNPACKDIR}/streamd.c -o ${B}/streamd
+        ${UNPACKDIR}/streamd.c -o ${B}/streamd -lsqlite3
 }
 
 do_install() {
