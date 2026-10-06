@@ -105,6 +105,33 @@ module_param(dbg_rqe, int, 0444);
 module_param(dbg_other, int, 0444);
 module_param(dbg_last_other, int, 0444);
 
+/*
+ * Quittung bis zum leeren Durchgang (Abweichung vom Original, abschaltbar).
+ *
+ * Beide Interruptausgaenge des MVBC liegen ueber BCR 0x77 auf derselben
+ * ISA-Leitung 7, und die Karte macht daraus einen flankengesteuerten
+ * MSI. Das Original leert IVR1, dann IVR0, und kehrt zurueck. Meldet
+ * IVR1 eine neue Quelle, waehrend IVR0 noch geleert wird, faellt die
+ * gemeinsame Leitung nie ab: Es gibt keine neue Flanke und damit keinen
+ * Interrupt mehr. Gemessen mit Original und Nachbau: IPR0/IPR1 stehen mit
+ * freigegebenen Bits an (DTI1, DTI2, FEV), /proc/interrupts steht still,
+ * und der Message-Empfang (DTI1) ist tot.
+ *
+ * Mit irq_rearm=1 wird so lange wiederholt, bis ein ganzer Durchgang
+ * ueber beide Register nichts mehr findet. Erst dann sind beide
+ * Ausgaenge unten, und das naechste Ereignis erzeugt wieder eine
+ * Flanke. irq_rearm=0 verhaelt sich wie das Original.
+ */
+static int irq_rearm = 1;
+module_param(irq_rearm, int, 0644);
+MODULE_PARM_DESC(irq_rearm,
+	"IVR1/IVR0 wiederholt leeren, bis beide leer sind (1, Vorgabe) oder wie das Original einmal (0)");
+
+static int dbg_rearm;		/* Durchgaenge, die noch etwas fanden */
+module_param(dbg_rearm, int, 0444);
+
+#define MVB_IRQ_MAX_PASSES	8
+
 struct mvblli_dev {
 	int brd_id;
 	int enable;
@@ -1125,13 +1152,12 @@ static void mvb_run_int_handler(struct mvblli_dev *d, unsigned int nr)
  *
  * Die Schranke von 20 Durchlaeufen ist aus dem Original uebernommen.
  */
-static void mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
+static int mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
 {
 	u16 ivr = sa_r16(d, ivr_reg);
+	int guard = 0;
 
 	if (ivr & 0x100) {
-		int guard = 0;
-
 		do {
 			mvb_run_int_handler(d, base + (ivr & 0xff));
 			ivr = sa_r16(d, ivr_reg);
@@ -1140,20 +1166,32 @@ static void mvb_drain_ivr(struct mvblli_dev *d, u32 ivr_reg, unsigned int base)
 	}
 
 	sa_w16(d, ivr_reg, 0);
+
+	return guard;
 }
 
 static void mvblli_irq_server(void *arg)
 {
 	struct mvblli_dev *d = arg;
+	int pass, found;
 
 	dbg_irq++;
 
 	if (!d->enable || !d->status.is_init)
 		return;
 
-	/* Reihenfolge wie im Original: erst IVR1, dann IVR0 */
-	mvb_drain_ivr(d, MVBC_IVR1, 16);
-	mvb_drain_ivr(d, MVBC_IVR0, 0);
+	/*
+	 * Reihenfolge wie im Original: erst IVR1, dann IVR0. Mit irq_rearm
+	 * weiter, bis ein Durchgang ueber beide Register nichts mehr findet.
+	 */
+	for (pass = 0; pass < MVB_IRQ_MAX_PASSES; pass++) {
+		found = mvb_drain_ivr(d, MVBC_IVR1, 16);
+		found += mvb_drain_ivr(d, MVBC_IVR0, 0);
+		if (!found || !irq_rearm)
+			return;
+		if (pass)
+			dbg_rearm++;
+	}
 }
 
 /* -------------------------------------------- Anbindung an pixy-mvb */

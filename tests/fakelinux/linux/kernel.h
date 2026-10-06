@@ -62,14 +62,23 @@ extern u8 fake_tm[FAKE_TM_SIZE];
 #define fake_tm_size FAKE_TM_SIZE
 extern unsigned long fake_io_writes;
 
+/*
+ * Optionaler Lesehaken: liefert fuer Register mit Seiteneffekt beim
+ * Lesen (IVR) eine vorgegebene Folge statt des Speicherinhalts.
+ */
+extern int (*fake_ioread_hook)(unsigned long off, u16 *val);
+
 static inline u16 ioread16(const void *p)
 {
 	unsigned long off = (const u8 *)p - fake_tm;
+	u16 v;
 
 	if (off + 2 > fake_tm_size) {
 		fprintf(stderr, "!! ioread16 ausserhalb: 0x%lx\n", off);
 		abort();
 	}
+	if (fake_ioread_hook && fake_ioread_hook(off, &v))
+		return v;
 	return (u16)(fake_tm[off] | (fake_tm[off + 1] << 8));
 }
 

@@ -17,6 +17,7 @@
 u8 fake_tm[FAKE_TM_SIZE];
 struct fake_task fake_current = { (void *)1, (void *)1 };
 unsigned long fake_io_writes;
+int (*fake_ioread_hook)(unsigned long off, u16 *val);
 
 #include "../recipes-kernel/pixy-mvblli/files/pixy-mvblli.c"
 
@@ -1227,6 +1228,102 @@ static void test_flush_and_irq_mode(void)
 	}
 }
 
+/* ---------------------------------------------------------- Test 16 */
+/*
+ * Quittung bis zum leeren Durchgang. Nachgestellt wird das Rennen, das
+ * am Geraet den Interrupt stillgelegt hat: Waehrend IVR0 geleert wird,
+ * meldet IVR1 eine neue Quelle (FEV). Das Original kehrt dann mit
+ * gesetzter Leitung zurueck; mit irq_rearm muss der zweite Durchgang
+ * die Quelle abholen und ein dritter beide Register leer sehen.
+ */
+static u16 seq_ivr1[8], seq_ivr0[8];
+static int seq_n1, seq_n0, pos_ivr1, pos_ivr0;
+static unsigned long off_ivr1, off_ivr0;
+
+static int ivr_script(unsigned long off, u16 *val)
+{
+	if (off == off_ivr1) {
+		*val = pos_ivr1 < seq_n1 ? seq_ivr1[pos_ivr1] : 0;
+		pos_ivr1++;
+		return 1;
+	}
+	if (off == off_ivr0) {
+		*val = pos_ivr0 < seq_n0 ? seq_ivr0[pos_ivr0] : 0;
+		pos_ivr0++;
+		return 1;
+	}
+	return 0;
+}
+
+static void run_race(int rearm, int *fev, int *dti2, int *rearms)
+{
+	int fev0 = dbg_fev, dti20 = dbg_dti2, re0 = dbg_rearm;
+	int saved = irq_rearm;
+
+	/* IVR1: FEV, leer | (waehrend IVR0) FEV, leer | leer */
+	seq_ivr1[0] = 0x100 | (MVB_INT_FEV - 16);
+	seq_ivr1[1] = 0;
+	seq_ivr1[2] = 0x100 | (MVB_INT_FEV - 16);
+	seq_ivr1[3] = 0;
+	seq_n1 = 4;
+	/* IVR0: DTI2, leer | leer | leer */
+	seq_ivr0[0] = 0x100 | MVB_INT_DTI2;
+	seq_ivr0[1] = 0;
+	seq_n0 = 2;
+	pos_ivr1 = pos_ivr0 = 0;
+
+	irq_rearm = rearm;
+	fake_ioread_hook = ivr_script;
+	mvblli_irq_server(&dev);
+	fake_ioread_hook = NULL;
+	irq_rearm = saved;
+
+	*fev = dbg_fev - fev0;
+	*dti2 = dbg_dti2 - dti20;
+	*rearms = dbg_rearm - re0;
+}
+
+static void test_irq_rearm(void)
+{
+	int fev, dti2, rearms;
+	int enable = dev.enable, init = dev.status.is_init;
+
+	printf("\n--- Test 16: Interruptquittung bis zum leeren Durchgang ---\n");
+
+	off_ivr1 = (unsigned long)((u8 *)dev.p_sa - fake_tm) + MVBC_IVR1;
+	off_ivr0 = (unsigned long)((u8 *)dev.p_sa - fake_tm) + MVBC_IVR0;
+	dev.enable = 1;
+	dev.status.is_init = 1;
+
+	run_race(0, &fev, &dti2, &rearms);
+	check(fev == 1 && dti2 == 1, "irq_rearm=0: FEV %d, DTI2 %d", fev, dti2);
+	check(pos_ivr1 == 2, "irq_rearm=0: IVR1 %d mal gelesen statt 2", pos_ivr1);
+	printf("  irq_rearm=0 (Original): FEV %d, DTI2 %d - zweite FEV bleibt "
+	       "liegen\n", fev, dti2);
+
+	run_race(1, &fev, &dti2, &rearms);
+	check(fev == 2 && dti2 == 1, "irq_rearm=1: FEV %d, DTI2 %d", fev, dti2);
+	check(rearms == 1, "irq_rearm=1: %d Nachdurchgaenge statt 1", rearms);
+	check(pos_ivr1 == 5 && pos_ivr0 == 4,
+	      "irq_rearm=1: IVR1 %d, IVR0 %d mal gelesen", pos_ivr1, pos_ivr0);
+	check(sa_r16(&dev, MVBC_IVR0) == 0 && sa_r16(&dev, MVBC_IVR1) == 0,
+	      "IVR nach dem Leeren nicht genullt");
+	printf("  irq_rearm=1: FEV %d, DTI2 %d, %d Nachdurchgang, letzter "
+	       "Durchgang leer\n", fev, dti2, rearms);
+
+	/* Ruhiger Fall: nichts gemeldet, genau ein Durchgang */
+	seq_n1 = seq_n0 = 0;
+	pos_ivr1 = pos_ivr0 = 0;
+	fake_ioread_hook = ivr_script;
+	mvblli_irq_server(&dev);
+	fake_ioread_hook = NULL;
+	check(pos_ivr1 == 1 && pos_ivr0 == 1,
+	      "leerer Interrupt: IVR1 %d, IVR0 %d mal gelesen", pos_ivr1, pos_ivr0);
+
+	dev.enable = enable;
+	dev.status.is_init = init;
+}
+
 int main(int argc, char **argv)
 {
 	const char *dir = (argc > 1) ? argv[1] : "mvbsnap";
@@ -1256,6 +1353,7 @@ int main(int argc, char **argv)
 	test_ioctl_abi();
 	test_ring_layout();
 	test_flush_and_irq_mode();
+	test_irq_rearm();
 	test_deinit();
 
 	printf("\n=== %d Pruefungen, %d Fehler ===\n", checks, fails);

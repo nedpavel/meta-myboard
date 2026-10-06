@@ -379,11 +379,38 @@ dem Modulwechsel kommen die Regeln wieder zurück, dann folgt
   `dti1 72 + dti2 121 + fev 15 = 208`, `other 0`. Danach kommen keine
   mehr (208 → 208 in 10 s), wie beim Original nach dem Anlauf.
 
-Offen: In der zweiten Aufnahme stehen `IPR0 0302` und `IPR1 0080`. DTI2
-und FEV stehen an und sind freigegeben, trotzdem steigt der Zähler nicht.
-Das ist entweder ein Zufall beim Abtasten oder eine hängende
-Interruptleitung. Zu klären mit Folgeaufnahmen und mit den
-`irqstate`-Dateien, die früher mit den Originalen aufgenommen wurden.
+### Interrupt bleibt hängen, beim Original genauso
+
+Beobachtung an der Anzeige: Beim ersten Aufruf des DDS-Untermenüs kommen
+die MVB-Messages an. Beim zweiten Aufruf erscheint nur noch ihre Anzahl.
+
+Folgeaufnahmen mit dem Nachbau: `IPR0 4303`, `IPR1 0680`, der Zähler
+bleibt dauerhaft bei 208. DTI1 (Message empfangen), DTI2 und FEV stehen
+an und sind freigegeben, aber es kommt kein Interrupt mehr. Bei `irq=7`
+holt nur DTI1 Messages ab, also ist der Empfang tot.
+
+**Das Original zeigt denselben Zustand.** In `zustand-laeuft.txt`
+(Originale, Produktivbetrieb) stehen `IPR0 0302` und `IPR1 0080`, der
+Zähler bei 331. In einem anderen Lauf mit Originalen
+(`zustand-orig-neustart.txt`) liefen die Interrupts weiter, bis 7464 bei
+`IPR 0000`. Der Stillstand tritt also nicht immer ein.
+
+Erklärung: Über `BCR 0x77` liegen beide Interruptausgänge des MVBC auf
+derselben ISA-Leitung 7, und die Karte macht daraus einen MSI, der auf
+eine Flanke reagiert. Board-Treiber und LLI quittieren wie das Original:
+IVR1 leeren, dann IVR0, Ende. Kommt eine IVR1-Quelle hinzu, während IVR0
+geleert wird, fällt die gemeinsame Leitung nie mehr ab. Ohne neue Flanke
+gibt es keinen Interrupt, und es gibt niemanden, der IVR noch einmal
+liest. Der Board-Treiber des Originals quittiert auf der Karte nichts
+(Disassembly `irq_handler`, `pixy-mvb.c:1229`), daran liegt es also
+nicht.
+
+Abhilfe (Abweichung vom Original, Parameter `irq_rearm`, Vorgabe 1, zur
+Laufzeit änderbar): IVR1 und IVR0 so lange wiederholt leeren, bis ein
+ganzer Durchgang über beide nichts mehr findet. Höchstens 8 Durchgänge.
+`dbg_rearm` zählt die Durchgänge, die noch etwas fanden. Liegt er über 0,
+ist das Rennen am Gerät nachgewiesen. Mit `irq_rearm=0` verhält sich der
+Nachbau wie das Original. Test 16 in `tm_replay` stellt das Rennen nach.
 
 ## Stand
 
