@@ -1,0 +1,16 @@
+################################################################################
+# Pixy MVB Extension Board Kernel Module.
+#
+# Legt /dev/mvb als Symlink auf das erkannte MVB-Board und macht das
+# Geraet fuer alle lesbar und schreibbar. Ohne diese Regel gibt es
+# /dev/mvb nicht, nur /dev/mvb0 - Programme, die den Symlink oeffnen,
+# scheitern dann mit ENOENT, bevor der Treiber etwas davon sieht.
+#
+# Die remove-Regel des Herstellers ist hier bewusst NICHT uebernommen.
+# Sie ruft /usr/local/bin/pixy-mvb-module.sh auf, das die PCI-Funktion
+# entfernt und den Bus zuruecksetzt; damit kostet jedes rmmod einen
+# Neustart.
+################################################################################
+ACTION=="add", SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB", ENV{ID_BUS}="$attr{pci_id}", SYMLINK+="mvb", MODE="0666"
+ACTION=="add", SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="PC104", ENV{ID_BUS}="$attr{pci_id}", MODE="0666"
+################################################################################

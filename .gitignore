@@ -13,3 +13,24 @@ __pycache__/
 *.o
 *.rej
 *.orig
+
+# Kernelmodul-Bauartefakte
+*.ko
+*.ko.xz
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+tests/tm_replay
+tests/tm_replay-6x
+# Der Speicherabzug fuer tests/tm_replay gehoert ins Repo: er zeigt den
+# Herstellerstand mit 74 Ports, der nach dem ersten eigenen open() auf
+# /dev/mvblli0 unwiederbringlich weg ist. Ohne ihn laeuft "make check"
+# aus einem frischen Checkout nicht. Die Textdateien daneben sind nur
+# Zwischenstaende.
+tests/mvbsnap/*.txt
+tests/mvbsnap/*.h
+!tests/mvbsnap/ports.txt

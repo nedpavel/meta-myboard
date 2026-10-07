@@ -1,0 +1,11 @@
+################################################################################
+# Pixy MVB Link Layer Kernel Module.
+#
+# pixy-mvblli oeffnet /dev/mvb0 schon im module_init. Ist pixy-mvb noch
+# nicht geladen, scheitert das Laden mit "not available". Deshalb wird
+# das Modul nicht per modules-load.d gestartet, sondern hier - diese
+# Regel feuert erst, wenn der Board-Treiber sein Geraet angelegt hat.
+################################################################################
+ACTION=="add", SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB", RUN+="/usr/bin/modprobe pixy_mvblli"
+ACTION=="add", SUBSYSTEM=="pixy-mvblli", SYMLINK+="mvblli", MODE="0666"
+################################################################################
