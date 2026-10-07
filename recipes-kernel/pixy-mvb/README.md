@@ -102,7 +102,8 @@ Der Layer bringt vier Rezepte mit:
 | `pixy-mvb-tools_1.0.bb` | die vier Python-Werkzeuge nach `${bindir}` |
 | `pixy-mvb-tmreplay_1.0.bb` | `tm_replay` und `tm_replay-6x` samt Speicherabzug |
 
-Ins Image kommen sie über die Packagegroup:
+Ins Image kommen sie über die Packagegroup, eingehängt in
+`recipes-extended/images/myboard-image.bb`:
 
 ```
 IMAGE_INSTALL:append = " packagegroup-pixy-mvb"
@@ -110,7 +111,8 @@ IMAGE_INSTALL:append = " packagegroup-pixy-mvb"
 
 Das zieht beide Module und die Werkzeuge. `packagegroup-pixy-mvb-tests`
 nimmt zusätzlich `tm_replay` mit — eine Logikprüfung ohne Hardware, im
-Image bequem, aber nicht nötig.
+Image bequem, aber nicht nötig; die Zeile steht dort auskommentiert
+daneben.
 
 **Ladereihenfolge.** `pixy-mvb` wird über `KERNEL_MODULE_AUTOLOAD`
 geladen, `pixy-mvblli` **nicht**: Es öffnet `/dev/mvb0` schon im

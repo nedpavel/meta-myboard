@@ -41,12 +41,17 @@ IMAGE_INSTALL:append = " \
 IMAGE_INSTALL:append = " udev-rules-myboard"
 # Preset-Regel, die getty@tty1 deaktiviert (tty1 gehoert der Oberflaeche)
 IMAGE_INSTALL:append = " getty-disable"
-# MVB vorerst deaktiviert (Zielgeraet Pixy 1000 ohne MVB-Nutzung).
-# Die Rezepte bleiben im Layer erhalten — zum Reaktivieren genuegt es,
-# die folgende Zeile wieder einzukommentieren. Achtung: der Treiber
-# pixymvbip ist auf die LPC/ISA-Anbindung des INC-100 ausgelegt; das
-# Pixy 1000 bindet MVB ueber den PCIe-Interface-Converter an.
-# IMAGE_INSTALL:append = " pixymvbip libmvb"
+# MVB: die beiden nachgebauten Kernelmodule fuer die PCIe-Karte
+# (1204:EC30) und die Diagnosewerkzeuge. Ohne Anwendung und ohne
+# Bibliothek des Herstellers — gedacht fuer ein Image, mit dem am Bus
+# gemessen wird.
+#
+# Die alten Rezepte pixymvbip und libmvb sind entfallen: sie bedienen die
+# LPC/ISA-Anbindung des INC-100, das Pixy 1000 bindet MVB ueber PCIe an.
+# Wer sie braucht, findet sie in der Historie des Branches pixy1000.
+IMAGE_INSTALL:append = " packagegroup-pixy-mvb"
+# Dazu tm_replay, eine Logikpruefung des Treibers ohne Hardware:
+# IMAGE_INSTALL:append = " packagegroup-pixy-mvb-tests"
 IMAGE_INSTALL:append = " nfs-utils"
 IMAGE_INSTALL:append = " nfs-devmount"
 IMAGE_INSTALL:append = " timesync-myboard"
