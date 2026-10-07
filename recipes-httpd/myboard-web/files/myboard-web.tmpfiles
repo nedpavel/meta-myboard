@@ -8,3 +8,4 @@ d /var/www/localhost/data 0775 nobody www-data -
 # einen Dateikonflikt.
 L+ /var/www/localhost/html/index.php  - - - - /usr/share/myboard-web/index.php
 L+ /var/www/localhost/html/upload.php - - - - /usr/share/myboard-web/upload.php
+L+ /var/www/localhost/html/daten.php  - - - - /usr/share/myboard-web/daten.php

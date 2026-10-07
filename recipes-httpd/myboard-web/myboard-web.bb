@@ -9,6 +9,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 SRC_URI = " \
     file://index.php \
     file://upload.php \
+    file://daten.php \
     file://myboard-web.tmpfiles \
 "
 S = "${UNPACKDIR}"
@@ -33,6 +34,7 @@ do_install() {
     install -d ${D}${PAGEDIR}
     install -m 0644 ${UNPACKDIR}/index.php  ${D}${PAGEDIR}/
     install -m 0644 ${UNPACKDIR}/upload.php ${D}${PAGEDIR}/
+    install -m 0644 ${UNPACKDIR}/daten.php  ${D}${PAGEDIR}/
 
     # Datenverzeichnis und Verlinkung der Seiten zur Laufzeit herstellen.
     install -d ${D}${nonarch_libdir}/tmpfiles.d
