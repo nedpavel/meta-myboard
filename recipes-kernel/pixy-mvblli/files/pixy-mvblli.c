@@ -33,6 +33,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/wait.h>
 
 #include "pixy-mvb.h"
@@ -2495,7 +2496,16 @@ static const struct file_operations mvblli_fops = {
 	.poll		= pixy_mvblli_poll,
 	.unlocked_ioctl	= pixy_mvblli_ioctl,
 	.compat_ioctl	= pixy_mvblli_ioctl,
+	/*
+	 * no_llseek ist in 6.12 entfallen. Ein fehlendes .llseek bedeutet
+	 * dort, dass FMODE_LSEEK nicht gesetzt wird und lseek() mit ESPIPE
+	 * abgewiesen wird - genau das, was no_llseek vorher tat. Auf 5.10
+	 * greift bei NULL dagegen das seekbare default_llseek, die Zeile
+	 * darf dort also nicht einfach fehlen.
+	 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek		= no_llseek,
+#endif
 };
 
 /* ------------------------------------- An-/Abmeldung beim Board-Treiber */
@@ -2666,7 +2676,12 @@ static int __init pixy_mvblli_init(void)
 		return ret;
 	}
 
+	/* class_create nimmt seit 6.4 nur noch den Namen */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	drvdata.cls = class_create(DRV_NAME);
+#else
 	drvdata.cls = class_create(THIS_MODULE, DRV_NAME);
+#endif
 	if (IS_ERR(drvdata.cls)) {
 		ret = PTR_ERR(drvdata.cls);
 		goto err_chrdev;

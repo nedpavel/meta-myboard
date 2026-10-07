@@ -185,7 +185,8 @@ struct file_operations {
 #define cdev_del(c)			do { } while (0)
 #define device_create(c, p, d, x, f, ...) ((struct device *)1)
 #define device_destroy(c, d)		do { } while (0)
-#define class_create(o, n)		((struct class *)1)
+/* Variadisch: 5.10 ruft mit (Modul, Name), ab 6.4 nur mit (Name) */
+#define class_create(...)		((struct class *)1)
 #define class_destroy(c)		do { } while (0)
 #define alloc_chrdev_region(d, f, c, n)	(*(d) = MKDEV(250, 0), 0)
 #define unregister_chrdev_region(d, c)	do { } while (0)

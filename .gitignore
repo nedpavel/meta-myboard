@@ -25,4 +25,5 @@ __pycache__/
 Module.symvers
 modules.order
 tests/tm_replay
+tests/tm_replay-6x
 tests/mvbsnap/

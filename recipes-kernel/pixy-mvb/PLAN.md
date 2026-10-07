@@ -487,10 +487,19 @@ die Suche nach der schädlichen Leseoperation braucht `irqstate.py
 Beide Module sind nachgebaut, am Gerät im Produktivbetrieb bestätigt und
 damit der Stand, der den Lieferanten ersetzt:
 
-| | srcversion | Größe | Stand |
-|---|---|---|---|
-| `pixy-mvb.ko` | `9DD4743F2973EC003DE83D5` | 360 712 B | Board-Treiber |
-| `pixy-mvblli.ko` | `EE452ED1FD9856506534C13` | 612 744 B | LLI, `md5 893e5014…` |
+| | am Gerät geprüft | nach der 6.x-Portierung |
+|---|---|---|
+| `pixy-mvb.ko` | `9DD4743F2973EC003DE83D5` | `F8EFE0579F7070076301524` |
+| `pixy-mvblli.ko` | `EE452ED1FD9856506534C13` | `3911FF5C78EBC13CF7EA2EF` |
+
+Die rechte Spalte entsteht aus demselben Quellbaum, nur mit den drei
+Versionsklammern für Kernel 6.x (siehe README, „Gegen Kernel 6.x"). Am
+Verhalten auf 5.10 ändert sich nichts — der Präprozessor nimmt dort
+denselben Zweig wie vorher —, aber die `srcversion` ist eine Prüfsumme
+über die Quelldateien und damit eine andere. **Geprüft am Gerät ist die
+linke Spalte.** Der neue Stand ist dort einmal gegenzulesen
+(`mvbdiff.py run` + `compare` gegen den Referenzlauf), bevor er die
+Grundlage eines Images wird.
 
 Nachgewiesen am Gerät, mit der unveränderten Hersteller-Anwendung auf den
 Original-Bibliotheken:

@@ -16,6 +16,19 @@ mischen, und genau das ist die Teststrategie.
 
 ## Bauen
 
+Ein Quellbaum, zwei Kernelstände. Drei Stellen wählen per
+`LINUX_VERSION_CODE` die passende Schreibweise:
+
+| Stelle | 5.10 | ab |
+|---|---|---|
+| `pixy-mvb.c` mmap | `vma->vm_flags \|= …` | 6.3: `vm_flags_set(vma, …)` |
+| beide, `file_operations` | `.llseek = no_llseek` | 6.12: Zeile entfällt, NULL heißt dort „nicht seekbar" |
+| beide, `module_init` | `class_create(THIS_MODULE, …)` | 6.4: `class_create(…)` |
+
+Die 5.10-Fähigkeit bleibt mit Absicht erhalten: Das Pixy1000 mit dem
+Herstellerkernel ist der einzige Prüfstand, auf dem sich der Nachbau
+gegen den Originaltreiber vergleichen lässt (`mvbdiff.py compare`).
+
 ### Gegen den Herstellerkernel (5.10.16.rt30.pixy-2)
 
 Voraussetzung ist das Paket `linux-rt-headers-5.10.16.rt30.pixy-2` von

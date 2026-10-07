@@ -9,8 +9,25 @@ Damit lässt sich alles prüfen, was nur liest oder rechnet — ohne Hardware,
 ohne Reboot und ohne Risiko.
 
 ```sh
-make check
+make check        # wie der Herstellerkernel, 5.10.16
+make check-6x     # mit dem Codepfad fuer Kernel 6.12
+make check-all    # beide hintereinander
 ```
+
+`check-6x` setzt `LINUX_VERSION_CODE` über `fakelinux/linux/version.h`
+hoch und übersetzt damit die drei Versionsklammern im Treiber in ihrer
+6.x-Form. Dass dabei wirklich ein anderer Zweig genommen wird, lässt sich
+nachsehen:
+
+```sh
+diff <(cc -Ifakelinux -I../recipes-kernel/pixy-mvblli/files -E -P tm_replay.c) \
+     <(cc -Ifakelinux -I../recipes-kernel/pixy-mvblli/files \
+          -DFAKE_KERNEL_CODE=KERNEL_VERSION\(6,12,0\) -E -P tm_replay.c)
+```
+
+Im 6.12-Lauf fehlt die Zeile `.llseek = 0,` — das ist der Unterschied.
+`pixy-mvb.c` bindet das Abspielwerk nicht ein; dessen `vm_flags_set`-Zweig
+ist gelesen, aber nicht übersetzt.
 
 Die Kernel-Attrappen in `fakelinux/` ersetzen `ioread16`/`iowrite16` durch
 Zugriffe auf ein Byte-Array und stubben Sperren, Warteschlangen und

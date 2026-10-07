@@ -478,7 +478,12 @@ static int pixy_mvb_mmap(struct file *filp, struct vm_area_struct *vma)
 		return -EINVAL;
 	}
 
+	/* Ab 6.3 ist vm_flags schreibgeschuetzt und will den Setzer */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_IO | VM_LOCKED | VM_DONTEXPAND | VM_DONTDUMP);
+#else
 	vma->vm_flags |= VM_IO | VM_LOCKED | VM_DONTEXPAND | VM_DONTDUMP;
+#endif
 
 	if (remap_pfn_range(vma, vma->vm_start,
 			    (brd->bar_start + (vma->vm_pgoff << PAGE_SHIFT))
@@ -733,7 +738,16 @@ static const struct file_operations pixy_mvb_fops = {
 	.unlocked_ioctl	= pixy_mvb_ioctl,
 	.compat_ioctl	= pixy_mvb_ioctl,
 	.mmap		= pixy_mvb_mmap,
+	/*
+	 * no_llseek ist in 6.12 entfallen. Ein fehlendes .llseek bedeutet
+	 * dort, dass FMODE_LSEEK nicht gesetzt wird und lseek() mit ESPIPE
+	 * abgewiesen wird - genau das, was no_llseek vorher tat. Auf 5.10
+	 * greift bei NULL dagegen das seekbare default_llseek, die Zeile
+	 * darf dort also nicht einfach fehlen.
+	 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 	.llseek		= no_llseek,
+#endif
 };
 
 /* --------------------------------------------------------------- PCI */
@@ -1064,7 +1078,12 @@ static int __init pixy_mvb_init(void)
 		return err;
 	}
 
+	/* class_create nimmt seit 6.4 nur noch den Namen */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	mvbdrvr.sys_class = class_create(DRV_NAME);
+#else
 	mvbdrvr.sys_class = class_create(THIS_MODULE, DRV_NAME);
+#endif
 	if (IS_ERR(mvbdrvr.sys_class)) {
 		pr_err(DRV_NAME ": cannot create device class\n");
 		err = PTR_ERR(mvbdrvr.sys_class);
