@@ -6,7 +6,8 @@ Fuehrt eine feste Folge von ioctls, Schreib- und Lesezugriffen auf
 
   * Rueckgabewert und errno des Aufrufs
   * den gesamten Traffic Memory (256 KiB, Registerblock ausgespart)
-  * den Registersatz des MVBC (IVR ausgespart)
+  * den Registersatz des MVBC (zweite Cachezeile ISR0..TC2 ausgespart,
+    siehe --full-regs)
 
 Einmal mit dem originalen LLI laufen lassen, einmal mit dem Nachbau,
 dann die beiden Verzeichnisse vergleichen. Was dabei gleich ist, ist
@@ -41,6 +42,20 @@ Dazu:
                     alles danach, auch START.)
     --stop-after N  nach Schritt N nur noch protokollieren
     --ports DATEI   Portliste "adresse groesse typ" statt der eingebauten
+    --single-line   Einleitungsbetrieb auf Leitung A (WRITE_CONTROL mit
+                    sla, DR.SLM = 1) statt Zweileitungsbetrieb - so faehrt
+                    die Herstelleranwendung (DR 150D)
+    --dsw-md        (nur mit --go) vor START im DSW das Faehigkeitsbit MD
+                    (0x1000) setzen, nach STOP wieder loeschen. Prueft, ob
+                    der Busmaster Messages erst abholt, wenn das Geraet
+                    sich als message-faehig meldet
+    --full-regs     auch die zweite Cachezeile des Registerblocks lesen
+                    (ISR0, ISR1, ECA, ECB, DAOR, DAOK, TCR, Timer). Jeder
+                    Zugriff dort liest IVR0/IVR1 mit und quittiert
+                    anstehende Interrupts am Treiber vorbei - danach
+                    kommt bis zum Neustart keiner mehr, auch kein DTI1
+                    fuer den Message-Empfang. Nur fuer Vergleichslaeufe
+                    ohne --go und --md.
 
 Beim Vergleich bleiben aussen vor: Zaehler, Timer, anstehende Ereignisse
 und der zuletzt gesehene Master Frame (VOLATILE_REGS), DR Bit 9 und die
@@ -51,6 +66,7 @@ Vergleich der Abzuege ist dann nicht mehr aussagekraeftig - dort zaehlt
 das Protokoll: Rueckgaben, gelesene Daten, freshness, Zaehlerstaende.
 """
 
+import ctypes
 import difflib
 import errno as E
 import fcntl
@@ -70,6 +86,24 @@ TM = ISA + 0x40000
 SA_OFF = 0x0FC00
 REG = 0x380
 IVR = (0x3C8, 0x3CC)
+
+# Zweite Cachezeile des Registerblocks, SA+0x3C0..0x3FF. mmap bildet das
+# BAR gecacht ab; jedes Lesen dort holt IVR0/IVR1 mit und quittiert
+# anstehende Interrupts am Treiber vorbei (ABI.md, "Cachezeilen"). Wird
+# deshalb nur mit --full-regs gelesen.
+IRQ_LINE = 0x3C0
+
+# Kommandobyte von WRITE_CONTROL: 0x03 = cla|clb (Fehlerzaehler leeren),
+# 0x08 = nur Leitung A (Einleitungsbetrieb), 0x04 = nur B, 0x0C = beide
+CTRL_CLEAR = 0x03
+CTRL_LINE_A = 0x08
+
+# DSW, obere vier Bits: Faehigkeiten SP, BA, GW, MD (IEC 61375-1). MD
+# meldet dem Busmaster, dass das Geraet Message-Daten kann.
+DSW_MD = 0x1000
+
+# QDT der Message-Queues in der Service Area: xmit_q0, xmit_q1, rcve_q
+QDT_OFF = 0x310
 
 # Moegliche Plaetze der Service Area (TM_SERVICE_OFFSETS). Nach einem
 # RESET (SCR = 0, so schliesst das Original) liegt der Registerblock am
@@ -246,6 +280,23 @@ def sig(req):
     return req - (1 << 32) if req >= (1 << 31) else req
 
 
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.ioctl.argtypes = (ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong)
+
+
+def ioctl_val(fd, req, val):
+    """Wert-ioctl mit Argument ab 0x80000000, z.B. WRITE_DSW mit voller
+    Maske. fcntl.ioctl nimmt eine Zahl nur als int und bricht dort mit
+    OverflowError ab. Umrechnen ins Negative hilft nicht: der Treiber
+    prueft den Wert wie das Original mit access_ok(), ein
+    vorzeichenerweitertes Argument liefe in EFAULT."""
+    ret = _libc.ioctl(fd, req, val)
+    if ret < 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+    return ret
+
+
 class Log:
     def __init__(self, path):
         self.f = open(path, "w")
@@ -279,6 +330,9 @@ STOP_AFTER = None
 NO_PD = False
 WIPE = True
 PING = False
+FULL_REGS = False
+SINGLE_LINE = False
+SET_DSW_MD = False
 
 # Ein Verbindungsaufbau, wie Geraet 6 ihn im Produktivabzug an uns
 # geschickt hat (rcve_q, dreimal, SZ 27, MTC 0x80), jetzt in Gegen-
@@ -310,23 +364,52 @@ def call(log, name, fn):
 
 
 # ------------------------------------------------------------- Abzuege
+def rd_reg(mm, sa_off, off):
+    """Ein MVBC-Register, None fuer IVR und - ohne --full-regs - fuer die
+    ganze zweite Cachezeile."""
+    if off in IVR or (off >= IRQ_LINE and not FULL_REGS):
+        return None
+    return struct.unpack_from("<H", mm, TM + sa_off + off)[0]
+
+
+def h4(v):
+    return "----" if v is None else "%04X" % v
+
+
+def tm_bytes(mm, off, ln, holes):
+    """mm[TM+off : TM+off+ln], die Luecken (TM-Offsets) als Nullen statt
+    gelesen."""
+    out = bytearray()
+    pos, end = off, off + ln
+    for h0, h1 in sorted(holes):
+        if h1 <= pos or h0 >= end:
+            continue
+        out += mm[TM + pos:TM + h0]
+        out += bytes(min(h1, end) - max(pos, h0))
+        pos = min(h1, end)
+    out += mm[TM + pos:TM + end]
+    return bytes(out)
+
+
 def snapshot(mm, outdir, step, name, sa_off=SA_OFF, tm=True):
     if tm:
-        parts = []
-        for off, ln in CHUNKS:
-            parts.append(mm[TM + off:TM + off + ln])
+        # Am lebenden Registerblock die zweite Cachezeile auslassen. Bei
+        # mcm 3 liegt sie ohnehin ausserhalb von CHUNKS, nach close() am
+        # Grundplatz 0x3C00 aber mitten im ersten Stueck.
+        holes = [] if FULL_REGS else \
+            [(sa + IRQ_LINE, sa + 0x400) for sa in live_sa(mm)]
         with open(os.path.join(outdir, "%02d_%s.bin" % (step, name)),
                   "wb") as f:
-            for p in parts:
-                f.write(p)
+            for off, ln in CHUNKS:
+                f.write(tm_bytes(mm, off, ln, holes))
 
     lines = []
     for off in range(REG, 0x400, 4):
         nm = REGNAMES.get(off, "")
-        if off in IVR:
+        v = rd_reg(mm, sa_off, off)
+        if v is None:
             lines.append("SA+0x%03X  ----  %-5s uebersprungen" % (off, nm))
         else:
-            v = struct.unpack_from("<H", mm, TM + sa_off + off)[0]
             lines.append("SA+0x%03X  %04X  %s" % (off, v, nm))
     # Fensterregister der ISA-Bruecke: BASR0/1 legen das TM-Fenster fest,
     # das untere Byte des BCR traegt die Interruptnummer (Parameter irq)
@@ -555,6 +638,11 @@ def run(outdir, allow_md, go):
         except OSError:
             params.append("%s=?" % name)
     log.line("Parameter LLI: %s" % (" ".join(params) or "keine lesbar"))
+    if FULL_REGS:
+        log.line("--full-regs: zweite Cachezeile wird gelesen - Interrupts "
+                 "danach bis zum Neustart unzuverlaessig%s"
+                 % (", Message-Empfang nicht aussagekraeftig"
+                    if go or allow_md else ""))
     log.line("")
 
     if WIPE and not wipe_tm(log):
@@ -590,6 +678,8 @@ def run(outdir, allow_md, go):
     def io(req, buf=0, mutate=False):
         if isinstance(buf, bytearray):
             return fcntl.ioctl(fd, sig(req), buf, mutate)
+        if buf >= (1 << 31):
+            return ioctl_val(fd, req, buf)
         return fcntl.ioctl(fd, sig(req), buf)
 
     # ---- Fehlerpfade: erwartet wird ueberall ein Fehler ----
@@ -693,11 +783,18 @@ def run(outdir, allow_md, go):
          lambda: io(IOC["WRITE_DSW"], 0xFFFF0000 | dsw_orig))
 
     # Kommandobyte 0x03 = cla|clb: setzt nur die Fehlerzaehler zurueck.
-    # Die Leitungsbits 0x0C bleiben aus - die wuerden die Leitungswahl
-    # umschalten, und die Karte haengt am Bus.
+    # Die Leitungsbits bleiben ohne --single-line aus - die wuerden die
+    # Leitungswahl umschalten, und die Karte haengt am Bus. Mit
+    # --single-line kommt sla dazu: Einleitungsbetrieb auf Leitung A,
+    # wie ihn die Herstelleranwendung faehrt.
+    cmd = CTRL_CLEAR | (CTRL_LINE_A if SINGLE_LINE else 0)
     call(log, "WRITE_CONTROL",
          lambda: io(IOC["WRITE_CONTROL"],
-                    bytearray(struct.pack("<HHBx", TEST_ADDR, 43, 0x03))))
+                    bytearray(struct.pack("<HHBx", TEST_ADDR, 43, cmd))))
+    if SINGLE_LINE:
+        dr = struct.unpack_from("<H", mm, TM + SA_OFF + DR_OFF)[0]
+        log.line("     Einleitungsbetrieb Leitung A: DR %04X (SLM %d, LAA %d)"
+                 % (dr, dr & 1, (dr >> 3) & 1))
     snapshot(mm, outdir, log.step, "writectrl")
 
     # Prozessdaten schreiben: zweimal, damit die Seitenumschaltung sichtbar wird
@@ -781,6 +878,31 @@ def run(outdir, allow_md, go):
     # ---- Betrieb: nur mit --go, hier laeuft der Controller wirklich ----
     if go:
         log.line("\n--- Betrieb (MVB_GO) ---")
+
+        def md_state():
+            """QDT der drei Message-Queues und das DSW, wie es der
+            Busmaster sieht. Ruecken xmit_q0/xmit_q1 vor, hat der
+            Controller gesendet; rueckt rcve_q vor, ist etwas
+            eingegangen."""
+            q = struct.unpack_from("<3H", mm, TM + SA_OFF + QDT_OFF)
+            d = bytearray(2)
+            try:
+                io(IOC["READ_DSW"], d, True)
+                dsw = "%04X" % struct.unpack("<H", d)[0]
+            except OSError as e:
+                dsw = errname(e.errno)
+            return q, dsw
+
+        def md_line(prefix, st):
+            q, dsw = st
+            log.line("     %sQDT xmit0 %04X xmit1 %04X rcve %04X  DSW %s"
+                     % (prefix, q[0], q[1], q[2], dsw))
+
+        if SET_DSW_MD:
+            # Wert-ioctl: oberes Wort Maske, unteres Wert
+            call(log, "WRITE_DSW MD-Faehigkeit",
+                 lambda: io(IOC["WRITE_DSW"], (DSW_MD << 16) | DSW_MD))
+
         irq0 = irq_count()
         ok, _ = call(log, "START", lambda: io(IOC["START"]))
         # Interruptkette vom MVBC bis zur CPU (irqstate.py im selben
@@ -808,19 +930,25 @@ def run(outdir, allow_md, go):
         seen = {}          # Port -> zuletzt gelesene Daten
         changed = set()
         c0 = counters()
-        r0 = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
+        # ISR0/ISR1 liegen in der zweiten Cachezeile: ohne --full-regs
+        # erscheinen sie als ----, sonst kaeme danach kein DTI1 mehr an
+        r0 = [h4(rd_reg(mm, SA_OFF, o))
               for o in (0x390, 0x394, 0x3B8, 0x3BC, 0x3B0, 0x3B4,
                         0x3C0, 0x3C4)]
-        log.line("     FC %04X  EC %04X  IMR0 %04X IMR1 %04X  "
-                 "IPR0 %04X IPR1 %04X  ISR0 %04X ISR1 %04X" % tuple(r0))
+        log.line("     FC %s  EC %s  IMR0 %s IMR1 %s  "
+                 "IPR0 %s IPR1 %s  ISR0 %s ISR1 %s" % tuple(r0))
+        md0 = md_state()
+        md_line("", md0)
 
         for round_ in range(3):
             time.sleep(20)
-            r = [struct.unpack_from("<H", mm, TM + SA_OFF + o)[0]
+            r = [h4(rd_reg(mm, SA_OFF, o))
                  for o in (0x390, 0x394, 0x3C0, 0x3C4, 0x3B0, 0x3B4)]
-            log.line("     +%2ds  FC %04X EC %04X  ISR0 %04X ISR1 %04X  "
-                     "IPR0 %04X IPR1 %04X"
+            log.line("     +%2ds  FC %s EC %s  ISR0 %s ISR1 %s  "
+                     "IPR0 %s IPR1 %s"
                      % ((round_ + 1) * 20, r[0], r[1], r[2], r[3], r[4], r[5]))
+            md1 = md_state()
+            md_line("+%2ds  " % ((round_ + 1) * 20), md1)
 
             for a_, sz, t in PORTS:
                 if NO_PD or t != 1:
@@ -857,6 +985,19 @@ def run(outdir, allow_md, go):
             else:
                 log.line("       Port %4d %-18s nicht gelesen" % (a_, nm))
 
+        log.line("     Message-Queues:")
+        q0, q1 = md0[0], md1[0]
+        if q1[:2] != q0[:2]:
+            log.line("       Senden    QDT bewegt - der Controller hat gesendet")
+        elif q0[0] or q0[1]:
+            log.line("       Senden    QDT unveraendert - NICHTS gesendet "
+                     "(Busmaster holt nicht ab)")
+        else:
+            log.line("       Senden    nichts in der Sendequeue")
+        log.line("       Empfang   %s"
+                 % ("QDT bewegt - Message eingegangen" if q1[2] != q0[2]
+                    else "QDT unveraendert - nichts eingegangen"))
+
         c1 = counters()
         irq1 = irq_count()
         if irq0 is None or irq1 is None:
@@ -889,6 +1030,10 @@ def run(outdir, allow_md, go):
 
         snapshot(mm, outdir, log.step, "running")
         call(log, "STOP", lambda: io(IOC["STOP"]))
+        if SET_DSW_MD:
+            # Maske MD, Wert 0: das Bit wieder loeschen
+            call(log, "WRITE_DSW MD zurueck",
+                 lambda: io(IOC["WRITE_DSW"], DSW_MD << 16))
         snapshot(mm, outdir, log.step, "stopped")
 
     # ---- Exklusivitaet ----
@@ -1163,10 +1308,13 @@ def compare(da, db):
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "run":
         global STOP_AFTER, NO_PD, WIPE, PING, PORTS, WRITE_PORT, WRITE_SIZE
-        global DISABLE_PORT_ADDR
+        global DISABLE_PORT_ADDR, FULL_REGS, SINGLE_LINE, SET_DSW_MD
         NO_PD = "--no-pd" in sys.argv
         WIPE = "--no-wipe" not in sys.argv
         PING = "--ping" in sys.argv
+        FULL_REGS = "--full-regs" in sys.argv
+        SINGLE_LINE = "--single-line" in sys.argv
+        SET_DSW_MD = "--dsw-md" in sys.argv
         for i, a_ in enumerate(sys.argv):
             if a_ == "--stop-after":
                 STOP_AFTER = int(sys.argv[i + 1])

@@ -22,9 +22,9 @@ dann tot bis zum Neustart. Genau das ist am Geraet passiert, mit dem
 Nachbau und mit dem Original. Aus dieser Zeile wird deshalb **nichts**
 gelesen, auch nicht ISR und TCR.
 
-Die erste Zeile ist fuer den Interrupt harmlos, kostet aber die vier
-Zaehler FC, EC, MFR und MFRE: die verfallen beim Lesen. Die Statistik der
-Anwendung ist nach einer Aufnahme also zurueckgesetzt.
+Die erste Zeile ist fuer den Interrupt harmlos. Dass sie FC und EC beim
+Lesen loescht, ist am Geraet widerlegt: FC zaehlt zwischen zwei Lesungen
+gleichmaessig weiter. MFR und MFRE sind nicht geprueft.
 
 Gedacht fuer den Vergleich "Anwendung laeuft" gegen "Anwendung
 gestoppt" gegen "eigener Testlauf". Darf parallel zum Herstellerstack
