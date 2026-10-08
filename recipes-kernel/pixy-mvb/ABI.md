@@ -94,9 +94,12 @@ der Treiber sieht sie nie, und weil der MSI auf eine Flanke reagiert,
 kommt nie wieder ein Interrupt: Message-Empfang tot bis zum Neustart. Am
 Gerät mehrfach so erlebt.
 
-Lesen in der ersten Zeile ist für den Interrupt harmlos, löscht aber die
-vier Zähler `FC`, `EC`, `MFR`, `MFRE`. Wer `READ_STATS` benutzt, bekommt
-danach falsche Werte.
+Das gilt auch ohne Herstellerstack: das eigene LLI braucht die Interrupts
+ebenso (`FEV`, `DTI1`, `DTI2`).
+
+Lesen in der ersten Zeile ist für den Interrupt harmlos. Es löscht `FC`
+und `EC` **nicht** — am Gerät gemessen, `FC` zählt zwischen zwei
+Lesungen gleichmäßig weiter. `MFR`/`MFRE` sind nicht geprüft.
 
 ### ioctls
 

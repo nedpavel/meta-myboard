@@ -282,6 +282,23 @@ Künstliche Interruptquellen hängen damit an Annahmen über den Bus, die
 sich ohne Busanalyse nicht prüfen lassen. Der aussagekräftigere Test ist
 die Anwendung selbst auf den nachgebauten Modulen.
 
+### Nachtrag 2026-10-08: Wrynose-Image, korrigierte Werkzeuge
+
+**Die fehlenden Interrupts waren das Werkzeug.** `mvbdiff.py` las in
+jedem Abzug ab `00_open` die zweite Cachezeile (`ISR`, `DAOR`, `TCR`)
+und quittierte damit `IVR0`/`IVR1` am LLI vorbei. Ohne diese Zugriffe
+kommen `DTI2` (1 Hz im Betrieb) und `FEV` (bei jedem Überlauf von `FC`)
+an, `READ_STATS` summiert die Zähler über 65535 hinaus. Die Aussagen
+oben zu „keine Interrupts" und „nur in der Anlaufphase" sind damit
+unter Vorbehalt: auch `irqstate.py` und `mvbsnap.py` lasen damals diese
+Zeile.
+
+**DSW-Vermutung widerlegt.** `--md` und `--ping` mit zurückgeschriebenem
+DSW (`00C0`): `xmit_q0`/`xmit_q1` bleiben über 60 s Betrieb stehen,
+gesendet wird weiterhin nichts. Nächste Prüfungen: `--dsw-md` (MD-Bit
+`0x1000` im DSW) und `--single-line`; als Referenz das DSW des
+Herstellerstands im Betrieb (`tools/dswread.py`).
+
 ### Anwendung auf den nachgebauten Modulen
 
 Aus `systemctl status session-1.scope`: `getty@tty1` meldet root an

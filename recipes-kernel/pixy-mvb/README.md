@@ -99,7 +99,7 @@ Der Layer bringt vier Rezepte mit:
 |---|---|
 | `pixy-mvb_3.0.0.bb` | Board-Treiber, `/dev/mvb0`, Kopf `pixy-mvb.h`, Regel `40-mvb.rules` |
 | `pixy-mvblli_3.0.0.bb` | LLI, `/dev/mvblli0`, Kopf `pixy-mvblli.h`, Regel `41-mvblli.rules` |
-| `pixy-mvb-tools_1.0.bb` | die vier Python-Werkzeuge nach `${bindir}` |
+| `pixy-mvb-tools_1.0.bb` | die fünf Python-Werkzeuge nach `${bindir}` |
 | `pixy-mvb-tmreplay_1.0.bb` | `tm_replay` und `tm_replay-6x` samt Speicherabzug |
 
 Ins Image kommen sie über die Packagegroup, eingehängt in
@@ -156,7 +156,8 @@ Die drei Dinge, die man vorher wissen muss:
 > und `extApp` starten ohne Neustart nicht wieder.
 >
 > **`IVR0`/`IVR1` niemals von Hand lesen**, solange ein Stack läuft: das
-> quittiert Interrupts und stiehlt sie dem LLI.
+> quittiert Interrupts und stiehlt sie dem LLI. Das gilt für die ganze
+> Cachezeile `SA+0x3C0…0x3FF`, also auch für `ISR`, `DAOR` und `TCR`.
 
 Der Aufbau in Kurzform:
 
@@ -208,24 +209,29 @@ beiden.
 * Exklusivität: das zweite `open()` liefert `EBUSY`.
 * `MVB_GO` und `MVB_STOP` am laufenden Bus.
 
-### Interrupts — verhalten sich wie beim Original
+### Interrupts — kommen an
 
-Gleicher Lauf (`mvbdiff.py --go --no-pd`) mit beiden LLIs auf demselben
-Board-Treiber, dessen `dbg_hardirq` damit für beide gleich zählt:
+Früher stand hier „0 Interrupts, bei Nachbau und Original gleich". Das
+war ein Fehler des Werkzeugs: `mvbdiff.py` las bei jedem Abzug ab dem
+ersten `open()` auch `ISR0`/`ISR1`/`DAOR`/`TCR` und damit die
+Cachezeile von `IVR0`/`IVR1` (siehe „Bekannte bewusste Eigenheiten").
+Danach kam bei beiden LLIs kein Interrupt mehr an. Seit `mvbdiff.py`
+und `mvbirqtest.py` diese Zeile auslassen (Vorgabe, `--full-regs` liest
+sie wieder), zeigt der Nachbau am Laborbus auf dem eigenen
+Wrynose-Image (2026-10-08):
 
-| | Nachbau | Original |
-|---|---|---|
-| `IMR0` / `IMR1` nach `START` | `0003` / `0880` | `0003` / `0880` |
-| `IPR1` vor → nach 20 s | `0000` → `0080` | `0000` → `0080` |
-| `ISR0` / `ISR1` | `0000` / `0000` | `0000` / `0000` |
-| Interrupts beim Board-Treiber | 0 | 0 |
+| | gemessen |
+|---|---|
+| `IMR0` / `IMR1` nach `open()` | `0003` / `0880` |
+| `DTI2` (Leitungsüberwachung) | 1 Hz, nur im Betrieb (58 in 60 s) |
+| `FEV` (Framezähler voll) | bei jedem Überlauf von `FC`, ca. alle 26 s bei 2500 Frames/s; je Überlauf 2–3 Meldungen, die folgenden tragen nur die wenigen neuen Frames nach |
+| `IPR0` / `IPR1` im Betrieb | `0000` / `0000` — nichts bleibt stehen |
+| `dbg_rearm`, `dbg_other`, `dbg_rqe` | 0 |
+| `READ_STATS frames` | läuft als 32-Bit-Summe weiter (535 751 nach ~3,5 min), statt bei `65535` stehenzubleiben |
 
-`FEV` wird also *nach* dem Freigeben der Maske gesetzt, und trotzdem
-landet es weder in `ISR` noch als Interrupt beim Treiber — bei beiden
-Modulen. Die Vermutung, eine vor dem Freigeben anstehende Quelle
-blockiere die Meldung, ist damit widerlegt, die dafür eingebaute
-Quittung wieder entfernt. Für die Anwendung ohne Belang: sie arbeitet
-im Pollbetrieb (`strace`: zyklisches `MD_GET_STATUS`).
+`/proc/interrupts` und `dbg_irq` stimmen überein (`151 = DTI2 123 +
+FEV 28`). Mit dem Original-LLI ist der Lauf mit dem korrigierten
+Werkzeug noch nicht wiederholt.
 
 ### ioctl-ABI — gegen den Maschinencode nachgezogen
 
@@ -271,8 +277,33 @@ Traffic-Store-Beschreibung.
 
 ### Offen
 
-**Message-Daten.** Senden und Empfangen sind am Gerät noch nicht
-geprüft.
+**Message-Daten.** Am Gerät geprüft (2026-10-08, `mvbdiff.py --go --md`
+und `--go --ping`):
+
+* Einhängen in die Sendequeues, `MD_FLUSH_QUEUE`, erneutes Einhängen,
+  `EINVAL` für Port 256 und `ENETDOWN` für `read()` vor `START` —
+  wie erwartet.
+* **Gesendet wird nichts.** `xmit_q0`/`xmit_q1` stehen von `START` über
+  60 s Betrieb bis `STOP` unverändert. Messages sendet ein MVB-Gerät
+  erst, wenn der Busmaster es abfragt; das tut er nicht.
+* **Empfangen wird nichts.** `rcve_q` unverändert, `dbg_dti1 = 0`.
+* Die Vermutung aus `PLAN.md`, das vom Test verstellte DSW halte den
+  Busmaster ab, ist widerlegt: das DSW wird seit Schritt 26
+  zurückgeschrieben, gesendet wird trotzdem nicht.
+
+Das DSW meldet `00C0`: Leitung A aktiv, redundante Leitung gestört,
+keine Fähigkeitsbits — auch nicht `MD` (`0x1000`). Nächste Prüfungen:
+`--dsw-md` (meldet Message-Fähigkeit) und `--single-line`
+(Einleitungsbetrieb wie die Herstelleranwendung, `DR 150D`). Den
+Vergleichswert liefert das DSW eines Geräts mit Herstellerstand im
+laufenden Betrieb (`tools/dswread.py`).
+
+**Fehlerzähler.** Im Zweileitungsbetrieb zählt der MVBC Fehler auf
+etwa 31 % der Frames, solange er nur mithört (`CONFIG`), und auf etwa
+11 % im Betrieb — alle auf Leitung A, Leitung B steht auf 0. `DR` meldet
+eine Leitungsstörung (`RLD`), das DSW gibt sie an den Busmaster weiter.
+Naheliegend: Leitung B ist am Prüfaufbau nicht angeschlossen oder nicht
+abgeschlossen. Der Datenempfang leidet nicht darunter.
 
 ## Gegenlesen gegen das Dekompilat
 
@@ -484,11 +515,16 @@ Diese Verhaltensweisen sehen nach Fehlern aus, sind aber vom Original
   mehr, Message-Empfang tot bis zum Neustart.** Das ist am Gerät mit dem
   Nachbau *und* mit dem Original passiert, verursacht durch
   `irqstate.py`. Das Werkzeug liest diese Zeile deshalb nicht mehr.
-  Lesen in der ersten Zeile ist für den Interrupt harmlos, löscht aber
-  die vier Zähler `FC`, `EC`, `MFR`, `MFRE` – genau deshalb musste
-  `mvbdiff` sie als flüchtig ausblenden. `mvbdiff` selbst darf den
-  vollen Registersatz lesen: es läuft nur, wenn der Herstellerstack
-  nicht läuft.
+  Dasselbe gilt für das eigene LLI: Auch ohne Herstellerstack braucht
+  es die Interrupts (`FEV`, `DTI1`, `DTI2`). `mvbdiff.py` und
+  `mvbirqtest.py` lassen die Zeile deshalb aus, `mvbdiff.py --full-regs`
+  liest sie für Vergleichsläufe ohne Bus. **`mvbsnap.py` liest sie noch
+  — nur bei geschlossenem `/dev/mvblli0` benutzen.**
+  Lesen in der ersten Zeile ist für den Interrupt harmlos. Dass es
+  `FC` und `EC` löscht, wie hier früher stand, ist am Gerät widerlegt:
+  `FC` zählt zwischen zwei Lesungen im Abstand von 15 s gleichmäßig
+  weiter (`mvbirqtest.py`, 2026-10-08). `MFR`/`MFRE` sind nicht
+  geprüft. Flüchtig sind die Zähler trotzdem, weil der Bus sie bewegt.
 - **`open()` initialisiert den Controller, `close()` baut ihn ab.**
 
 ## Nicht implementiert

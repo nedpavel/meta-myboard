@@ -22,8 +22,12 @@ jeder Schritt in der Reihenfolge, in der er ausgeführt werden muss.
 > bleibt gestoppt. Stufe 3 ist etwas anderes — dazu unten.
 >
 > **`IVR0`/`IVR1` niemals von Hand lesen**, solange ein Stack läuft: das
-> quittiert Interrupts und stiehlt sie dem LLI. `mvbsnap.py` spart beide
-> an jeder Kandidatenadresse aus.
+> quittiert Interrupts und stiehlt sie dem LLI. Weil `mmap` gecacht
+> abbildet, gilt das für die ganze Cachezeile `SA+0x3C0…0x3FF`, also
+> auch für `ISR`, `DAOR` und `TCR`. `mvbsnap.py` spart nur `IVR0`/`IVR1`
+> selbst aus, liest den Rest der Zeile aber — bei laufendem Stack also
+> nicht verwenden. `irqstate.py`, `mvbdiff.py` (ohne `--full-regs`) und
+> `mvbirqtest.py` lassen die Zeile ganz aus.
 
 ---
 
