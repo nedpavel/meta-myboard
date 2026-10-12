@@ -19,6 +19,17 @@ werden aus dem empfangenen Frame gebaut: Netzkopf vertauscht, Referenz
 gespiegelt. Nur die Nutzdaten der eigenen Frames stammen aus dem
 Mitschnitt.
 
+DIA1 laeuft laut Busbeschreibung (MVB (trak).txt) als Teilnehmer auf
+VCU1, Geraeteadresse 02EH = 46. IDU2 hat 0F0H = 240.
+
+Ohne Lebenszeichen gilt IDU2 fuer FLG1N, FLG2N und IDU1 als nicht da.
+--lebenszeichen sendet deshalb Telegramm IDU2-491 (Port 491, 4 Byte,
+Zyklus 256 ms): IDU2-XMVBLifeSig als CARD16 big-endian ab Byte 0, im
+Sekundentakt hochgezaehlt wie bei der Herstelleranwendung. Byte 2 traegt
+Luefterbefehle an FLG1N und bleibt 0. Die Anfrage geht erst nach dem
+Vorlauf hinaus, damit die FLG das Lebenszeichen vorher sehen. Port 181
+(Lebenszeichen FLG1N) wird zum Vergleich mitgelesen.
+
 Frameaufbau (32 Byte, Offsets im Frame):
   0..3  Linkkopf - setzt der Treiber (Modus|Ziel, PT 8|Quelle)
   4     SZ, gueltige Bytes ab Offset 5
@@ -31,10 +42,15 @@ Frameaufbau (32 Byte, Offsets im Frame):
 
     ddsabfrage.py <Verzeichnis> [Optionen]
 
-    --dauer S        so lange zuhoeren (Vorgabe 60)
+    --lebenszeichen  Lebenszeichen auf Port 491 senden
+    --alle-quellen   (mit --lebenszeichen) auch 492 (8 Byte) und 498
+                     (16 Byte) senden, nur Nullen - keine Befehle
+    --vorlauf S      Wartezeit nach START bis zur Anfrage (Vorgabe 20 mit
+                     --lebenszeichen, sonst 2)
+    --dauer S        nach dem Vorlauf so lange zuhoeren (Vorgabe 60)
     --nur-hoeren     keine Anfrage senden, nur auf DIA1 antworten
     --keine-antwort  in Teil 2 keine Reply-Message an DIA1 senden
-    --ziel N         Geraeteadresse von DIA1 (Vorgabe 6)
+    --ziel N         Geraeteadresse von DIA1 (Vorgabe 0x2E = 46)
     --ref HEX        Referenz der eigenen Anfrage (Vorgabe 0043)
     --hoch           Frames mit hoher Prioritaet senden (Vorgabe niedrig)
     --single-line    Einleitungsbetrieb auf Leitung A
@@ -67,12 +83,20 @@ IOC = {
     "WRITE_DSW":      0x40044C04,
     "START":          0x00004C05,
     "STOP":           0x00004C06,
+    "PD_CONF":        0x40024C0C,
     "MD_CONF":        0x40024C0E,
     "WRITE_CONTROL":  0x40064C14,
     "HWINIT":         0x40104C15,
 }
-MD_HIGH, MD_LOW = 2, 3
+PD, MD_HIGH, MD_LOW = 1, 2, 3
+PD_SINK, PD_SRC = 1, 2
 OWN_ADDR = 240
+DIA1_ADDR = 0x2E
+
+# Prozessdaten aus der Busbeschreibung: (Port, Groesse)
+LS_PORT, LS_SIZE = 491, 4          # IDU2-491, IDU2-XMVBLifeSig ab Byte 0
+FLG_LS_PORT, FLG_LS_SIZE = 181, 4  # IN-XMVBLifeSFLG1, nur mitlesen
+EXTRA_SRC = ((492, 8), (498, 16))  # IDU2-492, IDU2-495 (Port 498)
 DSW_MD = 0x1000
 CTRL_CLEAR, CTRL_LINE_A = 0x03, 0x08
 
@@ -198,8 +222,8 @@ def dti1():
 
 def parse_args(argv):
     o = {"dauer": 60.0, "nur_hoeren": False, "keine_antwort": False,
-         "ziel": 6, "ref": 0x0043, "hoch": False, "single": False,
-         "dsw_md": False}
+         "ziel": DIA1_ADDR, "ref": 0x0043, "hoch": False, "single": False,
+         "dsw_md": False, "ls": False, "alle": False, "vorlauf": None}
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__)
         sys.exit(2)
@@ -226,11 +250,23 @@ def parse_args(argv):
             o["single"] = True
         elif a == "--dsw-md":
             o["dsw_md"] = True
+        elif a == "--lebenszeichen":
+            o["ls"] = True
+        elif a == "--alle-quellen":
+            o["alle"] = True
+        elif a == "--vorlauf":
+            i += 1
+            o["vorlauf"] = float(argv[i])
         else:
             print("Unbekannte Option: %s\n" % a)
             print(__doc__)
             sys.exit(2)
         i += 1
+    if o["alle"] and not o["ls"]:
+        print("--alle-quellen nur zusammen mit --lebenszeichen\n")
+        sys.exit(2)
+    if o["vorlauf"] is None:
+        o["vorlauf"] = 20.0 if o["ls"] else 2.0
     return o
 
 
@@ -242,10 +278,13 @@ def main():
     names = {OWN_ADDR: "IDU2", o["ziel"]: "DIA1"}
     typ = MD_HIGH if o["hoch"] else MD_LOW
 
-    log.line("DDS-Abfrage an DIA1 (Geraet %d), eigene Adresse %d, %s, %s"
-             % (o["ziel"], OWN_ADDR, "nur hoeren" if o["nur_hoeren"]
-                else "Anfrage Ref %04X" % o["ref"],
-                "Prioritaet hoch" if o["hoch"] else "Prioritaet niedrig"))
+    log.line("DDS-Abfrage an DIA1 (Geraet %d = 0x%03X), eigene Adresse %d, "
+             "%s, %s, %s, Vorlauf %g s"
+             % (o["ziel"], o["ziel"], OWN_ADDR, "nur hoeren"
+                if o["nur_hoeren"] else "Anfrage Ref %04X" % o["ref"],
+                "Prioritaet hoch" if o["hoch"] else "Prioritaet niedrig",
+                ("Lebenszeichen 491" + (" + 492/498" if o["alle"] else ""))
+                if o["ls"] else "ohne Lebenszeichen", o["vorlauf"]))
 
     fd = os.open(DEV, os.O_RDWR)
 
@@ -253,6 +292,38 @@ def main():
         if isinstance(arg, bytearray):
             return fcntl.ioctl(fd, sig(req), arg, mutate)
         return fcntl.ioctl(fd, sig(req), arg)
+
+    def pd_write(port, data):
+        """Prozessdaten schreiben. Der Treiber liest immer die vollen 38
+        Byte, als Laenge sieht er die Portgroesse."""
+        buf = bytearray(38)
+        struct.pack_into("<HH", buf, 0, PD, port)
+        buf[4:4 + len(data)] = data
+        return os.writev(fd, [memoryview(buf)[:len(data)]])
+
+    def pd_read(port, size):
+        """(Daten, freshness) oder (None, Fehlertext)."""
+        buf = bytearray(38)
+        struct.pack_into("<HH", buf, 0, PD, port)
+        try:
+            os.readv(fd, [memoryview(buf)[:size]])
+        except OSError as e:
+            return None, errno.errorcode.get(e.errno, e.errno)
+        return bytes(buf[4:4 + size]), struct.unpack_from("<H", buf, 36)[0]
+
+    ls = {"wert": 0, "n": 0, "fehler": 0}
+
+    def ls_send():
+        """Lebenszeichen big-endian ab Byte 0, Byte 2/3 (Luefterbefehle,
+        Reserve) bleiben 0."""
+        try:
+            pd_write(LS_PORT, struct.pack(">HH", ls["wert"], 0))
+            ls["n"] += 1
+        except OSError as e:
+            ls["fehler"] += 1
+            if ls["fehler"] == 1:
+                log.line("Lebenszeichen: write FEHLER %s"
+                         % errno.errorcode.get(e.errno, e.errno))
 
     def step(name, fn):
         try:
@@ -278,6 +349,26 @@ def main():
             "<QBBHHB x", 0, 1, 1, 0xFFF, 0xFFF, 0)), True))
         step("MD_CONF", lambda: io(IOC["MD_CONF"],
                                    bytearray(struct.pack("<H", 0)), True))
+        if o["ls"]:
+            ports = [(LS_PORT, LS_SIZE, PD_SRC),
+                     (FLG_LS_PORT, FLG_LS_SIZE, PD_SINK)]
+            if o["alle"]:
+                ports += [(p, s, PD_SRC) for p, s in EXTRA_SRC]
+            cfg = struct.pack("<H", len(ports))
+            for p, s, t in ports:
+                cfg += struct.pack("<HHH", p, s, t)
+            step("PD_CONF %s" % " ".join(
+                "%d%s" % (p, "Q" if t == PD_SRC else "S")
+                for p, s, t in ports),
+                lambda: io(IOC["PD_CONF"], bytearray(cfg), True))
+            # Quellen werden erst mit dem ersten write() aktiv
+            ls_send()
+            log.line("Lebenszeichen 491: erster Wert %04X geschrieben"
+                     % ls["wert"])
+            if o["alle"]:
+                for p, s in EXTRA_SRC:
+                    step("write %d (%d Byte Nullen)" % (p, s),
+                         lambda p=p, s=s: pd_write(p, bytes(s)))
         cmd = CTRL_CLEAR | (CTRL_LINE_A if o["single"] else 0)
         step("WRITE_CONTROL", lambda: io(IOC["WRITE_CONTROL"], bytearray(
             struct.pack("<HHBx", OWN_ADDR, 43, cmd)), True))
@@ -296,6 +387,17 @@ def main():
         def qdt():
             return struct.unpack_from("<3H", mm, TM + sa + QDT)
 
+        def mr():
+            """MR: 1000/2000 = Ereignis ueber EF0/EF1 angemeldet, das der
+            Busmaster mit einer Ereignisabfrage abholen soll; 0200 Busy.
+            Erste Cachezeile, unbedenklich."""
+            return struct.unpack_from("<H", mm, TM + sa + 0x3A0)[0]
+
+        # Vergleichsstand der Queues. Wird nach jedem Einhaengen neu
+        # gesetzt: beim ersten Senden traegt der Treiber die Sendequeues
+        # erst in die QDT ein (0000 -> 2000/2050) - das ist kein Senden.
+        qs = {"q": qdt(), "sent": False}
+
         def dsw():
             b = bytearray(2)
             try:
@@ -305,6 +407,13 @@ def main():
                 return "?"
 
         def tx(tail, note):
+            # Hat sich die Sendequeue seit dem letzten Stand bewegt, zaehlt
+            # das, bevor das neue Einhaengen den Vergleichsstand verschiebt
+            q0 = qdt()
+            if q0[:2] != qs["q"][:2]:
+                qs["sent"] = True
+                log.line("QDT  xmit0 %04X xmit1 %04X rcve %04X  "
+                         "(Sendequeue bewegt - gesendet)" % q0)
             f = frame(tail)
             buf = bytearray(38)
             struct.pack_into("<HH", buf, 0, typ, o["ziel"])
@@ -322,6 +431,10 @@ def main():
                                          note, ok))
             raw.write("%.3f TX %s\n" % (time.time() - log.t0, shown.hex()))
             raw.flush()
+            qs["q"] = qdt()
+            log.line("   nach dem Einhaengen: QDT xmit0 %04X xmit1 %04X "
+                     "rcve %04X  MR %04X - gesendet ist erst, wenn sich "
+                     "xmit danach bewegt" % (qs["q"] + (mr(),)))
 
         def rx():
             buf = bytearray(38)
@@ -398,17 +511,33 @@ def main():
                    + bytes((0x70, 0x00)) + REPLY_DATA + REPLY_PAD,
                    "Reply an DIA1 Ref %04X" % reply_ref)
 
-        q_last = qdt()
+        def ls_text():
+            """Eigenes und FLG1N-Lebenszeichen fuer die Statuszeile."""
+            if not o["ls"]:
+                return ""
+            data, fresh = pd_read(FLG_LS_PORT, FLG_LS_SIZE)
+            flg = ("%04X fresh %d" % (be16(data, 0), fresh) if data
+                   else str(fresh))
+            return "  LS491 %04X  FLG181 %s" % (ls["wert"], flg)
+
         d_last = dti1()
-        log.line("Status  QDT xmit0 %04X xmit1 %04X rcve %04X  DSW %s  "
-                 "dbg_dti1 %s" % (q_last + (dsw(), d_last)))
+        log.line("Status  QDT xmit0 %04X xmit1 %04X rcve %04X  MR %04X  "
+                 "DSW %s  dbg_dti1 %s%s"
+                 % (qs["q"] + (mr(), dsw(), d_last, ls_text())))
 
         t0 = time.time()
         call_sent = o["nur_hoeren"]
         next_status = t0 + 5
-        while time.time() - t0 < o["dauer"]:
-            # Kurz warten, damit der Busmaster das Geraet nach START sieht
-            if not call_sent and time.time() - t0 >= 2:
+        next_ls = t0 + 1
+        while time.time() - t0 < o["vorlauf"] + o["dauer"]:
+            # Lebenszeichen im Sekundentakt, wie die Herstelleranwendung
+            if o["ls"] and time.time() >= next_ls:
+                ls["wert"] = (ls["wert"] + 1) & 0xFFFF
+                ls_send()
+                next_ls += 1
+            # Erst nach dem Vorlauf: der Busmaster und die FLG sollen das
+            # Geraet (und sein Lebenszeichen) vorher sehen
+            if not call_sent and time.time() - t0 >= o["vorlauf"]:
                 tx(CALL_CR[:5] + CALL_CR[5:6] + struct.pack(">H", o["ref"])
                    + CALL_CR[8:], "Anfrage an DIA1")
                 call_sent = True
@@ -421,19 +550,21 @@ def main():
                                                                   e.errno))
                     break
             q = qdt()
-            if q != q_last:
+            if q != qs["q"]:
                 what = []
-                if q[:2] != q_last[:2]:
+                if q[:2] != qs["q"][:2]:
                     what.append("Sendequeue bewegt - gesendet")
-                if q[2] != q_last[2]:
+                    qs["sent"] = True
+                if q[2] != qs["q"][2]:
                     what.append("Empfangsqueue bewegt")
                 log.line("QDT  xmit0 %04X xmit1 %04X rcve %04X  (%s)"
                          % (q + (", ".join(what),)))
-                q_last = q
+                qs["q"] = q
             if time.time() >= next_status:
                 d_now = dti1()
                 log.line("Status  QDT xmit0 %04X xmit1 %04X rcve %04X  "
-                         "DSW %s  dbg_dti1 %s" % (q + (dsw(), d_now)))
+                         "MR %04X  DSW %s  dbg_dti1 %s%s"
+                         % (q + (mr(), dsw(), d_now, ls_text())))
                 next_status += 5
             time.sleep(0.01)
 
@@ -443,7 +574,14 @@ def main():
         d_end = dti1()
         log.line("   Frames empfangen %d, dbg_dti1 %s -> %s"
                  % (got["rx"], d_last, d_end))
+        if o["ls"]:
+            log.line("   Lebenszeichen 491: %d mal geschrieben, letzter Wert "
+                     "%04X, Fehler %d" % (ls["n"], ls["wert"], ls["fehler"]))
         if not o["nur_hoeren"]:
+            log.line("   Anfrage hat das Geraet verlassen: %s"
+                     % ("ja" if qs["sent"] else
+                        "NEIN - Sendequeue nach dem Einhaengen unveraendert, "
+                        "der Busmaster hat nicht abgeholt (MR %04X)" % mr()))
             log.line("   Anfrage angenommen (CC):      %s"
                      % ("ja" if got["cc_anfrage"] else "NEIN"))
             log.line("   Antwort auf die Anfrage:      %s"
