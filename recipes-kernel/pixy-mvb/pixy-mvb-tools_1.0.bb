@@ -39,7 +39,9 @@ PACKAGE_ARCH = "${MACHINE_ARCH}"
 # ctypes difflib fcntl glob mmap os struct sys time - aus den Importen der
 # sechs Skripte. Fehlt zur Laufzeit doch ein Modul, deckt das Metapaket
 # "python3" alles ab; das kostet im Image aber deutlich mehr Platz.
+# python3-codecs bringt cp850/cp437 fuer die Textzeilen von ddsabfrage.py.
 RDEPENDS:${PN} = "python3-core \
+                  python3-codecs \
                   python3-ctypes \
                   python3-difflib \
                   python3-fcntl \

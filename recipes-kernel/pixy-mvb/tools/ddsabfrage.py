@@ -55,6 +55,8 @@ Frameaufbau (32 Byte, Offsets im Frame):
     --hoch           Frames mit hoher Prioritaet senden (Vorgabe niedrig)
     --single-line    Einleitungsbetrieb auf Leitung A
     --dsw-md         MD-Bit im DSW setzen, am Ende wieder loeschen
+    --zeichensatz CP Zeichensatz der Textzeilen unter dem Hexdump
+                     (Vorgabe cp850; auch cp437, latin1, cp1252)
     --ef1            Messages ueber EF1 statt EF0 beim Busadministrator
                      anmelden (MD_CONF mit negativer Queue-Prioritaet,
                      MR 2000 statt 1000). Ein Geraet beteiligt sich nur an
@@ -68,6 +70,7 @@ Gelesen wird nur unterhalb von SA+0x3C0, die Interruptzeile bleibt
 unberuehrt - der Message-Empfang braucht DTI1.
 """
 
+import codecs
 import errno
 import fcntl
 import mmap
@@ -136,11 +139,20 @@ def be32(b, o):
     return struct.unpack(">I", bytes(b[o:o + 4]))[0]
 
 
+# Zeichensatz fuer die Textzeilen. Vorgabe CP850 (DOS Westeuropa): dort
+# liegen die Umlaute bei 84 ae, 94 oe, 81 ue, 8E Ae, 99 Oe, 9A Ue, E1 ss -
+# in Latin-1 waeren das Steuerzeichen. Umschaltbar mit --zeichensatz.
+TEXT_CP = "cp850"
+
+
 def to_text(b):
-    """Je Byte ein Zeichen: druckbares ASCII und Latin-1 (Umlaute) als
-    Zeichen, alles andere als Punkt."""
-    return "".join(chr(x) if 0x20 <= x < 0x7F or 0xA0 <= x <= 0xFF else "."
-                   for x in b)
+    """Je Byte ein Zeichen im eingestellten Zeichensatz; Steuerzeichen und
+    nicht darstellbare Zeichen als Punkt."""
+    out = []
+    for x in b:
+        c = bytes((x,)).decode(TEXT_CP, errors="replace")
+        out.append(c if c.isprintable() and c != "�" else ".")
+    return "".join(out)
 
 
 def hex_text_lines(b, width=16):
@@ -250,7 +262,7 @@ def parse_args(argv):
     o = {"dauer": 60.0, "nur_hoeren": False, "keine_antwort": False,
          "ziel": DIA1_ADDR, "ref": 0x0043, "hoch": False, "single": False,
          "dsw_md": False, "ls": False, "alle": False, "vorlauf": None,
-         "ef1": False}
+         "ef1": False, "cp": TEXT_CP}
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__)
         sys.exit(2)
@@ -279,6 +291,14 @@ def parse_args(argv):
             o["dsw_md"] = True
         elif a == "--ef1":
             o["ef1"] = True
+        elif a == "--zeichensatz":
+            i += 1
+            try:
+                o["cp"] = codecs.lookup(argv[i]).name
+            except LookupError:
+                print("Unbekannter Zeichensatz: %s (z.B. cp850, cp437, "
+                      "latin1, cp1252)\n" % argv[i])
+                sys.exit(2)
         elif a == "--lebenszeichen":
             o["ls"] = True
         elif a == "--alle-quellen":
@@ -300,7 +320,16 @@ def parse_args(argv):
 
 
 def main():
+    global TEXT_CP
     o = parse_args(sys.argv)
+    TEXT_CP = o["cp"]
+    try:
+        codecs.lookup(TEXT_CP)
+    except LookupError:
+        # cp850 liegt in python3-codecs; fehlt das Paket, wenigstens Latin-1
+        print("Zeichensatz %s fehlt im Python des Images - nehme latin-1"
+              % TEXT_CP)
+        TEXT_CP = "latin-1"
     # Umlaute in den Textzeilen duerfen eine reine ASCII-Konsole nicht
     # zum Absturz bringen
     try:
