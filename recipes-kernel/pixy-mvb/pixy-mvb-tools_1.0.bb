@@ -16,13 +16,14 @@ SRC_URI = "file://irqstate.py \
            file://mvbsnap.py \
            file://mvbirqtest.py \
            file://dswread.py \
+           file://ddsabfrage.py \
           "
 
 S = "${UNPACKDIR}"
 
 do_install() {
     install -d ${D}${bindir}
-    for t in irqstate mvbdiff mvbsnap mvbirqtest dswread; do
+    for t in irqstate mvbdiff mvbsnap mvbirqtest dswread ddsabfrage; do
         install -m 0755 ${S}/$t.py ${D}${bindir}/$t.py
     done
 }
@@ -36,7 +37,7 @@ INHIBIT_DEFAULT_DEPS = "1"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
 
 # ctypes difflib fcntl glob mmap os struct sys time - aus den Importen der
-# fuenf Skripte. Fehlt zur Laufzeit doch ein Modul, deckt das Metapaket
+# sechs Skripte. Fehlt zur Laufzeit doch ein Modul, deckt das Metapaket
 # "python3" alles ab; das kostet im Image aber deutlich mehr Platz.
 RDEPENDS:${PN} = "python3-core \
                   python3-ctypes \

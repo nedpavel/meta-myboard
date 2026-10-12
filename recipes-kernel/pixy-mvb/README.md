@@ -99,7 +99,7 @@ Der Layer bringt vier Rezepte mit:
 |---|---|
 | `pixy-mvb_3.0.0.bb` | Board-Treiber, `/dev/mvb0`, Kopf `pixy-mvb.h`, Regel `40-mvb.rules` |
 | `pixy-mvblli_3.0.0.bb` | LLI, `/dev/mvblli0`, Kopf `pixy-mvblli.h`, Regel `41-mvblli.rules` |
-| `pixy-mvb-tools_1.0.bb` | die fünf Python-Werkzeuge nach `${bindir}` |
+| `pixy-mvb-tools_1.0.bb` | die sechs Python-Werkzeuge nach `${bindir}` |
 | `pixy-mvb-tmreplay_1.0.bb` | `tm_replay` und `tm_replay-6x` samt Speicherabzug |
 
 Ins Image kommen sie über die Packagegroup, eingehängt in
