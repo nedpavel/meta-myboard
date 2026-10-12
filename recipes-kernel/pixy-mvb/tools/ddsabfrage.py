@@ -55,6 +55,13 @@ Frameaufbau (32 Byte, Offsets im Frame):
     --hoch           Frames mit hoher Prioritaet senden (Vorgabe niedrig)
     --single-line    Einleitungsbetrieb auf Leitung A
     --dsw-md         MD-Bit im DSW setzen, am Ende wieder loeschen
+    --ef1            Messages ueber EF1 statt EF0 beim Busadministrator
+                     anmelden (MD_CONF mit negativer Queue-Prioritaet,
+                     MR 2000 statt 1000). Ein Geraet beteiligt sich nur an
+                     Event_Rounds seiner Prioritaet (IEC 61375-3-1, 8.3.2)
+
+Geantwortet wird nur auf Frames von DIA1. Rufe anderer Geraete (etwa
+WTB1, Geraet 6) erscheinen im Protokoll, bleiben aber unbeantwortet.
 
 Nur am Laborbus. Der Controller laeuft waehrend des Tests (MVB_GO).
 Gelesen wird nur unterhalb von SA+0x3C0, die Interruptzeile bleibt
@@ -129,6 +136,24 @@ def be32(b, o):
     return struct.unpack(">I", bytes(b[o:o + 4]))[0]
 
 
+def to_text(b):
+    """Je Byte ein Zeichen: druckbares ASCII und Latin-1 (Umlaute) als
+    Zeichen, alles andere als Punkt."""
+    return "".join(chr(x) if 0x20 <= x < 0x7F or 0xA0 <= x <= 0xFF else "."
+                   for x in b)
+
+
+def hex_text_lines(b, width=16):
+    """Hexdump mit einer Textzeile unter jeder Hexzeile. Jedes Zeichen
+    steht unter der ersten Ziffer seines Bytes."""
+    out = []
+    for k in range(0, len(b), width):
+        chunk = b[k:k + width]
+        out.append("   %04X  %s" % (k, chunk.hex(" ")))
+        out.append("         %s" % "  ".join(to_text(chunk)))
+    return out
+
+
 def frame(tail):
     """32-Byte-Frame: Linkkopf leer, dahinter tail, mit Nullen aufgefuellt."""
     f = bytes(4) + tail
@@ -190,7 +215,8 @@ def describe(d, names):
 
 class Log:
     def __init__(self, path):
-        self.f = open(path, "w")
+        # UTF-8 ausdruecklich: die Textzeilen enthalten Latin-1-Zeichen
+        self.f = open(path, "w", encoding="utf-8", errors="replace")
         self.t0 = time.time()
 
     def line(self, s=""):
@@ -223,7 +249,8 @@ def dti1():
 def parse_args(argv):
     o = {"dauer": 60.0, "nur_hoeren": False, "keine_antwort": False,
          "ziel": DIA1_ADDR, "ref": 0x0043, "hoch": False, "single": False,
-         "dsw_md": False, "ls": False, "alle": False, "vorlauf": None}
+         "dsw_md": False, "ls": False, "alle": False, "vorlauf": None,
+         "ef1": False}
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__)
         sys.exit(2)
@@ -250,6 +277,8 @@ def parse_args(argv):
             o["single"] = True
         elif a == "--dsw-md":
             o["dsw_md"] = True
+        elif a == "--ef1":
+            o["ef1"] = True
         elif a == "--lebenszeichen":
             o["ls"] = True
         elif a == "--alle-quellen":
@@ -272,6 +301,12 @@ def parse_args(argv):
 
 def main():
     o = parse_args(sys.argv)
+    # Umlaute in den Textzeilen duerfen eine reine ASCII-Konsole nicht
+    # zum Absturz bringen
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except AttributeError:
+        pass
     os.makedirs(o["dir"], exist_ok=True)
     log = Log(os.path.join(o["dir"], "log.txt"))
     raw = open(os.path.join(o["dir"], "frames.txt"), "w")
@@ -347,8 +382,13 @@ def main():
         step("WRITE_DEV_ADDR", lambda: io(IOC["WRITE_DEV_ADDR"], OWN_ADDR))
         step("HWINIT", lambda: io(IOC["HWINIT"], bytearray(struct.pack(
             "<QBBHHB x", 0, 1, 1, 0xFFF, 0xFFF, 0)), True))
-        step("MD_CONF", lambda: io(IOC["MD_CONF"],
-                                   bytearray(struct.pack("<H", 0)), True))
+        # q_tq_priority: negativ -> Anmeldung ueber EF1 (MR 2000), sonst
+        # ueber EF0 (MR 1000). Laut IEC 61375-3-1 nimmt ein Geraet nur an
+        # Event_Rounds der passenden Prioritaet teil (ET 0 hoch, 1 niedrig).
+        prio = 0xFFFF if o["ef1"] else 0
+        step("MD_CONF (%s)" % ("EF1" if o["ef1"] else "EF0"),
+             lambda: io(IOC["MD_CONF"],
+                        bytearray(struct.pack("<H", prio)), True))
         if o["ls"]:
             ports = [(LS_PORT, LS_SIZE, PD_SRC),
                      (FLG_LS_PORT, FLG_LS_SIZE, PD_SINK)]
@@ -445,15 +485,24 @@ def main():
         # Eingehende Messages je Verbindung (Quelle + Netzkopf)
         conns = {}
         got = {"rx": 0, "tx": 0, "antwort1": None, "daten2": None,
-               "cc_anfrage": False, "cc_reply": False}
+               "cc_anfrage": False, "cc_reply": False, "fremd": {}}
         reply_ref = (o["ref"] + 1) & 0xFFFF
 
         def handle(f):
             d = decode(f)
             got["rx"] += 1
             log.line("RX %s" % describe(d, names))
+            if d.get("data"):
+                log.line("   Text   %s" % to_text(d["data"]))
             raw.write("%.3f RX %s\n" % (time.time() - log.t0, f.hex()))
             raw.flush()
+            # Kommuniziert wird nur mit DIA1. Rufe anderer Geraete (z.B.
+            # WTB1, Geraet 6) werden protokolliert, aber nicht beantwortet -
+            # sonst stuenden deren CC/AK in der Sendequeue vor der Anfrage.
+            if d["src"] != o["ziel"]:
+                got["fremd"][d["src"]] = got["fremd"].get(d["src"], 0) + 1
+                log.line("   nicht von DIA1 - keine Antwort")
+                return
             back = swap_net(d["net"])
             side = 0x00 if d["caller"] else 0x80   # wir: Gegenseite
             key = (d["src"], d["net"])
@@ -502,8 +551,8 @@ def main():
                 got["antwort1"] = msg
                 log.line("== Antwort auf die Anfrage: %d Byte, Ref %04X"
                          % (len(msg), c["ref"]))
-            for k in range(0, len(msg), 32):
-                log.line("   %04X  %s" % (k, msg[k:k + 32].hex(" ")))
+            for ln in hex_text_lines(msg):
+                log.line(ln)
             if c["call"] and not o["keine_antwort"]:
                 net = swap_net(c["net"])
                 tx(bytes((0x17,)) + net + bytes((0x00,))
@@ -595,6 +644,9 @@ def main():
         for key, c in conns.items():
             log.line("   unvollstaendig: Ref %04X, %d von %d Byte"
                      % (c["ref"], len(c["data"]), c["len"]))
+        for src, n in sorted(got["fremd"].items()):
+            log.line("   Frames anderer Geraete (unbeantwortet): Geraet %d "
+                     "(0x%03X): %d" % (src, src, n))
         return 0
     finally:
         if started:
