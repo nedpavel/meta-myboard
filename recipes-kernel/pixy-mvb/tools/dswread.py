@@ -9,6 +9,14 @@ Datum des physischen Ports FC15 im Traffic Memory, und das ist ueber
 Herstellerimage wie auf dem eigenen. Es ist genau der Wert, den der
 Busmaster mit seiner Statusabfrage (F-Code 15) bekommt.
 
+Vorweg gibt es die Einrichtung der physischen Ports aus, ueber die
+Message-Daten laufen: Message-Quelle und -Senke (F-Code 12), die
+Ereignisports (F-Code 9), Mastership und Device Status, dazu die QDT der
+Message-Queues und den Master Frame Slot. Auf dem Herstellergeraet und
+auf dem eigenen ausgefuehrt, zeigt der Vergleich, ob der Controller fuer
+Messages gleich eingerichtet ist. Die Spalte "Nachbau" nennt das Wort 0,
+das pixy-mvblli schreibt.
+
 Gelesen werden nur die Ports und PCS der Service Area sowie SCR, MCR und
 DR aus der ersten Cachezeile des Registerblocks. Die zweite Cachezeile
 (SA+0x3C0..0x3FF mit IVR0/IVR1) wird nicht angefasst - sie wuerde der
@@ -38,8 +46,27 @@ DR = 0x388
 
 # Physischer Port FC15 (Index 7): Daten in SA+0x000.., PCS in SA+0x200..
 PP_FC15 = 7
-PCS1 = 0x200 + PP_FC15 * 8 + 2
+PCS = 0x200
+PCS1 = PCS + PP_FC15 * 8 + 2
 PCS_VP = 0x0040
+PCS_COUNT = 32
+MFS = 0x300
+QDT = 0x310
+
+# Physische Ports: Index, Name, Wort 0 im PCS, wie es pixy-mvblli
+# schreibt (MSNK mit irq > 0; mit irq = 0 ist es C404). None: setzt der
+# Nachbau nicht.
+PP_NAMES = (
+    (0x0, "FC8   Mastership", 0x8802),
+    (0x1, "EFS   Event Ident", 0x9402),
+    (0x4, "EF0   Ereignis 0", 0x9802),
+    (0x5, "EF1   Ereignis 1", 0x9802),
+    (0x6, "MOS", None),
+    (0x7, "FC15  Device Status", 0xF842),
+    (0x8, "MSRC  Message-Quelle", 0xC81C),
+    (0xC, "MSNK  Message-Senke", 0xC424),
+)
+PCS_TYPES = ("-", "Senke", "Quelle", "?")
 
 
 def dock(idx, page):
@@ -85,6 +112,39 @@ def decode(dsw):
     return s
 
 
+def pcs_decode(w0):
+    """PCS Wort 0: F-Code, Typ, DTI und die Bits QA, NUM, FE."""
+    flags = [n for bit, n in ((0x4, "QA"), (0x2, "NUM"), (0x1, "FE"))
+             if w0 & bit]
+    rest = w0 & 0x0318
+    s = "F%-2d %-6s DTI %d %s" % (w0 >> 12, PCS_TYPES[(w0 >> 10) & 3],
+                                  (w0 >> 5) & 7, " ".join(flags))
+    if rest:
+        s += " +%04X" % rest
+    return s
+
+
+def show_ports(rd):
+    names = dict((i, (n, ref)) for i, n, ref in PP_NAMES)
+    print("Physische Ports (PCS je 4 Worte, Wort 0 entschluesselt):")
+    print("   Idx  %-21s %-19s  %-32s %s"
+          % ("Port", "PCS", "Wort 0", "Nachbau"))
+    for i in range(PCS_COUNT):
+        w = [rd(PCS + i * 8 + k * 2) for k in range(4)]
+        name, ref = names.get(i, ("", None))
+        if not name and not any(w):
+            continue
+        mark = ""
+        if ref is not None:
+            mark = "%04X%s" % (ref, "" if w[0] == ref else "  <-- anders")
+        print("   %3X  %-21s %s  %-32s %s"
+              % (i, name, " ".join("%04X" % x for x in w),
+                 pcs_decode(w[0]), mark))
+    q = [rd(QDT + k * 2) for k in range(3)]
+    print("   QDT  xmit0 %04X  xmit1 %04X  rcve %04X     MFS %04X\n"
+          % (q[0], q[1], q[2], rd(MFS)))
+
+
 def line_mode(dr):
     if not dr & 0x0001:
         return "Zweileitungsbetrieb"
@@ -117,6 +177,7 @@ def main():
     print("Service Area TM+0x%05X  SCR %04X (%s)  MCR %04X (mcm %d)  "
           "DR %04X (%s)" % (sa, scr, IL_NAMES[scr & 3], mcr, mcr & 7,
                             dr, line_mode(dr)))
+    show_ports(rd)
     print("DSW = Port FC15, Seite laut VP im PCS. Bits nach IEC 61375-1.\n")
 
     for i in range(count):
