@@ -102,6 +102,18 @@ Der Layer bringt vier Rezepte mit:
 | `pixy-mvb-tools_1.0.bb` | die sechs Python-Werkzeuge nach `${bindir}` |
 | `pixy-mvb-tmreplay_1.0.bb` | `tm_replay` und `tm_replay-6x` samt Speicherabzug |
 
+Die Werkzeuge aus `pixy-mvb-tools`, alle in Python, alle ohne
+Herstellerbibliothek:
+
+| Werkzeug | Zweck |
+|---|---|
+| `mvbdiff.py` | Differenztest des LLI: feste Folge von ioctls, Abzüge nach jedem Schritt; `--go` Betrieb am Bus, `--md`/`--ping` Message-Daten, `--single-line`, `--dsw-md` |
+| `ddsabfrage.py` | DDS-Abfrage an DIA1 wie das Display, führt den Message-Transport beider Richtungen; `--ef1`, `--lebenszeichen` |
+| `dswread.py` | DSW und Einrichtung der Message- und Ereignisports über `/dev/mvb0`, auch neben der Herstelleranwendung |
+| `irqstate.py` | Zustand der Interruptkette vom MVBC bis zur CPU, nur lesend |
+| `mvbirqtest.py` | löst `FEV` aus und zählt, wo die Meldung ankommt |
+| `mvbsnap.py` | Abzug des Traffic Memory — liest die Interruptzeile, nur bei geschlossenem `/dev/mvblli0` |
+
 Ins Image kommen sie über die Packagegroup, eingehängt in
 `recipes-extended/images/myboard-image.bb`:
 
@@ -275,35 +287,84 @@ Traffic-Store-Beschreibung.
 
 `tests/tm_replay.c`, Test 12, prüft alle Punkte der Tabelle.
 
+### Message-Daten — am Bus bestätigt
+
+Am Laborbus mit `tools/ddsabfrage.py` (2026-10-12, Lauf `stufe8/ef1`):
+Das Gerät (IDU2, 240) startet die DDS-Abfrage an den Diagnoserechner
+DIA1 (46) so, wie das Anzeigedisplay sie im Herstellerbetrieb sendet, und
+führt den Transport beider Richtungen:
+
+| Zeit | Richtung | Frame |
+|---|---|---|
+| 70,052 s | IDU2 → DIA1 | CR 0x80, Ref 0043, 28 Byte Anfrage |
+| 70,063 s | DIA1 → IDU2 | CC 0x41 — 11 ms später |
+| 70,071 s | IDU2 → DIA1 | DT 0x98, Rest der Anfrage; DIA1 quittiert mit AK |
+| 70,102 s | DIA1 → IDU2 | Reply (CR 0x00), 10 Byte; IDU2 bestätigt mit CC 0xC1 |
+| 70,283–71,092 s | DIA1 → IDU2 | Call mit 1358 Byte DDS-Daten, ~62 DT, jedes von IDU2 per AK quittiert |
+| 71,196 s | IDU2 → DIA1 | Reply des Displays (Ref 0044), von DIA1 bestätigt |
+
+67 Frames in jede Richtung, keine Fehler. Die Sendequeue rückt von
+`2050` auf `2093` vor (67 Frames), `MR` fällt nach jedem Senden auf 0,
+`dbg_dti1` steigt um 83.
+
+**Der Schlüssel war die Priorität der Ereignisanmeldung.** Eine Message
+verlässt ein MVB-Gerät erst, wenn der Busadministrator es abfragt
+(IEC 61375-3-1, 8.3): Er startet mit einem General_Event_Request (F9) eine
+Event_Round für **eine** Priorität (`ET 0` hoch, `ET 1` niedrig). Ein Gerät
+mit wartendem Ereignis dieser Priorität antwortet mit seinem
+Event_Identifier_Response — hier `C0F0`, F-Code 12 und Adresse 240 —, der
+Master schickt genau das als Event_Read_Request zurück, und das Gerät
+sendet das nächste Message-Frame. `mvb_sndp()` legt das Ereignis bei jedem
+Senden in `EF0` oder `EF1` an und setzt `MR` (`1000` bzw. `2000`). Welcher
+der beiden Ports, entscheidet die Queue-Priorität aus `MD_CONF`: negativ
+heißt `EF1`.
+
+Mit `MD_CONF = 0` (`EF0`) blieb `MR` am Laborbus dauerhaft auf `1000`, die
+Sendequeue stand, nichts ging hinaus — in allen Läufen der Stufen 4–7.
+Mit negativer Priorität (`EF1`) holt der FLG die Anmeldung sofort ab. Der
+Busadministrator des ICN-Traktionsbusses fragt also nur die Priorität ab,
+die zu `EF1` gehört. **Eine Anwendung muss `MD_CONF` mit negativer
+`q_tq_priority` aufrufen** (`ABI.md`).
+
+Ebenfalls am Bus belegt:
+
+* **Empfang über den Interrupt** (Lauf `stufe7/ls-neustart`): Nach einem
+  Neustart des FLG ruft das WTB-Gateway (WTB1, Gerät 6, Funktion `d2`)
+  IDU2 an. Alle Rufe kommen über `DTI1` an, die Empfangsqueue rückt vor.
+* **Adressen** laut Busbeschreibung `MVB (trak).txt`: IDU2 `0F0H` = 240,
+  DIA1 als Teilnehmer auf VCU1 `02EH` = 46, WTB1 `06H`, Busadministratoren
+  TBV1 (VCU3, `030H`) und TBV2 (VCU5, `034H`).
+* **Lebenszeichen IDU2-491**: `IDU2-XMVBLifeSig`, CARD16 big-endian ab
+  Byte 0, Zyklus 256 ms, gelesen von FLG1N, FLG2N und IDU1. Byte 2 trägt
+  Lüfterbefehle an FLG1N. `ddsabfrage.py --lebenszeichen` zählt es im
+  Sekundentakt hoch wie die Herstelleranwendung.
+
 ### Offen
 
-**Message-Daten.** Am Gerät geprüft (2026-10-08, `mvbdiff.py --go --md`
-und `--go --ping`):
+**Was davon nötig ist.** Der erfolgreiche Lauf hatte zugleich das
+Lebenszeichen auf 491, das MD-Bit im DSW (`--dsw-md`, verlangt von
+IEC 61375-3-1 Fig. 58), den Einleitungsbetrieb und einen Neustart des FLG
+während des Vorlaufs. Geklärt ist nur `EF1`; ob die übrigen gebraucht
+werden, zeigen Läufe mit je einem davon.
 
-* Einhängen in die Sendequeues, `MD_FLUSH_QUEUE`, erneutes Einhängen,
-  `EINVAL` für Port 256 und `ENETDOWN` für `read()` vor `START` —
-  wie erwartet.
-* **Gesendet wird nichts.** `xmit_q0`/`xmit_q1` stehen von `START` über
-  60 s Betrieb bis `STOP` unverändert. Messages sendet ein MVB-Gerät
-  erst, wenn der Busmaster es abfragt; das tut er nicht.
-* **Empfangen wird nichts.** `rcve_q` unverändert, `dbg_dti1 = 0`.
-* Die Vermutung aus `PLAN.md`, das vom Test verstellte DSW halte den
-  Busmaster ab, ist widerlegt: das DSW wird seit Schritt 26
-  zurückgeschrieben, gesendet wird trotzdem nicht.
+**Was in der Anwendung landen muss.** `MD_CONF` mit negativer Priorität
+sicher; das DSW-Bit `MD` setzt der Treiber nicht von selbst, das bleibt
+`WRITE_DSW` der Anwendung. Das Lebenszeichen auf 491 sendet ohnehin die
+Anwendung.
 
-Das DSW meldet `00C0`: Leitung A aktiv, redundante Leitung gestört,
-keine Fähigkeitsbits — auch nicht `MD` (`0x1000`). Nächste Prüfungen:
-`--dsw-md` (meldet Message-Fähigkeit) und `--single-line`
-(Einleitungsbetrieb wie die Herstelleranwendung, `DR 150D`). Den
-Vergleichswert liefert das DSW eines Geräts mit Herstellerstand im
-laufenden Betrieb (`tools/dswread.py`).
+**DDS-Daten.** Die 1358 Byte von DIA1 sind binäre Datensätze (absteigende
+Nummer, wiederkehrende 4-Byte-Werte), kein Text. Ohne Satzbeschreibung
+nicht weiter entschlüsselt.
 
-**Fehlerzähler.** Im Zweileitungsbetrieb zählt der MVBC Fehler auf
-etwa 31 % der Frames, solange er nur mithört (`CONFIG`), und auf etwa
-11 % im Betrieb — alle auf Leitung A, Leitung B steht auf 0. `DR` meldet
-eine Leitungsstörung (`RLD`), das DSW gibt sie an den Busmaster weiter.
-Naheliegend: Leitung B ist am Prüfaufbau nicht angeschlossen oder nicht
-abgeschlossen. Der Datenempfang leidet nicht darunter.
+**Fehlerzähler.** Der MVBC zählt Fehler auf etwa 31 % der Frames, solange
+er nur mithört (`CONFIG`), und auf etwa 11 % im Betrieb — alle auf Leitung
+A, Leitung B steht auf 0. Im Einleitungsbetrieb (`--single-line`, `DR
+150D` wie beim Hersteller) sind es ebenfalls 11 %; an Leitung B liegt es
+also nicht. Was der Zähler hier erfasst, ist ungeklärt. Der Datenverkehr
+leidet nicht darunter.
+
+**Vergleich mit dem Original-LLI** mit den korrigierten Werkzeugen
+(ohne Zugriff auf die Interruptzeile) ist nicht wiederholt.
 
 ## Gegenlesen gegen das Dekompilat
 

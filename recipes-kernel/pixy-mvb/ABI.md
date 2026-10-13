@@ -183,7 +183,7 @@ der Controller nicht läuft".
 | 11 | `PD_NSDB` | Zeiger auf `mvb_config_nsdb` | prüft die Eingabe und liefert dann **`ENOSYS`** |
 | 12 | `PD_CONF` | Zeiger auf `PixyMvblliConfigPorts` | Portliste, siehe unten |
 | 13 | `MD_NSDB` | — | nicht im Verteiler, `EINVAL` |
-| 14 | `MD_CONF` | Zeiger auf `PixyMvblliConfigMex` | setzt die Sendequeue-Priorität, schaltet Message-Daten frei |
+| 14 | `MD_CONF` | Zeiger auf `PixyMvblliConfigMex` | setzt die Sendequeue-Priorität, schaltet Message-Daten frei. **Negativ = Anmeldung über `EF1`**, siehe unten |
 | 15 | `BA_NSDB` | — | nicht im Verteiler, `EINVAL` |
 | 16 | `DISABLE_PORT` | **Wert**, Portadresse ≤ 0xFFF | nur Quellports, setzt sie passiv |
 | 17 | `READ_TM` | Zeiger auf `mvb_tm` | `ts_id`, `size_id` = `mcm`. **`address` ist ein Kernelzeiger und im Userspace nutzlos** — das TM erreicht man über `mmap` auf `/dev/mvb0` |
@@ -234,6 +234,24 @@ verworfen und `EIO` gemeldet.
 **Quellports bleiben zunächst passiv.** Erst das erste `write()` typisiert
 sie. Das verhindert, dass eine Station nach `START` Nullen sendet.
 
+#### MD_CONF
+
+```c
+PixyMvblliConfigMex mex = { .q_tq_priority = 0xFFFF };   /* negativ: EF1 */
+ioctl(fd, IOCTL_PIXY_MVBLLI_MD_CONF, &mex);
+```
+
+`q_tq_priority` entscheidet, über welchen Ereignisport das Gerät wartende
+Messages beim Busadministrator anmeldet: als `s16` negativ → `EF1`
+(`MR 2000`), sonst `EF0` (`MR 1000`). Die Priorität des einzelnen Frames
+(`MD_HIGH`/`MD_LOW`) wählt nur die Sendequeue, nicht den Ereignisport.
+
+**Am ICN-Traktionsbus muss der Wert negativ sein.** Der Busadministrator
+fragt dort nur die Event_Round ab, die zu `EF1` gehört. Mit `0` bleibt
+`MR` auf `1000` stehen, und keine Message verlässt das Gerät — am
+Laborbus gemessen, 2026-10-12 (README, „Message-Daten — am Bus
+bestätigt").
+
 ## Prozessdaten
 
 Container für `read()` und `write()`, 38 Byte:
@@ -276,7 +294,7 @@ die Docks nicht parallel über `mmap` anfassen.
 ### Senden
 
 ```c
-mvb_port m = { .type = 3, .port = 6 };   /* MD_LOW an Gerät 6 */
+mvb_port m = { .type = 3, .port = 46 };  /* MD_LOW an DIA1, Gerät 46 */
 memcpy(&m.data[2], nutzdaten, 28);       /* ab Byte 4! */
 write(fd, &m, sizeof(m));                /* liefert 32 */
 ```
@@ -289,6 +307,21 @@ beginnen die Nutzdaten also ebenfalls bei Byte 4 des Frames.
 
 `type` wählt die Sendequeue: `MD_HIGH` die kurze mit hoher Priorität,
 `MD_LOW` die lange. Ist die Queue voll, kommt `ENOBUFS`.
+
+**`write()` hängt das Frame nur ein — hinaus geht es erst auf Abruf des
+Busadministrators** (IEC 61375-3-1, 8.3). Der Treiber legt dabei das
+Event_Identifier_Response in `EF0` oder `EF1` an (F-Code 12 plus eigene
+Adresse, bei 240 also `C0F0`) und setzt `MR`. Der Master startet eine
+Event_Round mit einem General_Event_Request (F9) für eine Priorität; ein
+Gerät mit passendem wartendem Ereignis antwortet mit dem Identifier, der
+Master schickt ihn als Event_Read_Request (`F12|240`) zurück, und der
+Controller sendet das nächste Frame der Queue. Danach rückt deren QDT
+vor, und `MR` fällt auf 0. Bleibt `MR` stehen, fragt der Master die
+Priorität des gewählten Ports nicht ab — siehe `MD_CONF`.
+
+Beim ersten Senden trägt der Treiber die Sendequeues erst in die QDT ein
+(`0000` → `2000`/`2050`). Wer am QDT ablesen will, ob gesendet wurde,
+vergleicht deshalb mit dem Stand **nach** dem `write()`.
 
 Die Felder dahinter — `SZ`, `final`, `origin`, `MTC`, `conn_ref` und die
 Transport Data — reicht der Treiber unverändert durch. **Das ist die
@@ -377,6 +410,16 @@ wieder zusammensetzen.
 
 **`close()` nimmt die Station vom Bus.** Kein Prozessende ohne Absicht.
 
+**`MD_CONF` mit `0` meldet über `EF0` an.** Am ICN-Traktionsbus fragt der
+Busadministrator diesen Port nie ab: Die Messages bleiben in der Queue,
+ohne Fehler und ohne Meldung. Negativ übergeben (`EF1`).
+
+**Das DSW trägt das Bit `MD` nicht von selbst.** IEC 61375-3-1 Fig. 58
+verlangt es von einem Gerät mit Message-Fähigkeit; nach `HWINIT` steht
+das DSW aber auf `00C0` (Leitung A, Leitungsstörung). Setzen muss es die
+Anwendung mit `WRITE_DSW`. Ob der Busadministrator am ICN-Bus darauf
+achtet, ist noch nicht getrennt geprüft.
+
 ## Startreihenfolge
 
 So kommt eine Station auf den Bus. Die Reihenfolge ist die der
@@ -387,9 +430,11 @@ fd = open("/dev/mvblli0", O_RDWR);          /* initialisiert den Controller */
 
 ioctl(fd, IOCTL_PIXY_MVBLLI_HWINIT, &ts);          /* ts_type 1, ownership 1 */
 ioctl(fd, IOCTL_PIXY_MVBLLI_PD_CONF, &portliste);  /* Docks und STSR         */
-ioctl(fd, IOCTL_PIXY_MVBLLI_MD_CONF, &mex);        /* Message-Daten frei     */
+ioctl(fd, IOCTL_PIXY_MVBLLI_MD_CONF, &mex);        /* Message-Daten frei;
+                                                      q_tq_priority < 0: EF1 */
 ioctl(fd, IOCTL_PIXY_MVBLLI_WRITE_DEV_ADDR, 240);  /* Wert, nicht Zeiger     */
 ioctl(fd, IOCTL_PIXY_MVBLLI_WRITE_CONTROL, &ctrl); /* Leitung, Antwortfenster*/
+ioctl(fd, IOCTL_PIXY_MVBLLI_WRITE_DSW, 0x10001000u); /* MD-Bit, Fig. 58     */
 ioctl(fd, IOCTL_PIXY_MVBLLI_START);                /* MVB_GO                 */
 
 /* Betrieb: read/write für PD, write/poll/read für MD, MD_GET_STATUS */

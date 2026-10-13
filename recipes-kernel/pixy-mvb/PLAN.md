@@ -299,6 +299,42 @@ gesendet wird weiterhin nichts. Nächste Prüfungen: `--dsw-md` (MD-Bit
 `0x1000` im DSW) und `--single-line`; als Referenz das DSW des
 Herstellerstands im Betrieb (`tools/dswread.py`).
 
+### Nachtrag 2026-10-12: Message-Daten laufen — die Ereignispriorität
+
+Laborbus, Wrynose-Image, nachgebaute Module, Werkzeuge ohne Zugriff auf
+die Interruptzeile. Der Weg in Läufen:
+
+| Lauf | Konstellation | Ergebnis |
+|---|---|---|
+| Stufe 5 A–F | `mvbdiff --md`, mit `--dsw-md` und/oder `--single-line` | Sendequeue steht, `MR 1000`, nichts empfangen. DSW-Bit `MD` und Einleitungsbetrieb ändern nichts; die Fehlerquote bleibt auch im Einleitungsbetrieb bei 11 % |
+| Stufe 6 | `ddsabfrage.py`: DDS-Abfrage nach dem Mitschnitt des Displays, an „Gerät 6" | nicht gesendet. Die erste Meldung „gesendet" war ein Fehlalarm: beim ersten Senden trägt der Treiber die Queues erst in die QDT ein (`0000` → `2000/2050`) |
+| Stufe 7 `ls-alle` | Lebenszeichen auf 491 (+ 492/498 mit Nullen), DIA1 an Adresse 46 | Lebenszeichen läuft, FLG da, Anfrage bleibt liegen (`MR 1000`) |
+| Stufe 7 `ls-neustart` | dazu FLG und VCU1 im Vorlauf neu gestartet | **Empfang belegt**: das WTB-Gateway (Gerät 6, Funktion `d2`) ruft IDU2 an, 17 Frames über `DTI1`. Unsere CC gehen nicht hinaus, WTB1 wiederholt jeden Ruf dreimal |
+| Stufe 8 `ef1` | `MD_CONF` mit negativer Priorität, sonst wie oben | **alles läuft**: Anfrage, CC nach 11 ms, Reply, 1358 Byte DDS-Daten von DIA1, Schluss-Reply bestätigt; 67 Frames je Richtung |
+
+**Ursache.** IEC 61375-3-1, 8.3: Der Busadministrator fragt wartende
+Messages über Event_Rounds ab, jede für eine Priorität (`ET 0`/`ET 1`).
+Ein Gerät beteiligt sich nur an der Runde seiner Priorität. `mvb_sndp()`
+meldet über `EF0` an, wenn `q_tq_priority` aus `MD_CONF` nicht negativ
+ist, sonst über `EF1`. Die Werkzeuge übergaben `0`; der Busadministrator
+am ICN-Bus fragt nur die Runde ab, die zu `EF1` gehört. Die
+Herstelleranwendung übergibt offenbar einen negativen Wert — mit ihr
+liefen Messages auf denselben Modulen (oben, „Boot mit beiden
+Nachbauten"). Der Treiber war richtig, das Werkzeug nicht.
+
+**Was der Mitschnitt und die Busbeschreibung geklärt haben.**
+DIA1 ist Teilnehmer auf VCU1, Adresse `02EH` = 46; „Gerät 6" aus der
+`--ping`-Vorlage ist das WTB-Gateway WTB1. IDU2 sendet sein Lebenszeichen
+`IDU2-XMVBLifeSig` auf Port 491 (CARD16 big-endian, 256 ms), FLG1N, FLG2N
+und IDU1 lesen es. Ohne laufendes Lebenszeichen rief niemand IDU2 an;
+nach einem FLG-Neustart mit Lebenszeichen rief WTB1 an. Ob DIA1 das
+Lebenszeichen für die DDS-Abfrage verlangt, ist nicht getrennt geprüft.
+
+**Offen.** Welche der übrigen Bedingungen des erfolgreichen Laufs nötig
+sind (Lebenszeichen, DSW-Bit `MD`, Einleitungsbetrieb, FLG-Neustart);
+Satzbeschreibung der DDS-Daten; `mvbdiff.py` übergibt weiterhin
+`MD_CONF = 0`.
+
 ### Anwendung auf den nachgebauten Modulen
 
 Aus `systemctl status session-1.scope`: `getty@tty1` meldet root an
@@ -546,5 +582,5 @@ Abweichungen vom Original, beide bewusst und abschaltbar:
 | 1 | erledigt, am Gerät bestätigt |
 | 2 | erledigt. Anwendung läuft auf beiden Nachbauten, Prozess- und Message-Daten fließen (576 DTI1) |
 | 3 | für den bisherigen Testumfang erledigt (Lauf 3) |
-| 4 | vorbereitet: `mvbdiff --md` sendet niedrig/hoch, Port 256, Flush, Senden nach Flush. Durch den Lauf mit der Anwendung überholt: Messages laufen im Betrieb über den Interrupt |
-| 5 | Module im Betrieb, Ladeweg über `modprobe.d` eingerichtet, Dokumentation steht. Offen: `--ping` gegen ein zweites Gerät, Portierung auf einen neueren Kernel |
+| 4 | erledigt (2026-10-12): Message-Daten ohne Herstelleranwendung am Laborbus in beide Richtungen, DDS-Abfrage an DIA1 mit `ddsabfrage.py --ef1`. Voraussetzung: `MD_CONF` mit negativer Priorität (Anmeldung über `EF1`) |
+| 5 | Module im Betrieb, Ladeweg über `modprobe.d` eingerichtet, Dokumentation steht. Wrynose-Image (Kernel 6.18) gebaut und am Gerät geprüft. Offen: welche Bedingungen außer `EF1` nötig sind, `mvbdiff.py --ef1`, `mvbsnap.py` ohne Interruptzeile |
