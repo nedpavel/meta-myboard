@@ -5,7 +5,21 @@
 # nicht geladen, scheitert das Laden mit "not available". Deshalb wird
 # das Modul nicht per modules-load.d gestartet, sondern hier - diese
 # Regel feuert erst, wenn der Board-Treiber sein Geraet angelegt hat.
+#
+# Geladen wird ueber den kmod-Builtin von udev, nicht ueber einen Pfad zu
+# modprobe: das liegt je nach Image unter /sbin oder /usr/sbin, und der
+# frueher hier eingetragene /usr/bin/modprobe existiert nicht - das Modul
+# wurde nie geladen.
 ################################################################################
-ACTION=="add", SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB", RUN+="/usr/bin/modprobe pixy_mvblli"
 ACTION=="add", SUBSYSTEM=="pixy-mvblli", SYMLINK+="mvblli", MODE="0666"
+################################################################################
+# Einmal oeffnen und schliessen: erst open() richtet das TM-Fenster der
+# ISA-Bruecke ein (BASR0/BASR1), close() setzt den Controller zurueck, das
+# Fenster bleibt bis zum Neustart. Ohne das lesen Werkzeuge, die ueber
+# /dev/mvb0 auf das Traffic Memory zugreifen (mvbsnap, irqstate, dswread,
+# das Loeschen in mvbdiff), bis zum ersten open() nur Muster.
+################################################################################
+ACTION=="add", SUBSYSTEM=="pixy-mvblli", RUN+="/bin/sh -c 'exec 3<>$devnode'"
+################################################################################
+ACTION=="add", SUBSYSTEM=="pixy-mvb", ATTR{board_type}=="MVB", RUN{builtin}+="kmod load pixy_mvblli"
 ################################################################################

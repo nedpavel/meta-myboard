@@ -8,9 +8,15 @@ inherit packagegroup
 
 PACKAGES = "${PN} ${PN}-tests"
 
+# kernel-module-* bringt nur die .ko (und fuer pixy-mvb den Eintrag in
+# modules-load.d). Die udev-Regeln 40-mvb.rules und 41-mvblli.rules liegen
+# in den Grundpaketen pixy-mvb und pixy-mvblli - ohne sie gibt es weder
+# /dev/mvb und /dev/mvblli noch das automatische Laden von pixy_mvblli.
 RDEPENDS:${PN} = "\
     kernel-module-pixy-mvb \
     kernel-module-pixy-mvblli \
+    pixy-mvb \
+    pixy-mvblli \
     pixy-mvb-tools \
     "
 

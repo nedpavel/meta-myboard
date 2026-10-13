@@ -130,7 +130,21 @@ daneben.
 geladen, `pixy-mvblli` **nicht**: Es öffnet `/dev/mvb0` schon im
 `module_init` und scheitert, wenn der Board-Treiber noch fehlt. Es kommt
 deshalb über `41-mvblli.rules`, die erst feuert, wenn das Gerät da ist —
-derselbe Weg, den der Hersteller geht.
+derselbe Weg, den der Hersteller geht. Geladen wird mit dem kmod-Builtin
+von udev (`RUN{builtin}+="kmod load pixy_mvblli"`), nicht über einen Pfad
+zu `modprobe`.
+
+Sobald `/dev/mvblli0` da ist, öffnet und schließt dieselbe Regel es
+einmal. Erst `open()` richtet das TM-Fenster der ISA-Brücke ein
+(`BASR0`/`BASR1`); es bleibt nach `close()` bis zum Neustart stehen.
+Ohne das lesen Werkzeuge, die über `/dev/mvb0` auf das Traffic Memory
+zugreifen, bis zum ersten `open()` einer Anwendung nur Muster.
+
+Die Regeln liegen in den Grundpaketen `pixy-mvb` und `pixy-mvblli`, die
+`.ko` in den `kernel-module-*`-Paketen. Die Packagegroup zieht deshalb
+beide Sorten. Bis 2026-10-13 zog sie nur die Module — die Regeln fehlten
+im Image, `pixy_mvblli` musste von Hand geladen werden, und `/dev/mvb`
+und `/dev/mvblli` gab es nicht.
 
 **Die udev-Regeln sind nicht schmückend.** Sie legen `/dev/mvb` und
 `/dev/mvblli` an. Fehlen sie, gibt es nur `/dev/mvb0` und `/dev/mvblli0`,
