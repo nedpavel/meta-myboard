@@ -542,7 +542,16 @@ def main():
                 ("Lebenszeichen 491" + (" + 492/498" if o["alle"] else ""))
                 if o["ls"] else "ohne Lebenszeichen", o["vorlauf"]))
 
-    fd = os.open(DEV, os.O_RDWR)
+    try:
+        fd = os.open(DEV, os.O_RDWR)
+    except OSError as e:
+        log.line("%s nicht zu oeffnen: %s%s" % (
+            DEV, os.strerror(e.errno),
+            " - laeuft der Dienst? systemctl stop idu2-mvb"
+            if e.errno == errno.EBUSY else ""))
+        raw.close()
+        log.close()
+        return 1
 
     def io(req, arg=0, mutate=False):
         if isinstance(arg, bytearray):

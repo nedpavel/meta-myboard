@@ -1,0 +1,11 @@
+# Optionen fuer idu2-mvb.py (Dienst idu2-mvb)
+#
+#   --zwei-leitungen   Zweileitungsbetrieb statt Leitung A allein
+#   --ohne-dsw-md      MD-Bit im DSW nicht setzen
+#   --ef0              Messages ueber EF0 statt EF1 anmelden
+#   --takt S           Lebenszeichen alle S Sekunden erhoehen (Vorgabe 1)
+#   --alle-quellen     auch Port 492 und 498 senden (nur Nullen)
+#   --socket PFAD      Steuersocket (Vorgabe /run/idu2-mvb.sock)
+#
+# Nach einer Aenderung: systemctl restart idu2-mvb
+OPTIONEN=""

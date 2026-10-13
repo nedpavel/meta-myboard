@@ -459,7 +459,8 @@ def wipe_tm(log):
     und nie im Registerblock SA+0x380..0x3FF."""
     busy = holders(DEV)
     if busy:
-        log.line("ABBRUCH: %s ist offen (PID %s) - nicht geloescht"
+        log.line("ABBRUCH: %s ist offen (PID %s) - nicht geloescht. "
+                 "Laeuft der Dienst? systemctl stop idu2-mvb"
                  % (DEV, ", ".join(map(str, busy))))
         return False
 
@@ -655,7 +656,15 @@ def run(outdir, allow_md, go):
     finally:
         os.close(fb)
 
-    fd = os.open(DEV, os.O_RDWR)
+    try:
+        fd = os.open(DEV, os.O_RDWR)
+    except OSError as e:
+        log.line("%s nicht zu oeffnen: %s%s" % (
+            DEV, os.strerror(e.errno),
+            " - laeuft der Dienst? systemctl stop idu2-mvb"
+            if e.errno == E.EBUSY else ""))
+        log.close()
+        sys.exit(3)
     log.line("geoeffnet: " + DEV)
 
     # Sicherheitsabfrage. Solange der Controller in CONFIG steht, bleibt

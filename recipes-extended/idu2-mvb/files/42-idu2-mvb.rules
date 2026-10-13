@@ -1,0 +1,11 @@
+################################################################################
+# IDU2 am MVB ab dem Start.
+#
+# Sobald pixy_mvblli /dev/mvblli0 angelegt hat (41-mvblli.rules laedt das
+# Modul und oeffnet das Geraet einmal), bekommt systemd eine Geraete-Unit
+# dev-mvblli0.device und startet idu2-mvb.service. Ohne diesen Dienst
+# sendet das Display kein Lebenszeichen, FLG und DIA1 behandeln IDU2 als
+# nicht vorhanden, und die DDS-Seite der Oberflaeche hat keinen Partner.
+################################################################################
+ACTION=="add", SUBSYSTEM=="pixy-mvblli", TAG+="systemd", ENV{SYSTEMD_WANTS}+="idu2-mvb.service"
+################################################################################

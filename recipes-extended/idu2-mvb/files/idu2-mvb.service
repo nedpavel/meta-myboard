@@ -1,0 +1,14 @@
+[Unit]
+Description=IDU2 am MVB: Lebenszeichen und DDS-Abfrage
+Documentation=file:/usr/bin/idu2-mvb.py
+# Gestartet von 42-idu2-mvb.rules, sobald /dev/mvblli0 da ist;
+# verschwindet das Geraet (rmmod), endet auch der Dienst
+BindsTo=dev-mvblli0.device
+After=dev-mvblli0.device
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/idu2-mvb
+ExecStart=/usr/bin/python3 /usr/bin/idu2-mvb.py $OPTIONEN
+Restart=on-failure
+RestartSec=5

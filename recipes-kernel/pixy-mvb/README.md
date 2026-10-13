@@ -146,6 +146,29 @@ beide Sorten. Bis 2026-10-13 zog sie nur die Module — die Regeln fehlten
 im Image, `pixy_mvblli` musste von Hand geladen werden, und `/dev/mvb`
 und `/dev/mvblli` gab es nicht.
 
+**IDU2 am Bus ab dem Start: Dienst `idu2-mvb`.** Ohne laufendes
+Lebenszeichen auf Port 491 behandeln FLG und DIA1 das Display (IDU2) als
+nicht vorhanden. Das Rezept `recipes-extended/idu2-mvb` bringt dafür einen
+Dienst: `42-idu2-mvb.rules` gibt `/dev/mvblli0` eine systemd-Geräte-Unit
+und startet damit `idu2-mvb.service`. Der hält IDU2 (Gerät 240) am Bus —
+Einleitungsbetrieb auf Leitung A, MD-Bit im DSW, Anmeldung über `EF1`, wie
+im erfolgreichen Lauf `stufe8/ef1` — und zählt das Lebenszeichen im
+Sekundentakt hoch. Optionen in `/etc/default/idu2-mvb`, Meldungen mit
+`journalctl -u idu2-mvb`.
+
+Über den Unix-Socket `/run/idu2-mvb.sock` (eine JSON-Zeile je Anfrage und
+Antwort) führt der Dienst außerdem die DDS-Abfrage an DIA1 aus — mit
+denselben Frames wie `ddsabfrage.py` — und liefert die Meldungssätze
+entschlüsselt zurück. Die Bedienoberfläche nutzt das auf der Seite
+„DDS-Speicher": Knopf „DDS-Meldungen abrufen" oder Taste 1, Anzeige
+aller Sätze als Tabelle. Weil der Dienst schon am Bus ist, beginnt die
+Abfrage sofort.
+
+`/dev/mvblli0` ist exklusiv: Solange der Dienst läuft, melden
+`ddsabfrage.py` und `mvbdiff.py` „belegt". Vorher `systemctl stop
+idu2-mvb`, danach `systemctl start idu2-mvb`. `ddsabfrage.py
+--lebenszeichen` sendet in der Zwischenzeit selbst.
+
 **Die udev-Regeln sind nicht schmückend.** Sie legen `/dev/mvb` und
 `/dev/mvblli` an. Fehlen sie, gibt es nur `/dev/mvb0` und `/dev/mvblli0`,
 und ein Programm, das den Symlink öffnet, scheitert mit `ENOENT`, bevor

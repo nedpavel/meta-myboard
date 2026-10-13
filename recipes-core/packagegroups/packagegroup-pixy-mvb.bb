@@ -18,6 +18,7 @@ RDEPENDS:${PN} = "\
     pixy-mvb \
     pixy-mvblli \
     pixy-mvb-tools \
+    idu2-mvb \
     "
 
 # Die Offline-Pruefung der Treiberlogik. Getrennt, weil sie keine
