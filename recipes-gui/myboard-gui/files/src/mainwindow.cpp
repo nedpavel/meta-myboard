@@ -33,8 +33,11 @@
 #include <QHeaderView>
 #include <QAbstractItemView>
 #include <QColor>
+#include <QJsonObject>
+#include <QJsonArray>
 #include "canreader.h"
 #include "canopen.h"
+#include "ddsclient.h"
 #include "ui_infopage.h"   /* aus infopage.ui via uic (AUTOUIC) generiert */
 
 /* ------------------------------------------------------------------ */
@@ -164,10 +167,17 @@ MainWindow::MainWindow(const QSize &screen, QWidget *parent)
     for (const auto &pg : pages) {
         if (QString::fromUtf8(pg.title) == QStringLiteral("Prozesswert"))
             m_stack->addWidget(buildProzesswertPage());   /* Live-CAN-Werte */
+        else if (QString::fromUtf8(pg.title) == QStringLiteral("DDS-Speicher"))
+            m_stack->addWidget(buildDdsPage());           /* DDS von DIA1   */
         else
             m_stack->addWidget(createSubPage(pg.title, pg.prosa));
         m_pageTitles << pg.title;
     }
+
+    /* DDS-Abfrage laeuft ueber den Dienst idu2-mvb (haelt /dev/mvblli0) */
+    m_dds = new DdsClient(this);
+    connect(m_dds, &DdsClient::ergebnis, this, &MainWindow::onDdsErgebnis);
+    connect(m_dds, &DdsClient::fehler, this, &MainWindow::onDdsFehler);
 
     /* Seite 5 — App-Update ab USB-Stick (Index UPDATE_PAGE) */
     m_stack->addWidget(buildUpdatePage());
@@ -727,6 +737,162 @@ void MainWindow::onCanFrame(quint32 canId, const QByteArray &data)
 }
 
 /* ------------------------------------------------------------------ */
+/* DDS-Seite — Meldungen aus dem Stoerspeicher von DIA1                  */
+/* Abgefragt ueber den Dienst idu2-mvb, der das Display dauernd am MVB   */
+/* haelt; die Abfrage beginnt deshalb sofort, ohne Initialisierungszeit. */
+/* ------------------------------------------------------------------ */
+
+/* Spalten der DDS-Tabelle: JSON-Feld des Dienstes und Ueberschrift */
+static const struct { const char *key; const char *head; } DDS_COLS[] = {
+    { "nr",         "Nr"       },
+    { "kommt",      "Kommt"    },
+    { "geht",       "Geht"     },
+    { "status",     "Status"   },
+    { "prio",       "P"        },
+    { "text",       "Meldung"  },
+    { "stoer",      "Stör"     },
+    { "knoten",     "Knoten"   },
+    { "zaehler",    "Zähl"     },
+    { "uic",        "UIC/Sub"  },
+    { "ref7",       "7xxx"     },
+    { "ref8",       "8xxx"     },
+    { "ereignisnr", "EreignisNr" },
+    { "meldnr",     "MeldNr"   },
+};
+static const int DDS_COL_COUNT = int(sizeof(DDS_COLS) / sizeof(DDS_COLS[0]));
+
+QWidget *MainWindow::buildDdsPage()
+{
+    QFrame *page = new QFrame();
+    page->setStyleSheet(
+        QString("QFrame { background-color: %1; border: 1px solid %2; }")
+            .arg(COL_BG).arg(COL_BORDER));
+
+    QVBoxLayout *lay = new QVBoxLayout(page);
+    lay->setContentsMargins(px(8), px(6), px(8), px(6));
+    lay->setSpacing(px(5));
+
+    QLabel *titleLabel = new QLabel("DDS-Meldungen von DIA1");
+    QFont tf; tf.setPointSizeF(pt(14)); tf.setBold(true);
+    titleLabel->setFont(tf);
+    titleLabel->setStyleSheet(QString("color: %1; border: none;").arg(COL_BLUE));
+    lay->addWidget(titleLabel);
+
+    m_ddsStatus = new QLabel("Noch nicht abgefragt — Knopf oder Taste 1.");
+    m_ddsStatus->setWordWrap(true);
+    QFont sf; sf.setPointSizeF(pt(9));
+    m_ddsStatus->setFont(sf);
+    m_ddsStatus->setStyleSheet("color: #888888; border: none;");
+    lay->addWidget(m_ddsStatus);
+
+    /* Eine Zeile je Meldungssatz (00 80 00 ...), neueste zuerst — so wie
+       DIA1 sie liefert. Breite Tabelle: horizontal scrollbar. */
+    m_ddsTable = new QTableWidget(0, DDS_COL_COUNT);
+    QStringList headers;
+    for (const auto &c : DDS_COLS)
+        headers << QString::fromUtf8(c.head);
+    m_ddsTable->setHorizontalHeaderLabels(headers);
+    m_ddsTable->setMinimumSize(0, 0);   /* Fenster nicht aufweiten */
+    m_ddsTable->verticalHeader()->setVisible(false);
+    m_ddsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_ddsTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_ddsTable->setFocusPolicy(Qt::NoFocus);
+    m_ddsTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_ddsTable->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    QFont tbf; tbf.setPointSizeF(pt(8));
+    m_ddsTable->setFont(tbf);
+    m_ddsTable->horizontalHeader()->setFont(tbf);
+    m_ddsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_ddsTable->setStyleSheet(
+        "QTableWidget { background-color: white; color: #202020; border: 1px solid #999; }"
+        "QHeaderView::section { background-color: #E0E0E0; color: #202020; padding: 1px; }");
+    lay->addWidget(m_ddsTable, 1);
+
+    QString btnStyle = QString(
+        "QPushButton {"
+        "  background-color: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  font-size: %5px;"
+        "  padding: %6px %7px;"
+        "}"
+        "QPushButton:pressed { background-color: %4; color: white; }"
+        "QPushButton:disabled { color: #A0A0A0; }")
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE)
+        .arg(px(13)).arg(px(5)).arg(px(18));
+
+    m_ddsButton = new QPushButton("DDS-Meldungen abrufen  (1)");
+    m_ddsButton->setStyleSheet(btnStyle);
+    m_ddsButton->setFocusPolicy(Qt::NoFocus);
+    connect(m_ddsButton, &QPushButton::clicked, this, &MainWindow::startDds);
+
+    QPushButton *back = new QPushButton("◄  Zurück  (C)");
+    back->setStyleSheet(btnStyle);
+    back->setFocusPolicy(Qt::NoFocus);
+    connect(back, &QPushButton::clicked, this, &MainWindow::backToMenu);
+
+    QHBoxLayout *btnRow = new QHBoxLayout();
+    btnRow->addWidget(back);
+    btnRow->addStretch();
+    btnRow->addWidget(m_ddsButton);
+    lay->addLayout(btnRow);
+
+    return page;
+}
+
+void MainWindow::startDds()
+{
+    if (!m_dds || !m_dds->abfragen())
+        return;                         /* Abfrage laeuft schon */
+    m_ddsButton->setEnabled(false);
+    m_ddsStatus->setText("Abfrage an DIA1 läuft …");
+    m_ddsStatus->setStyleSheet("color: #000000; border: none;");
+}
+
+void MainWindow::onDdsErgebnis(const QJsonObject &antwort)
+{
+    m_ddsButton->setEnabled(true);
+    const QJsonArray meld = antwort.value("meldungen").toArray();
+
+    m_ddsTable->setRowCount(0);
+    m_ddsTable->setRowCount(meld.size());
+    for (int row = 0; row < meld.size(); ++row) {
+        const QJsonObject m = meld.at(row).toObject();
+        const bool aktiv = m.value("status").toString() == QLatin1String("aktiv");
+        for (int col = 0; col < DDS_COL_COUNT; ++col) {
+            const QJsonValue v = m.value(QLatin1String(DDS_COLS[col].key));
+            const QString txt = v.isDouble()
+                ? QString::number(v.toInteger())
+                : v.toString();
+            QTableWidgetItem *it = new QTableWidgetItem(txt);
+            if (QLatin1String(DDS_COLS[col].key) == QLatin1String("status"))
+                it->setForeground(aktiv ? QColor(0xC0, 0x39, 0x2B)    /* rot  */
+                                        : QColor(0x66, 0x66, 0x66));  /* grau */
+            m_ddsTable->setItem(row, col, it);
+        }
+    }
+
+    int aktive = 0;
+    for (const QJsonValue &v : meld)
+        if (v.toObject().value("status").toString() == QLatin1String("aktiv"))
+            ++aktive;
+    m_ddsStatus->setText(
+        QString("%1 Meldungen, davon %2 aktiv · abgefragt %3 · %4 s · "
+                "Zeiten UTC laut Uhr von DIA1")
+            .arg(meld.size()).arg(aktive)
+            .arg(antwort.value("zeit").toString())
+            .arg(antwort.value("dauer_s").toDouble(), 0, 'f', 1));
+    m_ddsStatus->setStyleSheet("color: #2E7D32; border: none;");
+}
+
+void MainWindow::onDdsFehler(const QString &meldung)
+{
+    m_ddsButton->setEnabled(true);
+    m_ddsStatus->setText("DDS-Abfrage fehlgeschlagen: " + meldung);
+    m_ddsStatus->setStyleSheet("color: #C0392B; border: none;");
+}
+
+/* ------------------------------------------------------------------ */
 /* Info-Seite — komplett in Qt Designer (infopage.ui) gestaltet         */
 /* uic (AUTOUIC) erzeugt daraus ui_infopage.h mit Ui::InfoPage.         */
 /* ------------------------------------------------------------------ */
@@ -812,6 +978,12 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         default:
             break;                      /* sonst nichts (nur C zurück) */
         }
+        return;
+    }
+
+    /* --- DDS-Seite: Taste 1 = Meldungen abrufen (statt Seitenwechsel) --- */
+    if (m_stack->currentIndex() == DDS_PAGE && key == Qt::Key_1) {
+        startDds();
         return;
     }
 

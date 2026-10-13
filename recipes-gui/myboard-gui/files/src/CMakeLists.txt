@@ -11,7 +11,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 # Qt6 Widgets finden
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 add_executable(myboard-gui
     main.cpp
@@ -23,12 +23,14 @@ add_executable(myboard-gui
     canreader.h
     canopen.cpp
     canopen.h
+    ddsclient.cpp
+    ddsclient.h
     infopage.ui
     images.qrc
     can.qrc
 )
 
-target_link_libraries(myboard-gui PRIVATE Qt6::Widgets)
+target_link_libraries(myboard-gui PRIVATE Qt6::Widgets Qt6::Network)
 
 # Installationsziel — landet in /usr/bin
 install(TARGETS myboard-gui

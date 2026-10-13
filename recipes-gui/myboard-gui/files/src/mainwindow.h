@@ -14,6 +14,7 @@
 #include <QStringList>
 #include <QHash>
 #include <QByteArray>
+#include <QJsonObject>   /* vollstaendig: moc braucht den Typ der Slot-Parameter */
 
 #include "canmatrix.h"
 
@@ -23,7 +24,9 @@ class QTimer;
 class QStackedWidget;
 class QKeyEvent;
 class QTableWidget;
+class QPushButton;
 class CanReader;
+class DdsClient;
 
 class MainWindow : public QWidget
 {
@@ -44,6 +47,9 @@ private slots:
     void openPage();             /* Unterseite öffnen (von Button)      */
     void backToMenu();           /* zurück zum Hauptmenü                */
     void onCanFrame(quint32 canId, const QByteArray &data); /* CAN-Telegramm dekodieren + anzeigen */
+    void startDds();             /* DDS-Abfrage an DIA1 anstossen      */
+    void onDdsErgebnis(const QJsonObject &antwort); /* Meldungen anzeigen */
+    void onDdsFehler(const QString &meldung);
 
 private:
     /* --- Skalierung ---------------------------------------------------
@@ -62,6 +68,7 @@ private:
     QWidget *createSubPage(const QString &title,
                            const QString &prosa);  /* Unterseite bauen  */
     QWidget *buildProzesswertPage(); /* Seite 2: Live-CAN-Werte (dekodiert) */
+    QWidget *buildDdsPage();     /* Seite 4: DDS-Meldungen von DIA1     */
     QWidget *buildUpdatePage();  /* Seite 5: App-Update ab USB-Stick    */
     QWidget *buildInfoPage();    /* Seite 6: mit Qt Designer (.ui) gebaut */
     void     showPage(int page); /* zentral: Seite + Titel umschalten   */
@@ -106,6 +113,13 @@ private:
     QHash<QString,int> m_pwRows;       /* Signalname -> Tabellenzeile        */
     QLabel            *m_pwStatus = nullptr;  /* Status (CAN offen? Frames?) */
     int                m_pwFrames = 0; /* Zaehler empfangener Frames         */
+
+    /* --- DDS-Meldungen von DIA1 (Seite 4) --- */
+    static const int DDS_PAGE = 4;     /* Seitenindex der DDS-Seite          */
+    DdsClient         *m_dds = nullptr;       /* fragt den Dienst idu2-mvb    */
+    QTableWidget      *m_ddsTable = nullptr;  /* eine Zeile je Meldungssatz   */
+    QLabel            *m_ddsStatus = nullptr; /* laeuft / Anzahl / Fehler     */
+    QPushButton       *m_ddsButton = nullptr; /* "DDS-Meldungen abrufen"      */
 };
 
 #endif /* MAINWINDOW_H */
