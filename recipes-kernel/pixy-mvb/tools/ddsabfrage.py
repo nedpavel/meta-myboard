@@ -41,6 +41,11 @@ Frameaufbau (32 Byte, Offsets im Frame):
   DT    10.. Daten
 
     ddsabfrage.py <Verzeichnis> [Optionen]
+    ddsabfrage.py --auswerten <frames.txt> [<Ausgabe.txt>]
+
+Die DDS-Meldungen aus den Daten von DIA1 (Saetze mit 00 80 00) landen
+entschluesselt in <Verzeichnis>/dds_meldungen.txt. --auswerten macht das
+nachtraeglich aus der frames.txt eines frueheren Laufs.
 
     --lebenszeichen  Lebenszeichen auf Port 491 senden
     --alle-quellen   (mit --lebenszeichen) auch 492 (8 Byte) und 498
@@ -164,6 +169,190 @@ def hex_text_lines(b, width=16):
         out.append("   %04X  %s" % (k, chunk.hex(" ")))
         out.append("         %s" % "  ".join(to_text(chunk)))
     return out
+
+
+# ---------------------------------------------------------- DDS-Meldungen
+#
+# Die Daten von DIA1 (Teil 2) bestehen aus einem Kopf, den Meldungssaetzen
+# und danach den Klartexten. Nach der Notiz MVB-payload_Alstom und den
+# Daten vom Laborbus (2026-10-12):
+#
+#   Kopf     14 Byte, Byte 12 = Zahl der Saetze
+#   Satz     33 Byte, beginnt mit 00 80 00; der letzte hat nur 32 (ohne Nr),
+#            unmittelbar dahinter beginnen die Texte
+#   Texte    je Satz eine nullterminierte Zeichenkette (CP850),
+#            "<Knoten>:<Stoerungsnummer>-<Text>"
+#
+# Satz, Offsets; Mehrbyte-Felder byteweise umgedreht ("invertiert"):
+#    0..2   00 80 00         Kennung
+#    3..4   EreignisNr       Ereignisnummer des Stoerspeichers, big-endian;
+#                            faellt zu den aelteren hin, parallel zur
+#                            Kommt-Zeit (aus den Daten abgeleitet)
+#    5..6   ?                bisher immer 0000
+#    7..8   MeldNr           Meldungsnummer, big-endian; laeuft je Knoten im
+#                            Gleichschritt mit dem UIC-Code, keine
+#                            Millisekunden (aus den Daten abgeleitet)
+#    9..12  Kommt            UNIX-Sekunden, little-endian
+#   13..16  Geht             dito; FFFFFFFF = keine Gehzeit
+#   17..18  Trenner          FFFF
+#   19..20  @   UIC-Code/Subsystemcode
+#   21..22  -   UIC-Ref-Code 7xxx (Meldung ZP + Massnahme)
+#   23..24  ^   UIC-Ref-Code 8xxx (Meldung Lf + Massnahme)
+#   25..26  Z.  Fehlerzaehler
+#   27..28  #   Stoerungsnummer; Bit 15 gesetzt, solange die Stoerung
+#               ansteht (keine Gehzeit) - die Zahl darunter steht im Text
+#   29      *   Knoten (z.B. 30 FLG2N, 2C FLG1N, 31 FLG2, 81 W_BT)
+#   30      *   zweites Knotenbyte
+#   31      P.  Prioritaet 10/20/30 = A/B/C
+#   32      Nr  laufende Nummer (fehlt beim letzten Satz)
+
+DDS_MARK = b"\x00\x80\x00"
+DDS_REC = 33
+DDS_HEAD = 14
+NO_TIME = "--.--.---- --:--:--.---"
+
+
+def dds_time(sec):
+    if sec == 0xFFFFFFFF:
+        return NO_TIME
+    t = time.gmtime(sec)
+    return time.strftime("%d.%m.%Y %H:%M:%S", t) + ".000"
+
+
+def dds_parse(msg):
+    """(Saetze, Texte) aus einer Nachricht von DIA1, oder None, wenn sie
+    keine DDS-Meldungen enthaelt."""
+    i0 = msg.find(DDS_MARK)
+    if i0 < 0:
+        return None
+    n = 0
+    while i0 + DDS_REC * n + 32 <= len(msg) and \
+            msg[i0 + DDS_REC * n:i0 + DDS_REC * n + 3] == DDS_MARK:
+        n += 1
+    if not n:
+        return None
+    recs = []
+    for k in range(n):
+        r = msg[i0 + DDS_REC * k:i0 + DDS_REC * k + DDS_REC]
+        u16 = lambda o: struct.unpack_from("<H", r, o)[0]
+        u32 = lambda o: struct.unpack_from("<I", r, o)[0]
+        recs.append({
+            "ereignis": struct.unpack_from(">H", r, 3)[0],
+            "meldnr": struct.unpack_from(">H", r, 7)[0],
+            "kommt": u32(9), "geht": u32(13),
+            "uic": u16(19), "ref7": u16(21), "ref8": u16(23),
+            "zaehler": u16(25), "stoer": u16(27),
+            "node": r[29], "node2": r[30], "prio": r[31],
+            "nr": r[32] if k < n - 1 else k + 1,
+            "roh": bytes(r[:DDS_REC if k < n - 1 else 32]),
+        })
+    texts = msg[i0 + DDS_REC * n - 1:].split(b"\x00")
+    texts = [t.decode(TEXT_CP, errors="replace") for t in texts]
+    return recs, texts, (msg[i0 - 2] if i0 >= 2 else None)
+
+
+def dds_lines(recs, texts, kopf_n, quelle):
+    """Die Saetze als Tabelle fuer die .txt-Datei."""
+    prio = {0x10: "A", 0x20: "B", 0x30: "C"}
+    out = ["DDS-Meldungen %s" % quelle,
+           "%d Saetze%s. Zeiten: UNIX-Sekunden als UTC, ohne Millisekunden "
+           "im Satz; Geht --.-- = keine Gehzeit (FFFFFFFF)."
+           % (len(recs), "" if kopf_n in (None, len(recs))
+              else " (Kopf meldet %d)" % kopf_n),
+           "",
+           "Spalten:",
+           "  Nr          laufende Nummer in der Nachricht (Byte 32)",
+           "  Kommt/Geht  UNIX-Zeit, Bytes 9-12 / 13-16",
+           "  Status      aktiv = keine Gehzeit",
+           "  Stoer       Stoerungsnummer ohne Bit 15, wie im Text "
+           "(Bytes 27-28)",
+           "  Knoten      Knotenbytes (29, 30), z.B. 30h FLG2N, 2Ch FLG1N, "
+           "81h W_BT",
+           "  P           Prioritaet A/B/C (Byte 31)",
+           "  Zaehl       Fehlerzaehler (Bytes 25-26)",
+           "  UIC/Sub     UIC-Code/Subsystemcode (Bytes 19-20)",
+           "  7xxx/8xxx   UIC-Ref-Code ZP bzw. Lf (Bytes 21-22 / 23-24)",
+           "  EreignisNr  Ereignisnummer des Stoerspeichers (Bytes 3-4) - "
+           "aus den Daten abgeleitet: faellt",
+           "              zu den aelteren Meldungen hin, parallel zur "
+           "Kommt-Zeit",
+           "  MeldNr      Meldungsnummer (Bytes 7-8) - aus den Daten "
+           "abgeleitet: laeuft je Knoten im",
+           "              Gleichschritt mit dem UIC-Code",
+           "",
+           "Nr  Kommt                    Geht                     Status    "
+           "Stoer Knoten   P  Zaehl  UIC/Sub  7xxx  8xxx  EreignisNr  "
+           "MeldNr  Text",
+           "--  -----------------------  -----------------------  --------  "
+           "----- -------  -  -----  -------  ----  ----  ----------  "
+           "------  ----"]
+    for k, r in enumerate(recs):
+        out.append("%2d  %s  %s  %-8s  %5d %02Xh %02Xh  %s  %5d  %04X     "
+                   "%4d  %4d  %10d  %6d  %s"
+                   % (r["nr"], dds_time(r["kommt"]), dds_time(r["geht"]),
+                      "aktiv" if r["geht"] == 0xFFFFFFFF else "gegangen",
+                      r["stoer"] & 0x7FFF, r["node"], r["node2"],
+                      prio.get(r["prio"], "%02X" % r["prio"]), r["zaehler"],
+                      r["uic"], r["ref7"], r["ref8"], r["ereignis"],
+                      r["meldnr"], texts[k] if k < len(texts) else ""))
+    out += ["", "Rohdaten (33 Byte je Satz, der letzte ohne Nr):"]
+    for r in recs:
+        out.append("  " + r["roh"].hex(" "))
+    return out
+
+
+DDS_FILE = "dds_meldungen.txt"
+
+
+def dds_save(msg, path, quelle, say=print):
+    """DDS-Saetze einer Nachricht an path anhaengen; True, wenn welche drin
+    waren."""
+    p = dds_parse(msg)
+    if p is None:
+        say("   keine DDS-Saetze (00 80 00) in der Nachricht")
+        return False
+    recs, texts, kopf_n = p
+    with open(path, "a", encoding="utf-8", errors="replace") as f:
+        f.write("\n".join(dds_lines(recs, texts, kopf_n, quelle)) + "\n\n")
+    say("== %d DDS-Meldungen -> %s" % (len(recs), path))
+    return True
+
+
+def auswerten(frames_path, out_path=None):
+    """Nachrichten aus einer frames.txt wieder zusammensetzen und die
+    DDS-Saetze schreiben - fuer Laeufe, die schon vorbei sind."""
+    out_path = out_path or os.path.join(os.path.dirname(frames_path) or ".",
+                                        DDS_FILE)
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    conns, found = {}, 0
+    with open(frames_path) as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) < 3 or parts[1] != "RX":
+                continue
+            # Hexteile duerfen von Hand gegliedert sein
+            f = bytes.fromhex("".join(parts[2:]))
+            if len(f) != 32:
+                continue
+            d = decode(f)
+            key = (d["src"], d["net"])
+            if d["kind"] == "CR":
+                conns[key] = {"ref": d["ref"], "len": d["len"],
+                              "data": bytearray(d["data"]), "t": parts[0]}
+            elif d["kind"] == "DT" and key in conns:
+                conns[key]["data"] += d["data"]
+            else:
+                continue
+            c = conns[key]
+            if len(c["data"]) >= c["len"]:
+                del conns[key]
+                if dds_save(bytes(c["data"][:c["len"]]), out_path,
+                            "aus %s, Geraet %d, Ref %04X, CR bei %s s"
+                            % (frames_path, d["src"], c["ref"], c["t"])):
+                    found += 1
+    print("%d Nachricht(en) mit DDS-Meldungen" % found)
+    return 0 if found else 1
 
 
 def frame(tail):
@@ -321,6 +510,9 @@ def parse_args(argv):
 
 def main():
     global TEXT_CP
+    if len(sys.argv) >= 3 and sys.argv[1] == "--auswerten":
+        return auswerten(sys.argv[2], sys.argv[3] if len(sys.argv) > 3
+                         else None)
     o = parse_args(sys.argv)
     TEXT_CP = o["cp"]
     try:
@@ -588,6 +780,12 @@ def main():
                    + struct.pack(">HI", reply_ref, len(REPLY_DATA))
                    + bytes((0x70, 0x00)) + REPLY_DATA + REPLY_PAD,
                    "Reply an DIA1 Ref %04X" % reply_ref)
+            # Erst nach der Reply: das Schreiben soll DIA1 nicht aufhalten
+            if c["call"]:
+                dds_save(msg, os.path.join(o["dir"], DDS_FILE),
+                         "von DIA1, Ref %04X, empfangen %s"
+                         % (c["ref"], time.strftime("%d.%m.%Y %H:%M:%S")),
+                         log.line)
 
         def ls_text():
             """Eigenes und FLG1N-Lebenszeichen fuer die Statuszeile."""
