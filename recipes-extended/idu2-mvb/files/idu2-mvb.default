@@ -6,6 +6,9 @@
 #   --takt S           Lebenszeichen alle S Sekunden erhoehen (Vorgabe 1)
 #   --alle-quellen     auch Port 492 und 498 senden (nur Nullen)
 #   --socket PFAD      Steuersocket (Vorgabe /run/idu2-mvb.sock)
+#   --anzahl N         DDS-Meldungen je Seite, 1..255 (Vorgabe 16; das
+#                      Original-Display fragt 21 an, DIA1 liefert
+#                      hoechstens 25)
 #
 # Nach einer Aenderung: systemctl restart idu2-mvb
 OPTIONEN=""

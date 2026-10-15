@@ -60,6 +60,17 @@ nachtraeglich aus der frames.txt eines frueheren Laufs.
     --hoch           Frames mit hoher Prioritaet senden (Vorgabe niedrig)
     --single-line    Einleitungsbetrieb auf Leitung A
     --dsw-md         MD-Bit im DSW setzen, am Ende wieder loeschen
+    --anzahl N       hoechstens N DDS-Meldungen anfragen, 1..255 (Vorgabe
+                     21 = 0x15 wie im Mitschnitt; letztes Datenbyte des CR;
+                     DIA1 liefert hoechstens 25)
+    --nach SATZ      naechste Seite statt der ersten: REQ_NEXT_PAGE_FC
+                     (Command 05, Aufbau laut REQ_NEXT_PAGE_FC.txt) hinter
+                     der Meldung SATZ - deren Rohsatz in Hex, mindestens
+                     die ersten 9 Byte "00 80 00 Address Unk", z.B. aus
+                     den Rohsaetzen in dds_meldungen.txt (Leerzeichen
+                     erlaubt, dann in Anfuehrungszeichen)
+    --cache N        Cache_index fuer --nach (Vorgabe 1; DIA1 nennt ihn im
+                     Kopf seiner Antwort, Bytes 10-11)
     --zeichensatz CP Zeichensatz der Textzeilen unter dem Hexdump
                      (Vorgabe cp850; auch cp437, latin1, cp1252)
     --ef1            Messages ueber EF1 statt EF0 beim Busadministrator
@@ -129,6 +140,26 @@ CALL_DT = bytes.fromhex(
 REPLY_DATA = bytes.fromhex("0100000000010501fb01")
 REPLY_PAD = bytes.fromhex("00010415")
 CC_CREDIT = 0x10            # Credit 1, wie das Display es sendet
+REQ_NEXT_PAGE_FC = 0x05
+
+
+def next_page_data(cache, anzahl, satz):
+    """Daten von REQ_NEXT_PAGE_FC (REQ_NEXT_PAGE_FC.txt): Header wie die
+    Anfrage mit Command 05, Cache_index (16 bit BE), Nb_fault_codes (8 bit),
+    dann 00 80 00, Address (16 bit BE), Unk (4 Byte) - die ersten 9 Byte
+    des Satzes der letzten gezeigten Meldung."""
+    return (CALL_CR[14:22] + bytes((REQ_NEXT_PAGE_FC,)) + CALL_CR[23:24]
+            + struct.pack(">HB", cache, anzahl) + satz)
+
+
+def request_frames(ref, daten):
+    """CR mit den ersten 14 Datenbytes, ein DT (letztes Paket) mit dem
+    Rest; reicht bis 36 Byte."""
+    assert 14 < len(daten) <= 36
+    cr = (CALL_CR[:6] + struct.pack(">HI", ref, len(daten)) + CALL_CR[12:14]
+          + daten[:14])
+    rest = daten[14:]
+    return cr, bytes((5 + len(rest),)) + CALL_DT[1:6] + rest
 
 
 def sig(req):
@@ -204,11 +235,14 @@ def hex_text_lines(b, width=16):
 #   29      *   Knoten (z.B. 30 FLG2N, 2C FLG1N, 31 FLG2, 81 W_BT)
 #   30      *   zweites Knotenbyte
 #   31      P.  Prioritaet 10/20/30 = A/B/C
-#   32      Nr  laufende Nummer (fehlt beim letzten Satz)
+#   Nr          Index des Satzes + 1 (das Byte vor 00 80 00)
+#
+# Kopf 13 Byte (Header, Cache_index, FC_in_payload). Ein Satz ist bei ANS_FC
+# Index + 32 Byte ab 00 80 00 (33 Byte), bei ANS_NEXT_PAGE_FC steht davor
+# noch Req_nb_fc als Int16ul (35 Byte).
 
 DDS_MARK = b"\x00\x80\x00"
-DDS_REC = 33
-DDS_HEAD = 14
+DDS_KOPF = 13
 NO_TIME = "--.--.---- --:--:--.---"
 
 
@@ -219,21 +253,48 @@ def dds_time(sec):
     return time.strftime("%d.%m.%Y %H:%M:%S", t) + ".000"
 
 
-def dds_parse(msg):
-    """(Saetze, Texte) aus einer Nachricht von DIA1, oder None, wenn sie
-    keine DDS-Meldungen enthaelt."""
-    i0 = msg.find(DDS_MARK)
-    if i0 < 0:
+def dds_saetze(msg):
+    """Saetze einer ANS_FC (Seite 1) oder ANS_NEXT_PAGE_FC (Folgeseiten):
+    ([(Index, 32 Byte ab 00 80 00), ...], [Texte als Bytes], FC_in_payload)
+    oder None, wenn msg keine solche Antwort ist.
+
+    Kopf 13 Byte: 10 Byte Header, Cache_index (Int16ub), FC_in_payload
+    (Int8ub). Dann FC_in_payload Saetze, dann ebenso viele Texte (CP850,
+    nullterminiert). Ein Satz ist bei ANS_FC Index (1 Byte) + 32 Byte ab
+    00 80 00 (FC_TYPE_1, 33 Byte), bei ANS_NEXT_PAGE_FC steht davor noch
+    Req_nb_fc als Int16ul (FC_TYPE_2, 35 Byte; ANS_NEXT_PAGE_FC.txt). Mit
+    FC_in_payload = 0 endet die Antwort nach dem Kopf."""
+    if len(msg) < DDS_KOPF:
         return None
-    n = 0
-    while i0 + DDS_REC * n + 32 <= len(msg) and \
-            msg[i0 + DDS_REC * n:i0 + DDS_REC * n + 3] == DDS_MARK:
-        n += 1
-    if not n:
+    n = msg[DDS_KOPF - 1]
+    if n == 0:
+        return [], [], 0
+    for vor in (0, 2):                  # FC_TYPE_1, FC_TYPE_2
+        a = DDS_KOPF + vor + 1
+        if msg[a:a + 3] == DDS_MARK:
+            break
+    else:
         return None
-    recs = []
+    groesse = vor + 33
+    saetze = []
     for k in range(n):
-        r = msg[i0 + DDS_REC * k:i0 + DDS_REC * k + DDS_REC]
+        a = DDS_KOPF + groesse * k + vor
+        if a + 33 > len(msg) or msg[a + 1:a + 4] != DDS_MARK:
+            break
+        saetze.append((msg[a], bytes(msg[a + 1:a + 33])))
+    texte = msg[DDS_KOPF + groesse * len(saetze):].split(b"\x00")
+    return saetze, texte, n
+
+
+def dds_parse(msg):
+    """(Saetze, Texte, FC_in_payload) aus einer Antwort von DIA1, oder None,
+    wenn sie keine DDS-Antwort ist."""
+    p = dds_saetze(msg)
+    if p is None:
+        return None
+    saetze, texte, n = p
+    recs = []
+    for index, r in saetze:
         u16 = lambda o: struct.unpack_from("<H", r, o)[0]
         u32 = lambda o: struct.unpack_from("<I", r, o)[0]
         recs.append({
@@ -243,12 +304,11 @@ def dds_parse(msg):
             "uic": u16(19), "ref7": u16(21), "ref8": u16(23),
             "zaehler": u16(25), "stoer": u16(27),
             "node": r[29], "node2": r[30], "prio": r[31],
-            "nr": r[32] if k < n - 1 else k + 1,
-            "roh": bytes(r[:DDS_REC if k < n - 1 else 32]),
+            "nr": index + 1,
+            "roh": r,
         })
-    texts = msg[i0 + DDS_REC * n - 1:].split(b"\x00")
-    texts = [t.decode(TEXT_CP, errors="replace") for t in texts]
-    return recs, texts, (msg[i0 - 2] if i0 >= 2 else None)
+    texts = [t.decode(TEXT_CP, errors="replace") for t in texte]
+    return recs, texts, n
 
 
 def dds_lines(recs, texts, kopf_n, quelle):
@@ -261,7 +321,7 @@ def dds_lines(recs, texts, kopf_n, quelle):
               else " (Kopf meldet %d)" % kopf_n),
            "",
            "Spalten:",
-           "  Nr          laufende Nummer in der Nachricht (Byte 32)",
+           "  Nr          Index des Satzes + 1 (Byte vor 00 80 00)",
            "  Kommt/Geht  UNIX-Zeit, Bytes 9-12 / 13-16",
            "  Status      aktiv = keine Gehzeit",
            "  Stoer       Stoerungsnummer ohne Bit 15, wie im Text "
@@ -295,7 +355,7 @@ def dds_lines(recs, texts, kopf_n, quelle):
                       prio.get(r["prio"], "%02X" % r["prio"]), r["zaehler"],
                       r["uic"], r["ref7"], r["ref8"], r["ereignis"],
                       r["meldnr"], texts[k] if k < len(texts) else ""))
-    out += ["", "Rohdaten (33 Byte je Satz, der letzte ohne Nr):"]
+    out += ["", "Rohdaten (32 Byte je Satz ab 00 80 00; fuer --nach):"]
     for r in recs:
         out.append("  " + r["roh"].hex(" "))
     return out
@@ -312,6 +372,9 @@ def dds_save(msg, path, quelle, say=print):
         say("   keine DDS-Saetze (00 80 00) in der Nachricht")
         return False
     recs, texts, kopf_n = p
+    if not recs:
+        say("   FC_in_payload %d, keine Saetze - Ende der Liste" % kopf_n)
+        return False
     with open(path, "a", encoding="utf-8", errors="replace") as f:
         f.write("\n".join(dds_lines(recs, texts, kopf_n, quelle)) + "\n\n")
     say("== %d DDS-Meldungen -> %s" % (len(recs), path))
@@ -451,7 +514,8 @@ def parse_args(argv):
     o = {"dauer": 60.0, "nur_hoeren": False, "keine_antwort": False,
          "ziel": DIA1_ADDR, "ref": 0x0043, "hoch": False, "single": False,
          "dsw_md": False, "ls": False, "alle": False, "vorlauf": None,
-         "ef1": False, "cp": TEXT_CP}
+         "ef1": False, "cp": TEXT_CP, "anzahl": 0x15, "nach": None,
+         "cache": 1}
     if len(argv) < 2 or argv[1].startswith("-"):
         print(__doc__)
         sys.exit(2)
@@ -480,6 +544,27 @@ def parse_args(argv):
             o["dsw_md"] = True
         elif a == "--ef1":
             o["ef1"] = True
+        elif a == "--anzahl":
+            i += 1
+            o["anzahl"] = int(argv[i], 0)
+            if not 1 <= o["anzahl"] <= 255:
+                print("--anzahl muss zwischen 1 und 255 liegen\n")
+                sys.exit(2)
+        elif a == "--nach":
+            i += 1
+            try:
+                o["nach"] = bytes.fromhex(argv[i])[:9]
+            except ValueError:
+                o["nach"] = b""
+            if len(o["nach"]) != 9 or o["nach"][:3] != DDS_MARK:
+                print("--nach: Rohsatz ab 00 80 00, mindestens 9 Byte\n")
+                sys.exit(2)
+        elif a == "--cache":
+            i += 1
+            o["cache"] = int(argv[i], 0)
+            if not 0 <= o["cache"] <= 0xFFFF:
+                print("--cache muss zwischen 0 und 65535 liegen\n")
+                sys.exit(2)
         elif a == "--zeichensatz":
             i += 1
             try:
@@ -716,6 +801,7 @@ def main():
         conns = {}
         got = {"rx": 0, "tx": 0, "antwort1": None, "daten2": None,
                "cc_anfrage": False, "cc_reply": False, "fremd": {}}
+        anfrage = {"dt": CALL_DT}       # DT nach dem CC von DIA1
         reply_ref = (o["ref"] + 1) & 0xFFFF
 
         def handle(f):
@@ -760,7 +846,7 @@ def main():
                 if d["ref"] == o["ref"] and not got["cc_anfrage"]:
                     got["cc_anfrage"] = True
                     log.line("   DIA1 nimmt die Anfrage an - sende den Rest")
-                    tx(CALL_DT, "DT Rest der Anfrage")
+                    tx(anfrage["dt"], "DT Rest der Anfrage")
                 elif d["ref"] == reply_ref:
                     got["cc_reply"] = True
                     log.line("   DIA1 hat unsere Reply-Message bestaetigt")
@@ -785,9 +871,11 @@ def main():
                 log.line(ln)
             if c["call"] and not o["keine_antwort"]:
                 net = swap_net(c["net"])
+                # derselbe Befehl ohne Payload: Header der Antwort
+                quittung = msg[:10] if len(msg) >= 10 else REPLY_DATA
                 tx(bytes((0x17,)) + net + bytes((0x00,))
-                   + struct.pack(">HI", reply_ref, len(REPLY_DATA))
-                   + bytes((0x70, 0x00)) + REPLY_DATA + REPLY_PAD,
+                   + struct.pack(">HI", reply_ref, len(quittung))
+                   + bytes((0x70, 0x00)) + quittung + REPLY_PAD,
                    "Reply an DIA1 Ref %04X" % reply_ref)
             # Erst nach der Reply: das Schreiben soll DIA1 nicht aufhalten
             if c["call"]:
@@ -823,8 +911,19 @@ def main():
             # Erst nach dem Vorlauf: der Busmaster und die FLG sollen das
             # Geraet (und sein Lebenszeichen) vorher sehen
             if not call_sent and time.time() - t0 >= o["vorlauf"]:
-                tx(CALL_CR[:5] + CALL_CR[5:6] + struct.pack(">H", o["ref"])
-                   + CALL_CR[8:], "Anfrage an DIA1")
+                if o["nach"] is None:
+                    # REQ_FC wie im Mitschnitt; letztes Datenbyte des CR =
+                    # hoechstens so viele Meldungen
+                    tx(CALL_CR[:6] + struct.pack(">H", o["ref"])
+                       + CALL_CR[8:27] + bytes((o["anzahl"],)),
+                       "Anfrage an DIA1 (REQ_FC), bis %d Meldungen"
+                       % o["anzahl"])
+                else:
+                    daten = next_page_data(o["cache"], o["anzahl"], o["nach"])
+                    cr, anfrage["dt"] = request_frames(o["ref"], daten)
+                    tx(cr, "Anfrage an DIA1 (REQ_NEXT_PAGE_FC) hinter Address "
+                       "%d, bis %d Meldungen, Daten %s"
+                       % (be16(o["nach"], 3), o["anzahl"], daten.hex(" ")))
                 call_sent = True
             while True:
                 try:

@@ -160,9 +160,41 @@ Sekundentakt hoch. Optionen in `/etc/default/idu2-mvb`, Meldungen mit
 Antwort) führt der Dienst außerdem die DDS-Abfrage an DIA1 aus — mit
 denselben Frames wie `ddsabfrage.py` — und liefert die Meldungssätze
 entschlüsselt zurück. Die Bedienoberfläche nutzt das auf der Seite
-„DDS-Speicher": Knopf „DDS-Meldungen abrufen" oder Taste 1, Anzeige
-aller Sätze als Tabelle. Weil der Dienst schon am Bus ist, beginnt die
-Abfrage sofort.
+„DDS-Speicher": Knopf „DDS-Meldungen abrufen" oder Taste 1 holt Seite 1,
+eine Seite hat 16 Meldungen (`--anzahl` des Dienstes; das Original-Display
+zeigt 21). ▲/▼ wählen die Meldung; ▼ auf der letzten Zeile holt die
+nächste Seite, ▲ auf der ersten zeigt die vorige. Weil der Dienst schon am
+Bus ist, beginnt die Abfrage sofort.
+
+**Aufbau der Anfrage** laut „MVB Dokumentation IC2000 Payload Structure",
+Abschnitt 4.2.2.1 (dort IDU1 → VCU1, Bytes wie bei IDU2 → DIA1):
+Datenbytes 0–4 Header, 5 Source, 6 Dest, 8 Command, 10–11 Cache_index
+(Mitschnitt `00 01`), 13 Nr FC (Anzahl), 14–17 Startzeit, 18–21 Endzeit.
+Commands: `01` REQ_FC (erste Seite), `03` INV_CACHE, `05`
+REQ_NEXT_PAGE_FC (nächste Seite). Die Antwort hat einen Kopf von 13 Byte
+(Header, Cache_index, FC_in_payload), dann FC_in_payload Sätze, dann
+ebenso viele Texte. Ein Satz ist auf Seite 1 (ANS_FC) Index + 32 Byte ab
+`00 80 00`, auf Folgeseiten (ANS_NEXT_PAGE_FC, `ANS_NEXT_PAGE_FC.txt`)
+steht davor noch die angefragte Anzahl als Int16 little-endian (`15 00`),
+also 35 statt 33 Byte. Weniger Sätze als angefragt heißt Ende der Liste;
+mit FC_in_payload 0 endet die Antwort nach dem Kopf. Mehr als 25
+Meldungen liefert DIA1 je Anfrage nicht. Quittiert wird mit dem Header der
+Antwort ohne Payload.
+
+**Blättern.** Seite 1 = REQ_FC genau wie im Mitschnitt. Jede weitere Seite
+= REQ_NEXT_PAGE_FC, aufgebaut laut `REQ_NEXT_PAGE_FC.txt` (22 Byte, CR mit
+14 Datenbytes und ein DT mit 8):
+
+    01 00 00 00 01 05 01 01 | 05 | 01 | Cache_index 2 | Anzahl 1 | 00 80 00 | Address 2 | Unk 4
+
+`00 80 00`, Address und Unk sind die ersten 9 Byte des Satzes der letzten
+gezeigten Meldung (der letzten der Seite davor), Cache_index kommt aus der
+Antwort auf diese Seite. DIA1 überspringt die Meldung und liefert die
+nächsten. Für die vorige Seite gibt es kein Command: Der Dienst hält die
+schon geholten Seiten bereit, bis Taste 1 Seite 1 neu holt; so bleibt
+DIA1 mit seiner Seite im Gleichschritt. Liefert DIA1 nur schon gezeigte
+Meldungen, gilt das als Ende der Liste. `ddsabfrage.py --nach "<Rohsatz>"`
+schickt die Anfrage nach der nächsten Seite von Hand.
 
 `/dev/mvblli0` ist exklusiv: Solange der Dienst läuft, melden
 `ddsabfrage.py` und `mvbdiff.py` „belegt". Vorher `systemctl stop

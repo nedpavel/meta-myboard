@@ -744,16 +744,16 @@ void MainWindow::onCanFrame(quint32 canId, const QByteArray &data)
 
 /* Spalten der DDS-Tabelle: JSON-Feld des Dienstes und Ueberschrift */
 static const struct { const char *key; const char *head; } DDS_COLS[] = {
-    { "nr",         "Nr"       },
+    { "uic",        "UIC/Sub"  },
+    { "prio",       "P"        },
+    { "zaehler",    "Zähl"     },
     { "kommt",      "Kommt"    },
     { "geht",       "Geht"     },
     { "status",     "Status"   },
-    { "prio",       "P"        },
-    { "text",       "Meldung"  },
-    { "stoer",      "Stör"     },
     { "knoten",     "Knoten"   },
-    { "zaehler",    "Zähl"     },
-    { "uic",        "UIC/Sub"  },
+    { "text",       "Meldung"  },
+    { "pos",        "Nr"       },   /* laufend ueber alle Seiten */
+    { "stoer",      "Stör"     },
     { "ref7",       "7xxx"     },
     { "ref8",       "8xxx"     },
     { "ereignisnr", "EreignisNr" },
@@ -778,7 +778,8 @@ QWidget *MainWindow::buildDdsPage()
     titleLabel->setStyleSheet(QString("color: %1; border: none;").arg(COL_BLUE));
     lay->addWidget(titleLabel);
 
-    m_ddsStatus = new QLabel("Noch nicht abgefragt — Knopf oder Taste 1.");
+    m_ddsStatus = new QLabel("Noch nicht abgefragt — Knopf oder Taste 1; "
+                             "danach ▲▼ zum Wählen und Blättern.");
     m_ddsStatus->setWordWrap(true);
     QFont sf; sf.setPointSizeF(pt(9));
     m_ddsStatus->setFont(sf);
@@ -786,7 +787,11 @@ QWidget *MainWindow::buildDdsPage()
     lay->addWidget(m_ddsStatus);
 
     /* Eine Zeile je Meldungssatz (00 80 00 ...), neueste zuerst — so wie
-       DIA1 sie liefert. Breite Tabelle: horizontal scrollbar. */
+       DIA1 sie liefert, eine Seite zu 16 Meldungen (Vorgabe des Dienstes
+       idu2-mvb). Breite Tabelle:
+       horizontal scrollbar. Die Pfeiltasten wertet keyPressEvent aus
+       (die Tabelle bekommt keinen Fokus): sie waehlen die Meldung, auf der
+       letzten bzw. ersten Zeile holen sie die naechste bzw. vorige Seite. */
     m_ddsTable = new QTableWidget(0, DDS_COL_COUNT);
     QStringList headers;
     for (const auto &c : DDS_COLS)
@@ -795,7 +800,8 @@ QWidget *MainWindow::buildDdsPage()
     m_ddsTable->setMinimumSize(0, 0);   /* Fenster nicht aufweiten */
     m_ddsTable->verticalHeader()->setVisible(false);
     m_ddsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_ddsTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_ddsTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_ddsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ddsTable->setFocusPolicy(Qt::NoFocus);
     m_ddsTable->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_ddsTable->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -803,9 +809,12 @@ QWidget *MainWindow::buildDdsPage()
     m_ddsTable->setFont(tbf);
     m_ddsTable->horizontalHeader()->setFont(tbf);
     m_ddsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    /* Auswahl auch ohne Fokus deutlich sichtbar */
     m_ddsTable->setStyleSheet(
-        "QTableWidget { background-color: white; color: #202020; border: 1px solid #999; }"
-        "QHeaderView::section { background-color: #E0E0E0; color: #202020; padding: 1px; }");
+        QString("QTableWidget { background-color: white; color: #202020; border: 1px solid #999; }"
+                "QTableWidget::item:selected { background-color: %1; color: white; }"
+                "QHeaderView::section { background-color: #E0E0E0; color: #202020; padding: 1px; }")
+            .arg(COL_BLUE));
     lay->addWidget(m_ddsTable, 1);
 
     QString btnStyle = QString(
@@ -842,17 +851,78 @@ QWidget *MainWindow::buildDdsPage()
 
 void MainWindow::startDds()
 {
-    if (!m_dds || !m_dds->abfragen())
+    startDdsSeite(1, false, true);      /* Seite 1 neu von DIA1 */
+}
+
+void MainWindow::startDdsSeite(int seite, bool aufwaerts, bool neu)
+{
+    if (!m_dds || !m_dds->abfragen(seite, neu))
         return;                         /* Abfrage laeuft schon */
+    m_ddsAufwaerts = aufwaerts;
     m_ddsButton->setEnabled(false);
-    m_ddsStatus->setText("Abfrage an DIA1 läuft …");
-    m_ddsStatus->setStyleSheet("color: #000000; border: none;");
+    ddsStatus(QString("Seite %1 wird von DIA1 abgefragt …").arg(seite),
+              "#000000");
+}
+
+void MainWindow::ddsStatus(const QString &text, const char *farbe)
+{
+    m_ddsStatus->setText(text);
+    m_ddsStatus->setStyleSheet(QString("color: %1; border: none;").arg(farbe));
+}
+
+void MainWindow::ddsZeileWaehlen(int row)
+{
+    /* selectRow nimmt die links sichtbare Spalte als aktuelle: die Tabelle
+       laeuft nur senkrecht mit, nicht seitlich */
+    m_ddsTable->selectRow(row);
+    m_ddsTable->scrollTo(m_ddsTable->currentIndex());
+}
+
+/* Pfeil runter/hoch auf der DDS-Seite: naechste/vorige Meldung; auf der
+   letzten Zeile holt "runter" die naechste Seite von DIA1
+   (REQ_NEXT_PAGE_FC), auf der ersten Zeile zeigt "hoch" die vorige Seite
+   aus dem Zwischenspeicher des Dienstes. */
+void MainWindow::ddsPfeil(bool runter)
+{
+    const int n = m_ddsTable->rowCount();
+    if (!m_dds || m_dds->busy() || n == 0)
+        return;
+    const int row = m_ddsTable->currentRow();
+
+    if (runter) {
+        if (row < n - 1) {
+            ddsZeileWaehlen(row + 1);
+        } else if (m_ddsLetzte) {
+            ddsStatus(m_ddsInfo + "\nEnde der Liste: DIA1 hat keine weiteren "
+                      "Meldungen.", "#B9770E");
+        } else {
+            startDdsSeite(m_ddsSeite + 1, false);
+        }
+    } else {
+        if (row > 0)
+            ddsZeileWaehlen(row - 1);
+        else if (m_ddsSeite > 1)
+            startDdsSeite(m_ddsSeite - 1, true);
+    }
 }
 
 void MainWindow::onDdsErgebnis(const QJsonObject &antwort)
 {
     m_ddsButton->setEnabled(true);
     const QJsonArray meld = antwort.value("meldungen").toArray();
+    const int seite = antwort.value("seite").toInt(1);
+    const QString hinweis = antwort.value("hinweis").toString();
+
+    /* Hinter der letzten Seite: die angezeigte Seite bleibt stehen */
+    if (meld.isEmpty() && seite > 1) {
+        m_ddsLetzte = true;
+        ddsStatus(m_ddsInfo + "\nEnde der Liste: DIA1 hat keine weiteren "
+                  "Meldungen." + (hinweis.isEmpty() ? "" : " " + hinweis),
+                  "#B9770E");
+        return;
+    }
+    m_ddsSeite = seite;
+    m_ddsLetzte = antwort.value("letzte").toBool();
 
     m_ddsTable->setRowCount(0);
     m_ddsTable->setRowCount(meld.size());
@@ -872,24 +942,41 @@ void MainWindow::onDdsErgebnis(const QJsonObject &antwort)
         }
     }
 
+    if (!meld.isEmpty())
+        ddsZeileWaehlen(m_ddsAufwaerts ? meld.size() - 1 : 0);
+
     int aktive = 0;
     for (const QJsonValue &v : meld)
         if (v.toObject().value("status").toString() == QLatin1String("aktiv"))
             ++aktive;
-    m_ddsStatus->setText(
-        QString("%1 Meldungen, davon %2 aktiv · abgefragt %3 · %4 s · "
-                "Zeiten UTC laut Uhr von DIA1")
-            .arg(meld.size()).arg(aktive)
-            .arg(antwort.value("zeit").toString())
-            .arg(antwort.value("dauer_s").toDouble(), 0, 'f', 1));
-    m_ddsStatus->setStyleSheet("color: #2E7D32; border: none;");
+    const QString bereich = meld.isEmpty()
+        ? QString("keine Meldungen")
+        : QString("Meldungen %1–%2, davon %3 aktiv")
+              .arg(meld.first().toObject().value("pos").toInt())
+              .arg(meld.last().toObject().value("pos").toInt())
+              .arg(aktive);
+    const QString herkunft = antwort.value("zwischengespeichert").toBool()
+        ? QString("aus dem Zwischenspeicher")
+        : QString("%1 s").arg(antwort.value("dauer_s").toDouble(), 0, 'f', 1);
+    m_ddsInfo = QString("Seite %1%2 · %3 · abgefragt %4 · %5 · ▲▼ wählen, "
+                        "▼ auf der letzten Zeile blättert weiter, 1 lädt neu "
+                        "· Zeiten UTC laut Uhr von DIA1")
+                    .arg(seite)
+                    .arg(m_ddsLetzte ? " (letzte)" : "")
+                    .arg(bereich)
+                    .arg(antwort.value("zeit").toString())
+                    .arg(herkunft);
+    if (hinweis.isEmpty())
+        ddsStatus(m_ddsInfo, "#2E7D32");
+    else
+        ddsStatus(m_ddsInfo + "\nHinweis: " + hinweis, "#B9770E");
 }
 
 void MainWindow::onDdsFehler(const QString &meldung)
 {
+    /* Die angezeigte Seite bleibt stehen */
     m_ddsButton->setEnabled(true);
-    m_ddsStatus->setText("DDS-Abfrage fehlgeschlagen: " + meldung);
-    m_ddsStatus->setStyleSheet("color: #C0392B; border: none;");
+    ddsStatus("DDS-Abfrage fehlgeschlagen: " + meldung, "#C0392B");
 }
 
 /* ------------------------------------------------------------------ */
@@ -981,10 +1068,17 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    /* --- DDS-Seite: Taste 1 = Meldungen abrufen (statt Seitenwechsel) --- */
-    if (m_stack->currentIndex() == DDS_PAGE && key == Qt::Key_1) {
-        startDds();
-        return;
+    /* --- DDS-Seite: Taste 1 = Seite 1 abrufen (statt Seitenwechsel),
+           Pfeile = Meldung waehlen und blaettern (statt Wagen-Auswahl) --- */
+    if (m_stack->currentIndex() == DDS_PAGE) {
+        if (key == Qt::Key_1) {
+            startDds();
+            return;
+        }
+        if (key == Qt::Key_Down || key == Qt::Key_Up) {
+            ddsPfeil(key == Qt::Key_Down);
+            return;
+        }
     }
 
     /* --- Hauptmenü / Unterseiten --- */

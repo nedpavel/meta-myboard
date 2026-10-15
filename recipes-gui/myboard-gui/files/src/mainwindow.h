@@ -47,7 +47,7 @@ private slots:
     void openPage();             /* Unterseite öffnen (von Button)      */
     void backToMenu();           /* zurück zum Hauptmenü                */
     void onCanFrame(quint32 canId, const QByteArray &data); /* CAN-Telegramm dekodieren + anzeigen */
-    void startDds();             /* DDS-Abfrage an DIA1 anstossen      */
+    void startDds();             /* DDS-Abfrage an DIA1: Seite 1       */
     void onDdsErgebnis(const QJsonObject &antwort); /* Meldungen anzeigen */
     void onDdsFehler(const QString &meldung);
 
@@ -69,6 +69,10 @@ private:
                            const QString &prosa);  /* Unterseite bauen  */
     QWidget *buildProzesswertPage(); /* Seite 2: Live-CAN-Werte (dekodiert) */
     QWidget *buildDdsPage();     /* Seite 4: DDS-Meldungen von DIA1     */
+    void     startDdsSeite(int seite, bool aufwaerts, bool neu = false);
+    void     ddsPfeil(bool runter);   /* Meldung waehlen / blaettern     */
+    void     ddsZeileWaehlen(int row);
+    void     ddsStatus(const QString &text, const char *farbe);
     QWidget *buildUpdatePage();  /* Seite 5: App-Update ab USB-Stick    */
     QWidget *buildInfoPage();    /* Seite 6: mit Qt Designer (.ui) gebaut */
     void     showPage(int page); /* zentral: Seite + Titel umschalten   */
@@ -120,6 +124,10 @@ private:
     QTableWidget      *m_ddsTable = nullptr;  /* eine Zeile je Meldungssatz   */
     QLabel            *m_ddsStatus = nullptr; /* laeuft / Anzahl / Fehler     */
     QPushButton       *m_ddsButton = nullptr; /* "DDS-Meldungen abrufen"      */
+    int                m_ddsSeite = 0;        /* angezeigte Seite, 0 = keine  */
+    bool               m_ddsLetzte = false;   /* dahinter kommt nichts mehr   */
+    bool               m_ddsAufwaerts = false; /* nach dem Laden letzte Zeile */
+    QString            m_ddsInfo;             /* Statuszeile der Seite        */
 };
 
 #endif /* MAINWINDOW_H */

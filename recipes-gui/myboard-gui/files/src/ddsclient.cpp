@@ -8,9 +8,10 @@
 
 static const char *SOCKET_PATH = "/run/idu2-mvb.sock";
 
-/* Die Abfrage selbst dauert am Laborbus rund 1 s; der Dienst gibt nach 15 s
-   auf und meldet das. Hier etwas mehr, damit dessen Meldung ankommt. */
-static const int TIMEOUT_MS = 20000;
+/* Eine Seite (16 Meldungen) dauert am Laborbus rund 1 s. Der Dienst
+   bricht selbst ab, wenn DIA1 15 s lang schweigt, und meldet das. Hier nur
+   die aeussere Grenze. */
+static const int TIMEOUT_MS = 60000;
 
 DdsClient::DdsClient(QObject *parent)
     : QObject(parent),
@@ -33,11 +34,13 @@ DdsClient::DdsClient(QObject *parent)
     });
 }
 
-bool DdsClient::abfragen()
+bool DdsClient::abfragen(int seite, bool neu)
 {
     if (m_busy)
         return false;
     m_busy = true;
+    m_seite = seite;
+    m_neu = neu;
     m_buf.clear();
     m_sock->abort();
     m_timer->start(TIMEOUT_MS);
@@ -47,7 +50,10 @@ bool DdsClient::abfragen()
 
 void DdsClient::onConnected()
 {
-    m_sock->write("{\"befehl\": \"dds\"}\n");
+    m_sock->write(QStringLiteral("{\"befehl\": \"dds\", \"seite\": %1, "
+                                 "\"neu\": %2}\n")
+                      .arg(m_seite)
+                      .arg(m_neu ? "true" : "false").toUtf8());
     m_sock->flush();
 }
 

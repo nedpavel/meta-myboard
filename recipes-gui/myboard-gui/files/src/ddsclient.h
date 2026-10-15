@@ -25,12 +25,17 @@ class DdsClient : public QObject
 public:
     explicit DdsClient(QObject *parent = nullptr);
 
-    /* Neue DDS-Abfrage an DIA1 anstossen. false, wenn schon eine laeuft. */
-    bool abfragen();
+    /* Seite 1, 2, ... der DDS-Meldungen von DIA1 abfragen (16 je Seite,
+       --anzahl des Dienstes).
+       Schon geholte Seiten liefert der Dienst aus seinem Zwischenspeicher;
+       neu = true holt Seite 1 auf jeden Fall neu von DIA1.
+       false, wenn schon eine Abfrage laeuft. */
+    bool abfragen(int seite = 1, bool neu = false);
     bool busy() const { return m_busy; }
 
 signals:
-    /* Antwort des Dienstes: {"ok": true, "anzahl": n, "meldungen": [...]} */
+    /* Antwort des Dienstes: {"ok": true, "seite": n, "letzte": bool,
+       "meldungen": [...], evtl. "hinweis": "..."} */
     void ergebnis(const QJsonObject &antwort);
     void fehler(const QString &meldung);
 
@@ -46,6 +51,8 @@ private:
     QTimer       *m_timer;
     QByteArray    m_buf;
     bool          m_busy = false;
+    int           m_seite = 1;
+    bool          m_neu = false;
 };
 
 #endif /* DDSCLIENT_H */

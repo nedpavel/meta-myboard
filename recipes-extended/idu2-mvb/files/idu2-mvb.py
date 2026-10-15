@@ -27,9 +27,32 @@ haelt das Ergebnis bereit.
 Steuerung ueber den Unix-Socket /run/idu2-mvb.sock, je Anfrage und
 Antwort eine JSON-Zeile:
 
-    {"befehl": "dds"}      DDS-Abfrage; Antwort mit allen Meldungssaetzen
+    {"befehl": "dds", "seite": N}  Seite N der DDS-Meldungen, schon
+                                   geholte aus dem Zwischenspeicher
+    {"befehl": "dds", "seite": 1, "neu": true}
+                           Seite 1 neu von DIA1 (auch ohne "seite")
     {"befehl": "letzte"}   letztes Ergebnis, ohne neue Abfrage
     {"befehl": "status"}   Lebenszeichen, Frames, laufende Abfrage
+
+Aufbau der Anfrage laut "MVB Dokumentation IC2000 Payload Structure"
+(Abschnitt 4.2.2.1, dort IDU1 -> VCU1): Datenbytes 0-4 Header, 5 Source,
+6 Dest, 8 Command, 10-11 Cache_index (Mitschnitt 00 01), 13 Nr FC
+(Anzahl), 14-17 Startzeit, 18-21 Endzeit. Commands: 01 REQ_FC erste Seite,
+03 INV_CACHE, 05 REQ_NEXT_PAGE_FC naechste Seite; DIA1 antwortet mit FB
+ANS_FC, Cache_index und Anzahl im Kopf. Je Anfrage
+liefert DIA1 hoechstens 25 Meldungen; Seiten zu 16 (--anzahl; das
+Original-Display fragt 21 an).
+
+Blaettern: Seite 1 = REQ_FC genau wie im Mitschnitt. Jede weitere Seite =
+REQ_NEXT_PAGE_FC, aufgebaut laut REQ_NEXT_PAGE_FC.txt (22 Byte): Header mit
+Command 05, Cache_index (aus der Antwort auf die Seite davor), Anzahl, dann
+00 80 00, Address und 4 Byte Unk - die ersten 9 Byte des Satzes der
+letzten gezeigten Meldung (der letzten der Seite davor). DIA1 ueberspringt
+diese Meldung und liefert die naechsten. Cache_index ist die Version des
+DDS-Caches bei DIA1; er aendert sich nur, wenn neue Meldungen dazukommen,
+und wird beim Blaettern unveraendert zurueckgeschickt, nie hochgezaehlt.
+Fuer die vorige Seite gibt es kein Command: schon geholte Seiten kommen aus
+dem Zwischenspeicher des Dienstes, bis Seite 1 neu abgefragt wird.
 
 /dev/mvblli0 ist exklusiv. Fuer ddsabfrage.py und mvbdiff.py:
 
@@ -42,6 +65,11 @@ Optionen (auch ueber OPTIONEN in /etc/default/idu2-mvb):
     --takt S           Lebenszeichen alle S Sekunden erhoehen (Vorgabe 1)
     --alle-quellen     auch 492 (8 Byte) und 498 (16 Byte) senden, Nullen
     --socket PFAD      Steuersocket (Vorgabe /run/idu2-mvb.sock)
+    --anzahl N         DDS-Meldungen je Seite, 1..255 (Vorgabe 16; das
+                       Original-Display fragt 21 an, DIA1 liefert
+                       hoechstens 25)
+
+Eine Anfrage ueber den Socket kann die Anzahl mit "anzahl" ueberschreiben.
 """
 
 import errno
@@ -98,6 +126,29 @@ REPLY_DATA = bytes.fromhex("0100000000010501fb01")
 REPLY_PAD = bytes.fromhex("00010415")
 CC_CREDIT = 0x10
 
+# Commands der DDS-Abfrage (Datenbyte 8), laut IC2000-Payload-Doku
+REQ_FC, INV_CACHE, REQ_NEXT_PAGE_FC = 0x01, 0x03, 0x05
+
+
+def next_page_data(cache, anzahl, satz):
+    """Daten von REQ_NEXT_PAGE_FC (REQ_NEXT_PAGE_FC.txt): Header wie REQ_FC
+    mit Command 05, dann Cache_index (16 bit BE), Nb_fault_codes (8 bit),
+    00 80 00, Address (16 bit BE), Unk (4 Byte) - die letzten drei sind
+    die ersten 9 Byte des Satzes der letzten gezeigten Meldung. DIA1 macht
+    hinter dieser Meldung weiter."""
+    return (CALL_CR[14:22] + bytes((REQ_NEXT_PAGE_FC,)) + CALL_CR[23:24]
+            + struct.pack(">HB", cache, anzahl) + satz)
+
+
+def request_frames(ref, daten):
+    """CR mit den ersten 14 Datenbytes und ein DT (letztes Paket) mit dem
+    Rest; reicht fuer Anfragen bis 36 Byte."""
+    assert 14 < len(daten) <= 36
+    cr = (CALL_CR[:6] + struct.pack(">HI", ref, len(daten)) + CALL_CR[12:14]
+          + daten[:14])
+    rest = daten[14:]
+    return cr, bytes((5 + len(rest),)) + CALL_DT[1:6] + rest
+
 
 def be16(b, o):
     return (b[o] << 8) | b[o + 1]
@@ -131,42 +182,76 @@ def decode(f):
 
 
 # ---------------------------------------------------------- DDS-Meldungen
-# Wie ddsabfrage.py: Kopf 14 Byte, Saetze ab 00 80 00 im 33-Byte-Raster
-# (der letzte ohne Nr), danach je Satz ein Klartext (CP850, nullterminiert).
+# Wie ddsabfrage.py: Kopf 13 Byte, dann die Saetze (Index und 32 Byte ab
+# 00 80 00, auf Folgeseiten noch 2 Byte davor), danach je Satz ein Klartext
+# (CP850, nullterminiert).
 
 DDS_MARK = b"\x00\x80\x00"
-DDS_REC = 33
-NO_TIME = "--.--.---- --:--:--.---"
+DDS_KOPF = 13
+# Auf Sekunden genau: der Satz enthaelt nur UNIX-Sekunden, Millisekunden
+# gaebe es ohnehin nur als ".000"
+NO_TIME = "--.--.---- --:--:--"
 PRIO = {0x10: "A", 0x20: "B", 0x30: "C"}
 
 
 def dds_time(sec):
     if sec == 0xFFFFFFFF:
         return NO_TIME
-    return time.strftime("%d.%m.%Y %H:%M:%S", time.gmtime(sec)) + ".000"
+    return time.strftime("%d.%m.%Y %H:%M:%S", time.gmtime(sec))
+
+
+def dds_saetze(msg):
+    """Saetze einer ANS_FC (Seite 1) oder ANS_NEXT_PAGE_FC (Folgeseiten):
+    ([(Index, 32 Byte ab 00 80 00), ...], [Texte als Bytes], FC_in_payload)
+    oder None, wenn msg keine solche Antwort ist.
+
+    Kopf 13 Byte: 10 Byte Header, Cache_index (Int16ub), FC_in_payload
+    (Int8ub). Dann FC_in_payload Saetze, dann ebenso viele Texte (CP850,
+    nullterminiert). Ein Satz ist bei ANS_FC Index (1 Byte) + 32 Byte ab
+    00 80 00 (FC_TYPE_1, 33 Byte), bei ANS_NEXT_PAGE_FC steht davor noch
+    Req_nb_fc als Int16ul (FC_TYPE_2, 35 Byte; ANS_NEXT_PAGE_FC.txt). Mit
+    FC_in_payload = 0 endet die Antwort nach dem Kopf."""
+    if len(msg) < DDS_KOPF:
+        return None
+    n = msg[DDS_KOPF - 1]
+    if n == 0:
+        return [], [], 0
+    for vor in (0, 2):                  # FC_TYPE_1, FC_TYPE_2
+        a = DDS_KOPF + vor + 1
+        if msg[a:a + 3] == DDS_MARK:
+            break
+    else:
+        return None
+    groesse = vor + 33
+    saetze = []
+    for k in range(n):
+        a = DDS_KOPF + groesse * k + vor
+        if a + 33 > len(msg) or msg[a + 1:a + 4] != DDS_MARK:
+            break
+        saetze.append((msg[a], bytes(msg[a + 1:a + 33])))
+    texte = msg[DDS_KOPF + groesse * len(saetze):].split(b"\x00")
+    return saetze, texte, n
+
+
+def ereignis_bereich(meld):
+    if not meld:
+        return "-"
+    return "%d..%d" % (meld[0]["ereignisnr"], meld[-1]["ereignisnr"])
 
 
 def dds_meldungen(msg):
-    """Liste der Meldungen als dicts, oder None ohne DDS-Saetze."""
-    i0 = msg.find(DDS_MARK)
-    if i0 < 0:
+    """Liste der Meldungen als dicts, oder None ohne DDS-Antwort."""
+    p = dds_saetze(msg)
+    if p is None:
         return None
-    n = 0
-    while i0 + DDS_REC * n + 32 <= len(msg) and \
-            msg[i0 + DDS_REC * n:i0 + DDS_REC * n + 3] == DDS_MARK:
-        n += 1
-    if not n:
-        return None
-    texts = [t.decode("cp850", errors="replace")
-             for t in msg[i0 + DDS_REC * n - 1:].split(b"\x00")]
+    saetze, texte, _ = p
     out = []
-    for k in range(n):
-        r = msg[i0 + DDS_REC * k:i0 + DDS_REC * k + DDS_REC]
+    for k, (index, r) in enumerate(saetze):
         u16 = lambda o: struct.unpack_from("<H", r, o)[0]
         u32 = lambda o: struct.unpack_from("<I", r, o)[0]
         geht = u32(13)
         out.append({
-            "nr": r[32] if k < n - 1 else k + 1,
+            "nr": index + 1,
             "kommt": dds_time(u32(9)),
             "geht": dds_time(geht),
             "status": "aktiv" if geht == 0xFFFFFFFF else "gegangen",
@@ -180,11 +265,11 @@ def dds_meldungen(msg):
             "ref8": u16(23),
             "ereignisnr": struct.unpack_from(">H", r, 3)[0],
             "meldnr": struct.unpack_from(">H", r, 7)[0],
-            "text": texts[k] if k < len(texts) else "",
-            "roh": bytes(r[:DDS_REC if k < n - 1 else 32]).hex(" "),
+            "text": (texte[k].decode("cp850", errors="replace")
+                     if k < len(texte) else ""),
+            "roh": r.hex(" "),
         })
     return out
-
 
 # ------------------------------------------------------------------ Dienst
 
@@ -196,7 +281,7 @@ def log(msg):
 
 def parse_args(argv):
     o = {"single": True, "dsw_md": True, "ef1": True, "takt": 1.0,
-         "alle": False, "socket": SOCK}
+         "alle": False, "socket": SOCK, "anzahl": 16}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -214,6 +299,12 @@ def parse_args(argv):
         elif a == "--socket":
             i += 1
             o["socket"] = argv[i]
+        elif a == "--anzahl":
+            i += 1
+            o["anzahl"] = int(argv[i], 0)
+            if not 1 <= o["anzahl"] <= 255:
+                log("--anzahl muss zwischen 1 und 255 liegen")
+                sys.exit(2)
         else:
             log("Unbekannte Option: %s" % a)
             sys.exit(2)
@@ -273,6 +364,7 @@ class Dia1:
         self.letzte = None      # letztes Ergebnis (dict fuer JSON)
         self.rx = 0
         self.fremd = 0
+        self.seiten = {}        # Seite -> Ergebnis, seit dem letzten REQ_FC
 
     def alloc_ref(self):
         ref = self.next_ref
@@ -282,16 +374,65 @@ class Dia1:
     def tx(self, tail):
         self.mvb.md_write(DIA1_ADDR, tail)
 
-    def start(self, reply_to):
+    def seite_abrufen(self, reply_to, seite, anzahl, neu):
+        """Seite 1 holt DIA1 mit REQ_FC neu, jede weitere mit
+        REQ_NEXT_PAGE_FC. Einen Befehl fuer die vorige Seite gibt es
+        nicht; schon geholte Seiten kommen deshalb aus dem Zwischenspeicher,
+        und DIA1 bleibt mit seiner Seite im Gleichschritt. neu: Seite 1
+        auf jeden Fall neu holen. Liefert (Fehlertext, None), (None,
+        Ergebnis) ohne Anfrage an DIA1 oder (None, None), wenn die Anfrage
+        laeuft."""
+        if seite in self.seiten and not (neu and seite == 1):
+            return None, dict(self.seiten[seite], zwischengespeichert=True)
+        if seite == 1:
+            self.seiten = {}
+            self.start(reply_to, seite, anzahl)
+            return None, None
+        hoechste = max(self.seiten, default=0)
+        if not hoechste or seite != hoechste + 1:
+            return "Seite %d: zuerst Seite 1 abrufen" % seite, None
+        if self.seiten[hoechste]["letzte"]:
+            return None, {"ok": True, "seite": seite, "anzahl": 0,
+                          "meldungen": [], "letzte": True}
+        # weiter hinter der letzten gezeigten Meldung (der letzten der Seite
+        # davor); Cache_index unveraendert so, wie DIA1 ihn in der Antwort
+        # darauf genannt hat - er ist die Version des DDS-Caches, kein
+        # Seitenzaehler
+        vorige = self.seiten[hoechste]
+        self.start(reply_to, seite, anzahl, vorige["meldungen"][-1],
+                   vorige.get("cache_index", 1))
+        return None, None
+
+    def start(self, reply_to, seite, anzahl, nach=None, cache=1):
+        """REQ_FC (Seite 1) oder, mit nach = letzte gezeigte Meldung,
+        REQ_NEXT_PAGE_FC."""
         ref = self.alloc_ref()
-        self.pending = {"ref": ref, "t0": time.time(), "cc": False,
-                        "antwort": None, "reply_to": reply_to}
-        self.tx(CALL_CR[:6] + struct.pack(">H", ref) + CALL_CR[8:])
-        log("DDS-Abfrage an DIA1 gesendet, Ref %04X" % ref)
+        if nach is None:
+            # Genau der Mitschnitt; Datenbyte 13 = Anzahl
+            cr = (CALL_CR[:6] + struct.pack(">H", ref) + CALL_CR[8:27]
+                  + bytes((anzahl,)))
+            dt = CALL_DT
+            was = "REQ_FC"
+        else:
+            satz = bytes.fromhex(nach["roh"])[:9]   # 00 80 00 Address Unk
+            daten = next_page_data(cache, anzahl, satz)
+            cr, dt = request_frames(ref, daten)
+            was = ("REQ_NEXT_PAGE_FC nach Address %d (EreignisNr), "
+                   "Cache_index %d, Daten %s"
+                   % (nach["ereignisnr"], cache, daten.hex(" ")))
+        now = time.time()
+        self.pending = {"ref": ref, "t0": now, "t_last": now, "cc": False,
+                        "antwort": None, "reply_to": reply_to,
+                        "seite": seite, "anzahl": anzahl, "dt": dt}
+        self.tx(cr)
+        log("DDS-Abfrage an DIA1 gesendet, Ref %04X, Seite %d, bis %d "
+            "Meldungen: %s" % (ref, seite, anzahl, was))
 
     def check_timeout(self):
+        # Abgebrochen wird erst, wenn DIA1 eine Weile schweigt - viele
+        # Meldungen brauchen viele DT-Frames und damit Zeit
         p = self.pending
-        if p and time.time() - p["t0"] > ABFRAGE_TIMEOUT:
+        if p and time.time() - p["t_last"] > ABFRAGE_TIMEOUT:
             self.pending = None
             grund = ("DIA1 hat die Anfrage nicht angenommen (kein CC)"
                      if not p["cc"] else "keine DDS-Daten von DIA1")
@@ -307,6 +448,8 @@ class Dia1:
         if d["src"] != DIA1_ADDR:
             self.fremd += 1
             return None, None
+        if self.pending:
+            self.pending["t_last"] = time.time()
         back = swap_net(d["net"])
         side = 0x00 if d["caller"] else 0x80     # wir: die Gegenseite
         key = d["net"]
@@ -329,7 +472,7 @@ class Dia1:
             p = self.pending
             if p and d["ref"] == p["ref"] and not p["cc"]:
                 p["cc"] = True
-                self.tx(CALL_DT)
+                self.tx(p["dt"])
         return None, None
 
     def check_done(self, key):
@@ -345,23 +488,60 @@ class Dia1:
                 p["antwort"] = msg.hex()
             return None, None
         # Daten von DIA1 (Teil 2): Reply des Displays, dann auswerten
+        # Quittung: derselbe Befehl ohne Payload, also die 10 Byte Header
+        # der Antwort (bei ANS_FC gleich REPLY_DATA aus dem Mitschnitt)
         ref = self.alloc_ref()
+        quittung = msg[:10] if len(msg) >= 10 else REPLY_DATA
         self.tx(bytes((0x17,)) + swap_net(c["net"]) + bytes((0x00,))
-                + struct.pack(">HI", ref, len(REPLY_DATA))
-                + bytes((0x70, 0x00)) + REPLY_DATA + REPLY_PAD)
+                + struct.pack(">HI", ref, len(quittung))
+                + bytes((0x70, 0x00)) + quittung + REPLY_PAD)
         meld = dds_meldungen(msg) or []
         erg = {"ok": True, "anzahl": len(meld), "bytes": len(msg),
                "zeit": time.strftime("%d.%m.%Y %H:%M:%S"),
-               "meldungen": meld}
-        if p:
-            erg["dauer_s"] = round(time.time() - p["t0"], 2)
-            if p["antwort"]:
-                erg["antwort"] = p["antwort"]
-        self.letzte = erg
+               "kopf": msg[:DDS_KOPF].hex(" "), "meldungen": meld}
+        # Kopf der Antwort: 8 Command (ANS_FC = FB), 10-11 Cache_index
+        # (Version des DDS-Caches bei DIA1), 12 Anzahl der Saetze
+        if len(msg) >= 13:
+            erg["cache_index"] = be16(msg, 10)
+        log("DDS-Daten von DIA1: %d Byte, %d Meldungen, EreignisNr %s, "
+            "Kopf %s" % (len(msg), len(meld), ereignis_bereich(meld),
+                         erg["kopf"]))
+        if not p:
+            self.letzte = erg           # DIA1 hat von sich aus geschickt
+            return None, erg
+        erg["angefragt"] = p["anzahl"]
+        if p["antwort"]:
+            erg["antwort"] = p["antwort"]
+        self.auswerten(p, meld, erg)
+        erg["dauer_s"] = round(time.time() - p["t0"], 2)
         self.pending = None
-        log("DDS-Daten von DIA1: %d Byte, %d Meldungen" % (len(msg),
-                                                          len(meld)))
-        return (p["reply_to"] if p else None), erg
+        self.letzte = erg
+        return p["reply_to"], erg
+
+    def auswerten(self, p, meld, erg):
+        """Seite einordnen und zwischenspeichern."""
+        seite = p["seite"]
+        gezeigt ={m["ereignisnr"] for e in self.seiten.values()
+                   for m in e["meldungen"]}
+        neu = [m for m in meld if m["ereignisnr"] not in gezeigt]
+        if meld and not neu:
+            # Falls DIA1 nach der letzten Seite von vorn anfaengt
+            erg["hinweis"] = ("DIA1 lieferte nur schon gezeigte Meldungen - "
+                              "als Ende der Liste genommen")
+            meld = []
+        elif len(neu) < len(meld):
+            erg.setdefault("hinweis", "%d Meldung(en) standen schon auf "
+                           "frueheren Seiten - neue Ereignisse bei DIA1?"
+                           % (len(meld) - len(neu)))
+        if "hinweis" in erg:
+            log("Seite %d: %s" % (seite, erg["hinweis"]))
+        anfang = (seite - 1) * p["anzahl"] + 1
+        for k, m in enumerate(meld):
+            m["pos"] = anfang + k
+        erg.update(seite=seite, anzahl=len(meld), meldungen=meld,
+                   letzte=len(meld) < p["anzahl"])
+        if meld or seite == 1:
+            self.seiten[seite] = erg
 
 
 def main():
@@ -459,9 +639,26 @@ def main():
             if dia.pending:
                 send(cl, {"ok": False, "fehler": "Abfrage laeuft bereits"})
                 return
+            anzahl = req.get("anzahl", o["anzahl"])
+            seite = req.get("seite", 1)
+            # ohne Seitenangabe wie frueher: Seite 1 neu von DIA1
+            neu = bool(req.get("neu", "seite" not in req))
+
+            def ganz(v, lo, hi):
+                return isinstance(v, int) and lo <= v <= hi
+
+            if not (ganz(anzahl, 1, 255) and ganz(seite, 1, 999)):
+                send(cl, {"ok": False, "fehler": "anzahl 1..255, seite "
+                          "1..999"})
+                return
             try:
-                dia.start(cl)
+                grund, erg = dia.seite_abrufen(cl, seite, anzahl, neu)
+                if grund:
+                    send(cl, {"ok": False, "fehler": grund})
+                elif erg:
+                    send(cl, erg)
             except OSError as e:
+                dia.pending = None
                 send(cl, {"ok": False, "fehler": "Senden fehlgeschlagen: %s"
                           % os.strerror(e.errno)})
         elif befehl == "letzte":
