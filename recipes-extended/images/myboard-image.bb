@@ -66,10 +66,11 @@ IMAGE_INSTALL:append = " nginx php-fpm php-cli myboard-web"
 # vollstaendig entgegennimmt, bevor er das Skript erreicht.
 IMAGE_INSTALL:append = " streamd"
 
-# Browser-Betrieb: surf (WebKitGTK) im Vollbild anstelle der Qt-Oberflaeche,
-# zu starten mit "browser-start". matchbox-wm wird gebraucht, weil ein
+# Browser-Betrieb: Firefox ESR im Kiosk-Modus anstelle der Qt-Oberflaeche,
+# zu starten mit "browser-start" (bis 2026-10 surf/WebKitGTK). Firefox
+# kommt aus meta-browser/meta-firefox. matchbox-wm wird gebraucht, weil ein
 # GTK-Fenster ohne Window-Manager den Bildschirm nicht fuellt.
-IMAGE_INSTALL:append = " surf matchbox-wm browser-kiosk"
+IMAGE_INSTALL:append = " firefox matchbox-wm browser-kiosk"
 
 # Board timezone = build host's zone (Europe/Zurich). NTP/timesyncd only syncs
 # the UTC clock; the timezone is a separate static setting that controls how the

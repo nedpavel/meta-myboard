@@ -19,6 +19,7 @@ Alle Layer liegen nebeneinander unter einer gemeinsamen Wurzel (hier `~/Embedded
 ├── meta-openembedded/    # Upstream (Klon)
 ├── meta-intel/           # Upstream (Klon)
 ├── meta-qt6/             # Upstream (Klon)
+├── meta-browser/         # Upstream (Klon), davon nur meta-firefox in bblayers
 ├── meta-myboard/         # <-- DIESES Repo
 └── build/                # generiert, NICHT versioniert (tmp/, sstate-cache/, downloads/)
 ```
@@ -33,6 +34,7 @@ Alle Layer liegen nebeneinander unter einer gemeinsamen Wurzel (hier `~/Embedded
 | meta-openembedded   | wrynose       | `a43f0d532c399458cae44ce66f3799a220fbb497` |
 | meta-intel          | master        | `efa8a9b22ffaeecfdd113673074496d377ca290c` |
 | meta-qt6            | 6.11          | `ef0611a598fd7ba909804be0c6314ed7c85725b9` |
+| meta-browser        | wrynose       | `0715454e29ac38fb0a25bdbb1e0e26fdc4dc7ae3` |
 | poky (optional*)    | my-scarthgap  | `da5493bf86b3e75bbae4c5789fdfaca67b6f6a65` |
 | psplash (optional*) | master        | `53ae74a36bf17675228552abb927d2f981940a6a` |
 
@@ -60,6 +62,10 @@ git -C meta-intel checkout efa8a9b22ffaeecfdd113673074496d377ca290c
 
 git clone https://code.qt.io/yocto/meta-qt6.git
 git -C meta-qt6 checkout ef0611a598fd7ba909804be0c6314ed7c85725b9
+
+# Firefox fuer browser-kiosk; bblayers.conf bindet nur meta-browser/meta-firefox ein
+git clone -b wrynose https://github.com/OSSystems/meta-browser.git
+git -C meta-browser checkout 0715454e29ac38fb0a25bdbb1e0e26fdc4dc7ae3
 
 # meta-myboard = dieses Repo
 git clone <URL-dieses-Repos> meta-myboard
@@ -97,7 +103,9 @@ bitbake myboard-gui        # nur die GUI-Binary (für schnellen NFS-Deploy)
 ## 5. Entwickler-Workflows (Kurzreferenz)
 
 **GUI per NFS testen** (ohne Reflash) — Host exportiert `/srv/nfs/myboard-dev`,
-Board mountet `/mnt/dev`:
+Board mountet `/mnt/dev`. `local.conf` loescht Arbeitsverzeichnisse nach dem
+Bauen (`rm_work`), nimmt `myboard-gui` aber aus (`RM_WORK_EXCLUDE`) — deshalb
+liegt die Binary weiterhin unter `tmp/work`:
 
 ```bash
 # Host:

@@ -12,13 +12,21 @@ set -e
 BROWSER_URL="${1:-http://localhost/}"
 export BROWSER_URL
 
+# Eigenes Firefox-Profil fuer den Kiosk; Firefox legt die Dateien darin an,
+# das Verzeichnis selbst muss es geben.
+BROWSER_PROFILE=/var/lib/browser-kiosk
+export BROWSER_PROFILE
+mkdir -p "$BROWSER_PROFILE"
+
 echo "Stoppe myboard-gui ..."
 systemctl stop myboard-gui 2>/dev/null || true
 
 # Reste einer vorherigen X-Sitzung aufraeumen, sonst scheitert der Start
-# mit "Server is already active" oder einem belegten vt1.
-pkill -x surf 2>/dev/null || true
-rm -f /tmp/.X0-lock
+# mit "Server is already active" oder einem belegten vt1. Nach pkill oder
+# Stromausfall bleibt die Profilsperre liegen; dann meldet Firefox "laeuft
+# bereits" statt zu starten.
+pkill -x firefox 2>/dev/null || true
+rm -f /tmp/.X0-lock "$BROWSER_PROFILE/lock" "$BROWSER_PROFILE/.parentlock"
 
 echo "Starte Browser: $BROWSER_URL"
 exec xinit /etc/browser-xinitrc -- /usr/bin/Xorg :0 vt1
