@@ -1,0 +1,37 @@
+#!/bin/sh
+# oberflaeche — waehlt die Bedienoberflaeche auf dem Bildschirm. Die Wahl
+# bleibt ueber einen Neustart erhalten (systemctl enable/disable).
+#
+#   oberflaeche web      Web-Oberflaeche im Firefox-Kiosk (http://localhost/gui/)
+#   oberflaeche qt       Qt-Oberflaeche myboard-gui (Vorgabe im Image)
+#   oberflaeche status   was gerade eingestellt ist und laeuft
+#
+# Die Web-Oberflaeche ist ueber das Netz immer erreichbar
+# (http://<pixy>/gui/), egal was hier eingestellt ist.
+
+status() {
+    for u in myboard-gui myboard-webgui-kiosk myboard-webgui-api; do
+        printf '%-22s %-9s %s\n' "$u" "$(systemctl is-enabled $u.service 2>/dev/null)" \
+            "$(systemctl is-active $u.service 2>/dev/null)"
+    done
+}
+
+case "$1" in
+web)
+    systemctl disable --now myboard-gui.service
+    systemctl enable --now myboard-webgui-kiosk.service
+    status
+    ;;
+qt)
+    systemctl disable --now myboard-webgui-kiosk.service
+    systemctl enable --now myboard-gui.service
+    status
+    ;;
+status|"")
+    status
+    ;;
+*)
+    echo "Aufruf: oberflaeche web|qt|status" >&2
+    exit 2
+    ;;
+esac

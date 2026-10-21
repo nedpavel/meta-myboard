@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<!-- MyBoard — Web-Oberflaeche. Gleiche Seiten und Tasten wie myboard-gui
+     (Qt); Daten ueber den Dienst myboard-webgui-api (/api/). -->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyBoard</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <header id="kopf">
+    <div class="kopf-zeit"><div id="datum">01.02.86</div><div id="uhr">01:49:30</div></div>
+    <div id="titel">Hauptmenü</div>
+    <div class="kopf-zug"><div id="halbzug">1. Halbzug</div><div id="zugnummer">1 500 012-3</div><div>mm:ss</div></div>
+  </header>
+
+  <main id="seiten">
+
+    <!-- 0: Hauptmenue -->
+    <section class="seite menue aktiv" data-titel="Hauptmenü">
+      <div class="arbeit"></div>
+      <div class="wagen">
+        <div class="wagen-zelle" data-wagen="0"><img src="img/ICN_Office.jpg" alt=""><div class="wagen-nr">1 500 012-3</div></div>
+        <div class="wagen-zelle" data-wagen="1"><img src="img/ICN_Office_2.jpg" alt=""><div class="wagen-nr">2 500 012-1</div></div>
+      </div>
+      <div class="leiste">
+        <button data-seite="1">Zugs-
+übersicht</button>
+        <button data-seite="2">Prozess-
+wert</button>
+        <button data-seite="3">Zustands-
+daten</button>
+        <button data-seite="4">DDS -
+Speicher</button>
+        <button data-seite="5">Update
+App</button>
+        <button data-seite="6">Info</button>
+        <button></button>
+        <button></button>
+        <button>S</button>
+        <button>LF</button>
+      </div>
+    </section>
+
+    <!-- 1: Zugsuebersicht (Platzhalter wie in Qt) -->
+    <section class="seite unterseite" data-titel="Zugsübersicht">
+      <h1>Zugsübersicht</h1>
+      <hr>
+      <p class="prosa">Auf dieser Seite wird später die Zusammensetzung des Zuges dargestellt: alle Wagen des Halbzugs mit ihrer Fahrzeugnummer, Position im Verband, Fahrtrichtung sowie dem aktuellen Betriebszustand jedes Fahrzeugs.</p>
+      <p class="leer-hinweis">(Diese Seite ist noch leer — Inhalte folgen.)</p>
+      <div class="dehnen"></div>
+      <div><button class="zurueck gross">◄  Zurück  (C)</button></div>
+    </section>
+
+    <!-- 2: Prozesswert (CAN live) -->
+    <section class="seite tabellenseite" data-titel="Prozesswert">
+      <h2>Prozesswerte (CAN live)</h2>
+      <div id="can-status" class="status">CAN: initialisiere …</div>
+      <div class="tabelle-rahmen">
+        <table id="can-tabelle">
+          <thead><tr><th class="eng">CAN-ID</th><th>Signal</th><th class="eng">Wert</th><th class="eng">Einh.</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="knopfzeile"><button class="zurueck">◄  Zurück  (C)</button></div>
+    </section>
+
+    <!-- 3: Zustandsdaten (Platzhalter wie in Qt) -->
+    <section class="seite unterseite" data-titel="Zustandsdaten">
+      <h1>Zustandsdaten</h1>
+      <hr>
+      <p class="prosa">Diese Seite zeigt später die Diagnose- und Zustandsdaten der Fahrzeuge: Warnungen, Fehlermeldungen, Übertemperaturen und den Status der einzelnen Stromrichter und Baugruppen.</p>
+      <p class="leer-hinweis">(Diese Seite ist noch leer — Inhalte folgen.)</p>
+      <div class="dehnen"></div>
+      <div><button class="zurueck gross">◄  Zurück  (C)</button></div>
+    </section>
+
+    <!-- 4: DDS-Speicher -->
+    <section class="seite tabellenseite" data-titel="DDS-Speicher">
+      <h2>DDS-Meldungen von DIA1</h2>
+      <div id="dds-status" class="status">Noch nicht abgefragt — Knopf oder Taste 1; danach ▲▼ zum Wählen und Blättern.</div>
+      <div class="tabelle-rahmen" id="dds-rahmen">
+        <table id="dds-tabelle" class="dds">
+          <thead><tr></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="knopfzeile">
+        <button class="zurueck">◄  Zurück  (C)</button>
+        <div class="dehnen"></div>
+        <button id="dds-knopf">DDS-Meldungen abrufen  (1)</button>
+      </div>
+    </section>
+
+    <!-- 5: Update App -->
+    <section class="seite update" data-titel="Update App">
+      <div class="frage">Soll die Applikation wirklich
+ab USB-Stick upgedatet werden?</div>
+      <div id="usb-hinweis"></div>
+      <div class="ja-nein">
+        <div id="ja">Ja</div><div id="nein">Nein</div>
+        <div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div>
+      </div>
+    </section>
+
+    <!-- 6: Info -->
+    <section class="seite info" data-titel="Info">
+      <h1>System-Info</h1>
+      <hr>
+      <dl>
+        <dt>Board:</dt><dd>MyBoard – Bahn-Bediendisplay</dd>
+        <dt>Maschine:</dt><dd id="info-maschine">intel-corei7-64 (x86-64)</dd>
+        <dt>Applikation:</dt><dd id="info-app">myboard-webgui</dd>
+        <dt>CAN:</dt><dd id="info-can">can0 · Matrix + CANopen-Decoder</dd>
+        <dt>Erstellt mit:</dt><dd>HTML/CSS/JavaScript → Firefox (Kiosk) → Yocto-Build</dd>
+      </dl>
+      <div class="dehnen"></div>
+      <p class="info-hinweis">◄  C = zurück zum Hauptmenü</p>
+    </section>
+
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

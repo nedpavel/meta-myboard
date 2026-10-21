@@ -1,0 +1,28 @@
+[Unit]
+Description=MyBoard Web-Oberflaeche im Firefox-Kiosk
+After=systemd-user-sessions.service nginx.service myboard-webgui-api.service
+Wants=nginx.service myboard-webgui-api.service
+# Bildschirm und tty1 gehoeren entweder der Qt-Oberflaeche oder diesem
+# Kiosk (beide: Xorg :0 vt1). Conflicts wirkt in beide Richtungen.
+# Umschalten mit 'oberflaeche web|qt'.
+Conflicts=myboard-gui.service getty@tty1.service
+After=myboard-gui.service getty@tty1.service
+
+[Service]
+Environment=BROWSER_URL=http://localhost/gui/
+Environment=BROWSER_PROFILE=/var/lib/browser-kiosk
+Environment=HOME=/root
+# Reste einer vorherigen X-Sitzung und die Profilsperre nach Abbruch oder
+# Stromausfall wegraeumen (wie browser-start)
+ExecStartPre=/bin/mkdir -p /var/lib/browser-kiosk
+ExecStartPre=/bin/rm -f /tmp/.X0-lock /var/lib/browser-kiosk/lock /var/lib/browser-kiosk/.parentlock
+ExecStart=/usr/bin/xinit /etc/browser-xinitrc -- /usr/bin/Xorg :0 vt1
+Restart=on-failure
+RestartSec=2
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

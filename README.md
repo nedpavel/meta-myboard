@@ -9,6 +9,12 @@ Enthält:
 - **`recipes-gui/myboard-gui`** — Qt6-Widgets-Kiosk-GUI (`myboard-gui`), Vollbild
   auf einem 640×480-Panel unter „bare X" (ohne Window-Manager, fbdev-Treiber).
   Inkl. USB-Stick-App-Update (Taste 5 → „Update App").
+- **`recipes-gui/myboard-webgui`** — dieselbe Oberfläche als Web-App unter
+  `http://<pixy>/gui/` (Firefox-Kiosk am Gerät oder Browser im Netz), mit dem
+  Hintergrund-Dienst `myboard-webgui-api`. Umschalten mit
+  `oberflaeche web|qt` — siehe [dort](recipes-gui/myboard-webgui/README.md).
+- **`recipes-graphics/browser-kiosk`, `recipes-browser/firefox`** — Firefox ESR
+  im Kiosk-Modus (`browser-start <URL>`).
 - **`conf/machine`** — Maschinendefinition.
 - **`recipes-extended/images/myboard-image.bb`** — das Ziel-Image (mit tzdata,
   Zeitzone Europe/Zurich, NTP-Sync, NFS-Dev-Mount, CAN, xorg-conf).

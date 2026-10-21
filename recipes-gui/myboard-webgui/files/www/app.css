@@ -1,0 +1,161 @@
+/* MyBoard Web-Oberflaeche - Aussehen wie myboard-gui (Qt).
+ *
+ * Masse wie im Qt-Code fuer die 640x480-Basis notiert (1px = 1 Basis-Pixel).
+ * #app wird per CSS zoom auf das Fenster skaliert (1024x768 -> 1.6 wie px()
+ * in Qt); den Faktor setzt app.js als --k. Schriftgroessen in Qt sind Punkte:
+ * pt * 4/3 = Pixel. Rahmen bleiben wie in Qt 1 echter Pixel (--b).
+ */
+:root {
+  --bg: #EDEDE6;       /* COL_BG     */
+  --rand: #9AA0A6;     /* COL_BORDER */
+  --text: #2B2B2B;     /* COL_TEXT   */
+  --blau: #23457E;     /* COL_BLUE   */
+  --zelle: #F6F6F1;    /* COL_CELL   */
+  --ok: #2E7D32;
+  --warn: #B9770E;
+  --fehler: #C0392B;
+  --grau: #888888;
+  --k: 1;                              /* Zoom, von app.js gesetzt */
+  --b: calc(1px / var(--k));           /* 1 echter Pixel */
+  --b2: calc(2px / var(--k));
+}
+
+html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+body { font-family: sans-serif; color: var(--text); }
+button { font-family: inherit; }
+
+#app {
+  width: 640px; height: 480px; margin: 0 auto; zoom: var(--k);
+  box-sizing: border-box; padding: 2px;
+  display: flex; flex-direction: column;
+}
+
+/* ---------------------------------------------------------- Kopfzeile */
+#kopf {
+  height: 47px; flex: none; display: flex; box-sizing: border-box;
+  background: var(--zelle); border: var(--b) solid var(--rand);
+}
+.kopf-zeit {
+  width: 180px; flex: none; box-sizing: border-box; padding: 3px 12px;
+  border-right: var(--b) solid var(--rand);
+  display: flex; flex-direction: column; justify-content: center;
+  text-align: center; font-size: 13.33px;            /* pt(10) */
+}
+#titel {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 17.33px;                                  /* pt(13) */
+  border-right: var(--b) solid var(--rand);
+}
+.kopf-zug {
+  width: 220px; flex: none; box-sizing: border-box; padding: 2px 12px;
+  display: flex; flex-direction: column; justify-content: center;
+  text-align: center; font-size: 12px; font-weight: bold;   /* pt(9) */
+  color: var(--blau);
+}
+
+/* ---------------------------------------------------------- Seiten */
+#seiten { flex: 1; min-height: 0; display: flex; }
+.seite { display: none; flex: 1; min-width: 0; flex-direction: column; box-sizing: border-box; }
+.seite.aktiv { display: flex; }
+.dehnen { flex: 1; }
+
+/* Hauptmenue */
+.arbeit { flex: 1; border-left: var(--b) solid var(--rand); border-right: var(--b) solid var(--rand); }
+.wagen {
+  height: 32px; flex: none; box-sizing: border-box; padding: 1px 0;
+  border-left: var(--b) solid var(--rand); border-right: var(--b) solid var(--rand);
+  display: grid; grid-template-columns: repeat(10, 1fr);
+  grid-template-rows: minmax(0, 1fr);          /* Zeile nicht ueber 32 wachsen lassen */
+}
+.wagen-zelle {
+  grid-column: span 2; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  box-sizing: border-box; padding: 0 1px; border: var(--b) solid var(--rand);
+  overflow: hidden; cursor: pointer;
+}
+.wagen-zelle img { flex: 1; min-height: 0; width: 100%; object-fit: fill; display: block; }
+.wagen-nr {
+  flex: none; line-height: 1.15; text-align: center; font-size: 9.33px;   /* pt(7) */
+  white-space: nowrap; overflow: hidden;
+}
+.wagen-zelle.gewaehlt { border: var(--b2) solid var(--blau); }
+.wagen-zelle.gewaehlt .wagen-nr { font-weight: bold; }
+
+.leiste {
+  height: 43px; flex: none; box-sizing: border-box; border: var(--b) solid var(--rand);
+  display: grid; grid-template-columns: repeat(10, 1fr);
+}
+.leiste button {
+  background: var(--zelle); color: var(--text); border: var(--b) solid var(--rand);
+  font-size: 10px; padding: 0; white-space: pre-line; min-width: 0;
+}
+.leiste button:active, button:active:not(:disabled) { background: var(--blau); color: white; }
+
+/* Unterseiten (Platzhalter) */
+.unterseite {
+  background: var(--bg); border: var(--b) solid var(--rand); padding: 24px; gap: 20px;
+}
+.unterseite h1 { margin: 0; font-size: 29.33px; color: var(--blau); }   /* pt(22) */
+.unterseite hr, .info hr { width: 100%; border: none; border-top: var(--b) solid var(--rand); margin: 0; }
+.prosa { margin: 0; font-size: 18.67px; }                                /* pt(14) */
+.leer-hinweis { margin: 0; font-size: 16px; font-style: italic; color: var(--grau); }  /* pt(12) */
+
+/* Knoepfe "Zurueck" und DDS */
+.zurueck, #dds-knopf {
+  background: var(--zelle); color: var(--text); border: var(--b) solid var(--rand);
+  font-size: 13px; padding: 5px 18px; white-space: pre;
+}
+.zurueck.gross { font-size: 16px; padding: 10px 24px; width: 220px; }
+button:disabled { color: #A0A0A0; }
+
+/* Tabellenseiten: Prozesswert und DDS */
+.tabellenseite { background: var(--bg); border: var(--b) solid var(--rand); padding: 6px 8px; gap: 5px; }
+.tabellenseite h2 { margin: 0; font-size: 18.67px; color: var(--blau); }  /* pt(14) */
+.status { font-size: 12px; color: var(--grau); white-space: pre-line; }  /* pt(9) */
+.tabelle-rahmen {
+  flex: 1; min-height: 0; overflow: auto;
+  background: white; border: var(--b) solid #999;
+}
+table { border-collapse: collapse; color: #202020; font-size: 12px; }
+#can-tabelle { width: 100%; }
+th {
+  position: sticky; top: 0; background: #E0E0E0; padding: 1px 3px;
+  text-align: left; font-weight: normal; border-right: var(--b) solid #C8C8C8; white-space: nowrap;
+}
+td { padding: 1px 3px; border-bottom: var(--b) solid #E8E8E8; white-space: nowrap; }
+th.eng, td.eng { width: 1%; }
+/* Signal dehnt sich, die anderen Spalten so schmal wie ihr Inhalt (Qt:
+   Stretch bzw. ResizeToContents) */
+#can-tabelle th:nth-child(2), #can-tabelle td:nth-child(2) { width: 100%; white-space: normal; }
+td.grau { color: #666666; }
+table.dds { font-size: 10.67px; }                                         /* pt(8) */
+table.dds tr { cursor: pointer; }
+table.dds tr.gewaehlt td { background: var(--blau); color: white; }
+td.aktiv { color: #C0392B; }
+td.gegangen { color: #666666; }
+.knopfzeile { display: flex; flex: none; }
+
+/* Update-Seite */
+.update { background: var(--bg); border: var(--b) solid var(--rand); }
+.frage {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  text-align: center; white-space: pre-line; font-weight: bold; font-size: 21.33px;   /* pt(16) */
+}
+#usb-hinweis { text-align: center; font-size: 14.67px; margin-bottom: 8px; min-height: 1.2em; }  /* pt(11) */
+.ja-nein {
+  height: 43px; flex: none; box-sizing: border-box; border: var(--b) solid var(--rand);
+  display: grid; grid-template-columns: repeat(10, 1fr);
+}
+.ja-nein > div {
+  border: var(--b) solid var(--rand); display: flex; align-items: center; justify-content: center;
+  font-weight: bold; font-size: 17.33px; color: #B0B0B0;                   /* pt(13) */
+}
+.ja-nein.stick #ja, .ja-nein.stick #nein { color: #000000; cursor: pointer; }
+
+/* Info-Seite: in Qt mit festen Punktgroessen (Designer), auf 1024x768
+   umgerechnet: 20pt = 16.67px, 12pt = 10px, Raender 18/12 px. */
+.info { background: var(--bg); border: var(--b) solid var(--rand); padding: 7.5px 11.25px; gap: 6.25px; }
+.info h1 { margin: 0; font-size: 16.67px; color: var(--blau); }
+.info dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 5px 10px; font-size: 10px; }
+.info dt { margin: 0; }
+.info dd { margin: 0; font-weight: bold; }
+.info-hinweis { margin: 0; font-size: 10px; font-style: italic; color: var(--grau); }

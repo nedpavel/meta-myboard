@@ -72,6 +72,12 @@ IMAGE_INSTALL:append = " streamd"
 # GTK-Fenster ohne Window-Manager den Bildschirm nicht fuellt.
 IMAGE_INSTALL:append = " firefox matchbox-wm browser-kiosk"
 
+# Web-Oberflaeche: dieselbe Bedienung wie myboard-gui als HTML/JavaScript
+# unter http://<pixy>/gui/, mit Hintergrund-Dienst myboard-webgui-api.
+# Am Geraet bleibt Qt die Vorgabe; 'oberflaeche web' schaltet den
+# Firefox-Kiosk (myboard-webgui-kiosk) ein, 'oberflaeche qt' zurueck.
+IMAGE_INSTALL:append = " myboard-webgui myboard-webgui-kiosk"
+
 # Board timezone = build host's zone (Europe/Zurich). NTP/timesyncd only syncs
 # the UTC clock; the timezone is a separate static setting that controls how the
 # local time (and thus the GUI clock) is displayed.

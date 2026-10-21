@@ -1,0 +1,16 @@
+[Unit]
+Description=MyBoard Web-Oberflaeche: Hintergrund-Dienst (CAN, DDS, USB-Update)
+# Laeuft immer - auch wenn auf dem Bildschirm die Qt-Oberflaeche ist -,
+# damit die Web-Oberflaeche ueber das Netz (http://<pixy>/gui/) geht.
+After=network.target
+
+[Service]
+# root: USB-Stick mounten und die Web-App unter /usr/share tauschen
+ExecStart=/usr/bin/python3 /usr/bin/myboard-webgui-api
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

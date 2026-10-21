@@ -38,4 +38,27 @@ server {
         fastcgi_read_timeout 3600;
         fastcgi_send_timeout 3600;
     }
+
+    # --- Web-Oberflaeche (myboard-webgui) ------------------------------
+    # Die Seiten liegen unter /usr/share/myboard-webgui/www; ein Update
+    # vom USB-Stick tauscht das Verzeichnis aus, deshalb no-cache.
+    location = /gui {
+        return 301 /gui/;
+    }
+    location /gui/ {
+        alias /usr/share/myboard-webgui/www/;
+        index index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    # Hintergrund-Dienst myboard-webgui-api (CAN, DDS, USB-Update).
+    # proxy_buffering off: die CAN-Werte kommen als Server-Sent Events und
+    # muessen sofort durchgereicht werden; der Strom bleibt lange offen.
+    location /api/ {
+        proxy_pass         http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_buffering    off;
+        proxy_read_timeout 3600;
+    }
 }
