@@ -5,9 +5,18 @@ After=network.target
 # Der Dienst startete frueher zuerst, belegte 9000 und php-fpm scheiterte
 # mit "Address already in use".
 After=php-fpm.service
+# Verlauf in MariaDB: Datenbank, Tabelle und Benutzer legt
+# myboard-db-setup.service an. Laeuft die Datenbank (noch) nicht, puffert
+# streamd die Werte und verbindet sich jede Sekunde neu.
+Wants=mysqld.service myboard-db-setup.service
+After=mysqld.service myboard-db-setup.service
 
 [Service]
-ExecStart=/usr/bin/streamd 9100
+# 9100 = Port, 60 = Transaktionen pro Sekunde in MariaDB
+ExecStart=/usr/bin/streamd 9100 60
+# eigener Benutzer: Anmeldung an MariaDB ueber unix_socket als 'streamd'
+User=streamd
+Group=streamd
 Restart=always
 RestartSec=2
 

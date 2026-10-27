@@ -4,7 +4,7 @@
 Die Web-Oberflaeche (/gui/, HTML/JavaScript in Firefox) kann weder CAN noch
 den Socket von idu2-mvb noch USB-Sticks selbst ansprechen; PHP-FPM darf es
 auch nicht (laeuft als nobody, ohne AF_CAN). Dieser Dienst ist die Bruecke.
-nginx reicht /api/ an ihn weiter (127.0.0.1:8081).
+Apache reicht /api/ an ihn weiter (127.0.0.1:8081).
 
     GET  /api/can/strom   Server-Sent Events: zuerst die ganze Tabelle, dann
                           hoechstens 4x/s die geaenderten Zeilen
@@ -25,12 +25,12 @@ getauscht (www -> www.alt, www.neu -> www).
 
 Optionen:
     --port N          Port (Vorgabe 8081)
-    --adresse A       Adresse (Vorgabe 127.0.0.1; nginx davor)
+    --adresse A       Adresse (Vorgabe 127.0.0.1; Apache davor)
     --can IF          CAN-Schnittstelle (Vorgabe can0)
     --can-quelle F    statt CAN ein candump-Log abspielen (Test ohne CAN)
     --matrix F        Signaltabelle (Vorgabe /usr/share/myboard-webgui/can_matrix.tsv)
     --www D           Web-App (Vorgabe /usr/share/myboard-webgui/www);
-                      wird unter /gui/ auch direkt ausgeliefert (Test ohne nginx)
+                      wird unter /gui/ auch direkt ausgeliefert (Test ohne Apache)
     --dds-socket S    Socket von idu2-mvb (Vorgabe /run/idu2-mvb.sock)
 """
 
@@ -527,7 +527,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")     # nginx: nicht puffern
         self.end_headers()
         rev, letzte = -1, 0.0
         try:
@@ -549,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def datei(self, rel):
-        """Web-App direkt ausliefern (Test ohne nginx)."""
+        """Web-App direkt ausliefern (Test ohne Apache)."""
         www = os.path.realpath(self.O["www"])
         p = os.path.realpath(os.path.join(www, rel.lstrip("/")))
         if os.path.isdir(p):

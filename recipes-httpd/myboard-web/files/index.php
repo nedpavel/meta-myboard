@@ -13,10 +13,13 @@
 const DATA_DIR = '/var/www/localhost/data';
 const ZEILEN   = 40;          /* so viele Verlaufszeilen anzeigen */
 
+/* Verlauf in MariaDB (schreibt streamd). php-fpm laeuft als nobody und
+   meldet sich ueber den Unix-Socket ohne Passwort an (unix_socket). */
+const DB_SOCKET = '/var/lib/mysql/mysql.sock';
+
 $streamPfad = '/run/myboard-stream/latest.txt';
 $postPfad   = DATA_DIR . '/latest.txt';
 $logPfad    = DATA_DIR . '/stream.log';
-$dbPfad     = DATA_DIR . '/werte.db';
 
 /* Zwei moegliche Quellen fuer den aktuellen Wert:
    - streamd (TCP, Port 9100) schreibt ins tmpfs, weil es bis zu
@@ -33,23 +36,22 @@ if (is_file($streamPfad)) {
 $letzte = is_file($letztePfad) ? trim(file_get_contents($letztePfad)) : '';
 
 /* Verlauf aus zwei moeglichen Quellen:
-   - werte.db  schreibt streamd (TCP) — gebuendelt, um die CFast zu schonen
+   - Tabelle werte in MariaDB schreibt streamd (TCP), 60 Transaktionen/s
    - stream.log schreibt upload.php (HTTP-POST)
-   Die Datenbank hat Vorrang, sofern vorhanden. */
+   Die Datenbank hat Vorrang, sofern sie Werte hat. */
 $verlauf = [];
-if (is_file($dbPfad)) {
-    try {
-        $db = new SQLite3($dbPfad, SQLITE3_OPEN_READONLY);
-        $db->busyTimeout(2000);     /* streamd schreibt parallel */
-        $res = $db->query('SELECT zeit, wert FROM werte
-                           ORDER BY id DESC LIMIT ' . ZEILEN);
-        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
-            $verlauf[] = $r['zeit'] . "\t" . $r['wert'];
-        }
-        $db->close();
-    } catch (Exception $e) {
-        /* Datenbank gerade nicht lesbar — dann eben ohne Verlauf */
+try {
+    $db = new mysqli('localhost', 'nobody', '', 'myboard', 0, DB_SOCKET);
+    /* Zeit mit Millisekunden wie in latest.txt (%f liefert 6 Stellen) */
+    $res = $db->query("SELECT LEFT(DATE_FORMAT(zeit, '%Y-%m-%d %H:%i:%s.%f'), 23)
+                              AS zeit, wert
+                       FROM werte ORDER BY id DESC LIMIT " . ZEILEN);
+    while ($r = $res->fetch_assoc()) {
+        $verlauf[] = $r['zeit'] . "\t" . $r['wert'];
     }
+    $db->close();
+} catch (Throwable $e) {
+    /* Datenbank gerade nicht erreichbar — dann eben ohne Verlauf */
 }
 if (!$verlauf && is_file($logPfad)) {
     $alle = file($logPfad, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);

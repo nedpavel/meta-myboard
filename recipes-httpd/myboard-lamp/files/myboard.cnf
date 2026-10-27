@@ -1,0 +1,34 @@
+# MariaDB fuer das Pixy 1000 (myboard-lamp, /etc/my.cnf.d/myboard.cnf).
+#
+# /etc/my.cnf aus meta-oe liest diese Datei zuletzt ein; was hier steht,
+# ueberschreibt ihre Vorgaben - so bleibt das MariaDB-Rezept unveraendert
+# (eine eigene my.cnf im Rezept erzwingt einen stundenlangen Neubau).
+#
+# Anders als die Vorlage:
+#   - Netz an: Port 3306 auf allen Schnittstellen (MySQL Workbench oder
+#     phpMyAdmin vom Laptop). Die Vorlage hat skip-networking.
+#   - InnoDB statt MyISAM: bleibt bei Stromausfall heil. Jede Transaktion
+#     wird fest geschrieben; streamd buendelt die Messwerte zu 60
+#     Transaktionen pro Sekunde.
+#   - kleine Puffer, passend zum Pixy
+#
+# Benutzer und Datenbank legt myboard-db-setup.service an.
+
+[client]
+default-character-set           = utf8mb4
+
+[mysqld]
+skip-networking                 = 0
+bind-address                    = 0.0.0.0
+# keine DNS-Abfrage je Verbindung: Rechte haengen an IP oder '%'
+skip-name-resolve
+character-set-server            = utf8mb4
+collation-server                = utf8mb4_unicode_ci
+
+ignore-builtin-innodb           = 0
+default-storage-engine          = InnoDB
+innodb_buffer_pool_size         = 64M
+innodb_log_file_size            = 32M
+# 1 = jede Transaktion fest auf der CFast (sonst gehen bei Stromausfall
+# bis zu 1 s Werte verloren)
+innodb_flush_log_at_trx_commit  = 1

@@ -15,6 +15,17 @@ Enthält:
   `oberflaeche web|qt` — siehe [dort](recipes-gui/myboard-webgui/README.md).
 - **`recipes-graphics/browser-kiosk`, `recipes-browser/firefox`** — Firefox ESR
   im Kiosk-Modus (`browser-start <URL>`).
+- **`recipes-httpd/myboard-lamp`** — LAMP: Apache 2.4 (Port 80) mit PHP über
+  php-fpm, MariaDB 11.4 (Port 3306 auch übers Netz, InnoDB), phpMyAdmin unter
+  `http://<pixy>/phpmyadmin/`, Perl. Legt die Datenbank `myboard` an.
+  Anmeldung übers Netz und in phpMyAdmin als `admin` / `myboard` —
+  **nach der Inbetriebnahme ändern:**
+  `mariadb -e "ALTER USER 'admin'@'%' IDENTIFIED BY '<neu>';"` (am Gerät als
+  root). `streamd` und PHP (als `nobody`) melden sich ohne Passwort über den
+  Unix-Socket an, übers Netz geht das nicht.
+- **`recipes-httpd/streamd`, `recipes-httpd/myboard-web`** — Datenstrom auf
+  TCP-Port 9100 → MariaDB-Tabelle `myboard.werte` (60 Transaktionen/s,
+  höchstens 100 000 Zeilen), Anzeige unter `http://<pixy>/`.
 - **`conf/machine`** — Maschinendefinition.
 - **`recipes-extended/images/myboard-image.bb`** — das Ziel-Image (mit tzdata,
   Zeitzone Europe/Zurich, NTP-Sync, NFS-Dev-Mount, CAN, xorg-conf).

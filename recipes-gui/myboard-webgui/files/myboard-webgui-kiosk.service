@@ -1,7 +1,7 @@
 [Unit]
 Description=MyBoard Web-Oberflaeche im Firefox-Kiosk
-After=systemd-user-sessions.service nginx.service myboard-webgui-api.service
-Wants=nginx.service myboard-webgui-api.service
+After=systemd-user-sessions.service apache2.service myboard-webgui-api.service
+Wants=apache2.service myboard-webgui-api.service
 # Bildschirm und tty1 gehoeren entweder der Qt-Oberflaeche oder diesem
 # Kiosk (beide: Xorg :0 vt1). Conflicts wirkt in beide Richtungen.
 # Umschalten mit 'oberflaeche web|qt'.

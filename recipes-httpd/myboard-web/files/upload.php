@@ -10,12 +10,12 @@
  *         sleep 1
  *     done
  *
- * Eine DAUERHAFT OFFENE Verbindung funktioniert hier NICHT, auch wenn
- * nginx mit "fastcgi_request_buffering off" nicht puffert (per nginx -T
- * geprueft). Der Puffer sitzt in PHP-FPM: FPM uebergibt einen Request
- * erst dann an das Skript, wenn er vollstaendig vorliegt. Fuer stehende
- * Stroeme ist PHP-FPM bauartbedingt nicht gemacht; braeuchte man das,
- * waere ein eigener Dienst auf einem eigenen Port der richtige Weg.
+ * Eine DAUERHAFT OFFENE Verbindung funktioniert hier NICHT, auch wenn der
+ * Webserver selbst nicht puffert (so mit nginx geprueft, heute Apache).
+ * Der Puffer sitzt in PHP-FPM: FPM uebergibt einen Request erst dann an
+ * das Skript, wenn er vollstaendig vorliegt. Fuer stehende Stroeme ist
+ * PHP-FPM bauartbedingt nicht gemacht — dafuer gibt es streamd (TCP-Port
+ * 9100, Verlauf in MariaDB).
  *
  * Die periodische Variante ist ohnehin robuster: Sie belegt keinen
  * FPM-Arbeitsprozess dauerhaft, und ein Verbindungsabbruch kostet

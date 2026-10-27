@@ -2,9 +2,8 @@
  *
  * Hintergrund: Ueber PHP-FPM laesst sich eine stehende Verbindung nicht
  * verarbeiten — FPM uebergibt einen Request erst, wenn er vollstaendig
- * vorliegt (am Geraet geprueft; nginx selbst puffert dank
- * fastcgi_request_buffering off nicht). Fuer echte Stroeme braucht es
- * deshalb einen eigenen Dienst auf einem eigenen Port.
+ * vorliegt. Fuer echte Stroeme braucht es deshalb einen eigenen Dienst auf
+ * einem eigenen Port.
  *
  * Sender, einmal verbinden und laufen lassen:
  *     while true; do echo "Wert $(date +%s%3N)"; sleep 0.01; done | nc <board> 9100
@@ -12,17 +11,25 @@
  * Gelesen wird zeilenweise; jede Zeile ist ein Wert. Mehrere Sender
  * gleichzeitig sind moeglich (bis MAX_CLIENTS).
  *
- * SCHREIBSTRATEGIE — wichtig bei 100 Werten/s:
+ *     streamd [port] [transaktionen_pro_sekunde]     Vorgabe: 9100 60
+ *
+ * SCHREIBSTRATEGIE — bei bis zu 100 Werten/s:
  *   latest.txt  liegt im tmpfs (RAM) und wird bei JEDEM Wert aktualisiert.
  *               Die Anzeige liest immer den aktuellen Stand.
- *   werte.db    SQLite auf der CFast. Werte werden gesammelt und nur alle
- *               FLUSH_MS in EINER Transaktion geschrieben. Einzeln waeren
- *               es 100 Flash-Zugriffe pro Sekunde — das kostet Lebensdauer
- *               und Leistung. Gebuendelt ist es einer pro Sekunde.
+ *   werte       Tabelle in MariaDB (Datenbank myboard). Werte werden
+ *               gesammelt und 60-mal pro Sekunde in EINER Transaktion
+ *               (mehrzeiliges INSERT) geschrieben; InnoDB schreibt jede
+ *               Transaktion fest auf die CFast. Bei Stromausfall fehlen
+ *               hoechstens die Werte der letzten ~17 ms.
+ *
+ * Anmeldung ohne Passwort ueber den Unix-Socket (unix_socket): der Dienst
+ * laeuft als Linux-Benutzer streamd, der Datenbank-Benutzer heisst gleich.
+ * Socket und Port liest die Client-Bibliothek aus /etc/my.cnf ([client]).
+ * Ist die Datenbank (noch) nicht erreichbar, bleiben die Werte gepuffert
+ * und der Dienst verbindet sich jede Sekunde neu.
  *
  * Datenbank abfragen:
- *     sqlite3 /var/www/localhost/data/werte.db \
- *         "SELECT zeit, wert FROM werte ORDER BY id DESC LIMIT 20;"
+ *     mariadb myboard -e "SELECT zeit, wert FROM werte ORDER BY id DESC LIMIT 20;"
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -38,40 +45,41 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <sqlite3.h>
+#include <mysql.h>
 
 /* NICHT 9000 verwenden — darauf lauscht php-fpm (siehe php-fpm.conf:
    listen = 127.0.0.1:9000). streamd startete zuerst, belegte den Port und
    php-fpm scheiterte mit "Address already in use". */
 #define PORT_DEFAULT   9100
+#define RATE_DEFAULT   60         /* Transaktionen pro Sekunde             */
 #define MAX_CLIENTS    8
 #define LINE_MAX_LEN   1024
 #define RX_BUF         8192
 #define STEMPEL_LEN    40
 
-/* Pfade per -D ueberschreibbar, damit sich der Dienst ohne Systemrechte
-   testen laesst. */
+/* Pfade und Namen per -D ueberschreibbar, damit sich der Dienst ohne
+   Systemrechte testen laesst. */
 #ifndef PATH_LATEST
-/* latest.txt im RAM (tmpfs): wird 100x/s geschrieben */
+/* latest.txt im RAM (tmpfs): wird bei jedem Wert geschrieben */
 #define PATH_LATEST    "/run/myboard-stream/latest.txt"
 #endif
-#ifndef PATH_DB
-/* Verlauf auf der CFast: gesammelt, siehe FLUSH_MS */
-#define PATH_DB        "/var/www/localhost/data/werte.db"
+#ifndef DB_NAME
+#define DB_NAME        "myboard"
 #endif
-#define FLUSH_MS       1000       /* hoechstens 1 Transaktion pro Sekunde */
 #define DB_MAX_ZEILEN  100000     /* Verlauf begrenzen (Ringpuffer)       */
-#define PENDING_MAX    2000       /* gesammelte Werte je Transaktion      */
+#define KUERZEN_MS     60000      /* etwa minuetlich kuerzen              */
+#define PENDING_MAX    2000       /* gesammelte Werte, hoechstens         */
+#define NEU_VERBINDEN_MS 1000     /* nach Fehlschlag hoechstens 1x/s      */
 
 static volatile sig_atomic_t laeuft = 1;
 static void beenden(int sig) { (void)sig; laeuft = 0; }
 
-/* Millisekunden seit Systemstart (monoton, springt nicht bei Zeitumstellung) */
-static long long jetzt_ms(void)
+/* Mikrosekunden seit Systemstart (monoton, springt nicht bei Zeitumstellung) */
+static long long jetzt_us(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 static void zeitstempel(char *out, size_t n)
@@ -106,87 +114,126 @@ static void latest_schreiben(const char *stempel, const char *zeile)
     rename(tmp, PATH_LATEST);
 }
 
-/* --- SQLite ---------------------------------------------------------- */
+/* --- MariaDB --------------------------------------------------------- */
 
-static sqlite3      *db;
-static sqlite3_stmt *stmt_einfuegen;
+static MYSQL     *db;
+static char      *sql;            /* Puffer fuer das mehrzeilige INSERT */
+static long long  naechster_versuch;
+static int        fehler_gemeldet;
 
-static int db_oeffnen(void)
+static int db_verbinden(void)
 {
-    if (sqlite3_open(PATH_DB, &db) != SQLITE_OK) {
-        fprintf(stderr, "streamd: %s: %s\n", PATH_DB, sqlite3_errmsg(db));
+    if (db)
+        return 0;
+    if (jetzt_us() < naechster_versuch)
+        return -1;
+
+    MYSQL *m = mysql_init(NULL);
+    if (!m)
+        return -1;
+    /* Socket, Port und Zeichensatz aus /etc/my.cnf, Gruppen [client] und
+       [streamd] */
+    mysql_options(m, MYSQL_READ_DEFAULT_GROUP, "streamd");
+    mysql_options(m, MYSQL_SET_CHARSET_NAME, "utf8mb4");
+    unsigned int wartezeit = 5;
+    mysql_options(m, MYSQL_OPT_CONNECT_TIMEOUT, &wartezeit);
+
+    /* Benutzer NULL = Name des Linux-Benutzers (unix_socket) */
+    if (!mysql_real_connect(m, NULL, NULL, NULL, DB_NAME, 0, NULL, 0)) {
+        if (!fehler_gemeldet)
+            fprintf(stderr, "streamd: Datenbank nicht erreichbar: %s - "
+                    "Werte bleiben gepuffert, neuer Versuch jede Sekunde\n",
+                    mysql_error(m));
+        fehler_gemeldet = 1;
+        mysql_close(m);
+        naechster_versuch = jetzt_us() + NEU_VERBINDEN_MS * 1000LL;
         return -1;
     }
+    fprintf(stderr, "streamd: mit Datenbank %s verbunden (MariaDB %s)\n",
+            DB_NAME, mysql_get_server_info(m));
+    fehler_gemeldet = 0;
+    db = m;
+    return 0;
+}
 
-    /* WAL schont die Karte zusaetzlich: Schreibvorgaenge gehen zuerst in
-       ein fortlaufendes Journal, statt die Datenbankdatei umzuschreiben.
-       synchronous=NORMAL spart je Transaktion ein fsync — bei Stromausfall
-       koennen die letzten Werte fehlen, die Datenbank bleibt aber heil. */
-    char *fehler = NULL;
-    const char *init =
-        "PRAGMA journal_mode=WAL;"
-        "PRAGMA synchronous=NORMAL;"
-        "CREATE TABLE IF NOT EXISTS werte ("
-        "  id   INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  zeit TEXT NOT NULL,"
-        "  wert TEXT NOT NULL);"
-        "CREATE INDEX IF NOT EXISTS werte_zeit ON werte(zeit);";
-    if (sqlite3_exec(db, init, NULL, NULL, &fehler) != SQLITE_OK) {
-        fprintf(stderr, "streamd: Tabelle anlegen: %s\n", fehler);
-        sqlite3_free(fehler);
+static void db_trennen(void)
+{
+    if (db)
+        mysql_close(db);
+    db = NULL;
+    naechster_versuch = jetzt_us() + NEU_VERBINDEN_MS * 1000LL;
+}
+
+/* Gesammelte Werte als EIN INSERT (eine Transaktion) schreiben.
+   0 = geschrieben, -1 = Werte behalten und spaeter erneut versuchen. */
+static int db_schreiben(char zeit[][STEMPEL_LEN],
+                        char wert[][LINE_MAX_LEN], size_t n)
+{
+    if (n == 0)
+        return 0;
+    if (db_verbinden() != 0)
         return -1;
-    }
 
-    if (sqlite3_prepare_v2(db, "INSERT INTO werte (zeit, wert) VALUES (?, ?);",
-                           -1, &stmt_einfuegen, NULL) != SQLITE_OK) {
-        fprintf(stderr, "streamd: prepare: %s\n", sqlite3_errmsg(db));
+    char *p = sql;
+    p += sprintf(p, "INSERT INTO werte (zeit, wert) VALUES ");
+    for (size_t i = 0; i < n; i++) {
+        p += sprintf(p, "%s('%s','", i ? "," : "", zeit[i]);
+        p += mysql_real_escape_string(db, p, wert[i], strlen(wert[i]));
+        *p++ = '\'';
+        *p++ = ')';
+    }
+    if (mysql_real_query(db, sql, (unsigned long)(p - sql)) != 0) {
+        fprintf(stderr, "streamd: INSERT: %s\n", mysql_error(db));
+        db_trennen();
         return -1;
     }
     return 0;
 }
 
-/* Gesammelte Werte in EINER Transaktion schreiben. */
-static void db_schreiben(char zeit[][STEMPEL_LEN],
-                         char wert[][LINE_MAX_LEN], size_t n)
-{
-    if (n == 0 || !db)
-        return;
-
-    sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL);
-    for (size_t i = 0; i < n; i++) {
-        sqlite3_bind_text(stmt_einfuegen, 1, zeit[i], -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt_einfuegen, 2, wert[i], -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt_einfuegen) != SQLITE_DONE)
-            fprintf(stderr, "streamd: insert: %s\n", sqlite3_errmsg(db));
-        sqlite3_reset(stmt_einfuegen);
-    }
-    sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
-}
-
-/* Aelteste Eintraege entfernen, damit die Datenbank nicht unbegrenzt
+/* Aelteste Eintraege entfernen, damit die Tabelle nicht unbegrenzt
    waechst. Bei 100 Werten/s ist DB_MAX_ZEILEN nach gut 16 Minuten
    erreicht — danach laeuft sie als Ringpuffer. */
 static void db_kuerzen(void)
 {
-    if (!db)
+    if (!db || mysql_query(db, "SELECT MAX(id) FROM werte") != 0)
         return;
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-             "DELETE FROM werte WHERE id <= "
-             "(SELECT MAX(id) - %d FROM werte);", DB_MAX_ZEILEN);
-    sqlite3_exec(db, sql, NULL, NULL, NULL);
+    MYSQL_RES *r = mysql_store_result(db);
+    if (!r)
+        return;
+    MYSQL_ROW z = mysql_fetch_row(r);
+    unsigned long long max_id = (z && z[0]) ? strtoull(z[0], NULL, 10) : 0;
+    mysql_free_result(r);
+    if (max_id <= DB_MAX_ZEILEN)
+        return;
+    char abfrage[128];
+    snprintf(abfrage, sizeof(abfrage), "DELETE FROM werte WHERE id <= %llu",
+             max_id - DB_MAX_ZEILEN);
+    if (mysql_query(db, abfrage) != 0)
+        fprintf(stderr, "streamd: kuerzen: %s\n", mysql_error(db));
 }
 
 int main(int argc, char **argv)
 {
     int port = (argc > 1) ? atoi(argv[1]) : PORT_DEFAULT;
+    int rate = (argc > 2) ? atoi(argv[2]) : RATE_DEFAULT;
+    if (rate < 1 || rate > 1000) {
+        fprintf(stderr, "streamd: Transaktionen pro Sekunde 1..1000\n");
+        return 2;
+    }
+    const long long intervall = 1000000LL / rate;
 
     signal(SIGINT, beenden);
     signal(SIGTERM, beenden);
     signal(SIGPIPE, SIG_IGN);
 
-    if (db_oeffnen() != 0)
+    /* je Wert hoechstens: Zeitstempel, maskierter Text (doppelte Laenge)
+       und Klammern/Anfuehrungszeichen */
+    sql = malloc((size_t)PENDING_MAX * (STEMPEL_LEN + 2 * LINE_MAX_LEN + 16) + 64);
+    if (!sql || mysql_library_init(0, NULL, NULL) != 0) {
+        fprintf(stderr, "streamd: Initialisierung fehlgeschlagen\n");
         return 1;
+    }
+    db_verbinden();
 
     int lauscher = socket(AF_INET, SOCK_STREAM, 0);
     if (lauscher < 0) {
@@ -209,8 +256,8 @@ int main(int argc, char **argv)
         perror("listen");
         return 1;
     }
-    fprintf(stderr, "streamd: lausche auf Port %d, Datenbank %s\n",
-            port, PATH_DB);
+    fprintf(stderr, "streamd: lausche auf Port %d, Datenbank %s, %d "
+            "Transaktionen/s\n", port, DB_NAME, rate);
 
     struct pollfd fds[MAX_CLIENTS + 1];
     char rest[MAX_CLIENTS][LINE_MAX_LEN];
@@ -227,11 +274,19 @@ int main(int argc, char **argv)
     static char puf_wert[PENDING_MAX][LINE_MAX_LEN];
     size_t offen = 0;
 
-    long long letzter_flush = jetzt_ms();
-    unsigned long gesamt = 0;
+    long long letzter_flush = jetzt_us();
+    long long letztes_kuerzen = letzter_flush;
+    unsigned long gesamt = 0, verworfen = 0;
 
     while (laeuft) {
-        int n = poll(fds, MAX_CLIENTS + 1, 100);
+        /* Warten bis zum naechsten Schreibzeitpunkt, ohne offene Werte
+           hoechstens 100 ms */
+        int warte_ms = 100;
+        if (offen > 0) {
+            long long rest_us = letzter_flush + intervall - jetzt_us();
+            warte_ms = rest_us > 0 ? (int)((rest_us + 999) / 1000) : 0;
+        }
+        int n = poll(fds, MAX_CLIENTS + 1, warte_ms);
         if (n < 0) {
             if (errno == EINTR)
                 continue;
@@ -291,7 +346,8 @@ int main(int argc, char **argv)
                            memcpy statt snprintf: die Laenge ist bekannt
                            (len < LINE_MAX_LEN, oben begrenzt), und der
                            Compiler kann das Abschneiden sonst nicht
-                           ausschliessen. */
+                           ausschliessen. Ist der Puffer voll (Datenbank
+                           laenger weg), gehen neue Werte nur in latest.txt. */
                         if (offen < PENDING_MAX) {
                             size_t kopie = (len < LINE_MAX_LEN - 1)
                                            ? len : LINE_MAX_LEN - 1;
@@ -300,6 +356,9 @@ int main(int argc, char **argv)
                             memcpy(puf_wert[offen], rest[i - 1], kopie);
                             puf_wert[offen][kopie] = '\0';
                             offen++;
+                        } else if (verworfen++ % 1000 == 0) {
+                            fprintf(stderr, "streamd: Puffer voll, %lu Werte "
+                                    "nicht in der Datenbank\n", verworfen);
                         }
                     }
                     restlen[i - 1] = 0;
@@ -311,28 +370,26 @@ int main(int argc, char **argv)
         }
 
         /* gesammelte Werte gebuendelt in die Datenbank */
-        long long jetzt = jetzt_ms();
-        if (offen > 0 && (jetzt - letzter_flush >= FLUSH_MS ||
+        long long jetzt = jetzt_us();
+        if (offen > 0 && (jetzt - letzter_flush >= intervall ||
                           offen >= PENDING_MAX / 2)) {
-            db_schreiben(puf_zeit, puf_wert, offen);
-            offen = 0;
+            if (db_schreiben(puf_zeit, puf_wert, offen) == 0)
+                offen = 0;
             letzter_flush = jetzt;
-
-            static int zaehler = 0;
-            if (++zaehler >= 60) {     /* etwa minuetlich kuerzen */
-                db_kuerzen();
-                zaehler = 0;
-            }
+        }
+        if (jetzt - letztes_kuerzen >= KUERZEN_MS * 1000LL) {
+            db_kuerzen();
+            letztes_kuerzen = jetzt;
         }
     }
 
     /* beim Beenden den Rest noch sichern */
+    naechster_versuch = 0;
     db_schreiben(puf_zeit, puf_wert, offen);
 
-    if (stmt_einfuegen)
-        sqlite3_finalize(stmt_einfuegen);
     if (db)
-        sqlite3_close(db);
+        mysql_close(db);
+    mysql_library_end();
     for (int i = 1; i <= MAX_CLIENTS; i++)
         if (fds[i].fd >= 0)
             close(fds[i].fd);

@@ -1,0 +1,17 @@
+[Unit]
+Description=MyBoard: Datenbank myboard, Tabelle werte und Benutzer in MariaDB anlegen
+# mysqld.service meldet sich erst bereit, wenn der Server antwortet
+# (ExecStartPost mysql-systemd-start post); die Grundeinrichtung beim
+# ersten Start erledigt install_db.service davor.
+Requires=mysqld.service
+After=mysqld.service
+Before=streamd.service php-fpm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# root meldet sich ueber den Unix-Socket ohne Passwort an
+ExecStart=/usr/bin/mariadb -e "source /usr/share/myboard-lamp/db-setup.sql"
+
+[Install]
+WantedBy=multi-user.target

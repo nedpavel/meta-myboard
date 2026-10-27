@@ -56,14 +56,17 @@ IMAGE_INSTALL:append = " nfs-utils"
 IMAGE_INSTALL:append = " nfs-devmount"
 IMAGE_INSTALL:append = " timesync-myboard"
 IMAGE_INSTALL:append = " tzdata"
-# Webserver (aus meta-openembedded/meta-webserver — die Layer muss in
-# bblayers.conf eingetragen sein, siehe build-conf/bblayers.conf).
-# php-fpm fuehrt die PHP-Seiten aus; ohne ihn liefert nginx sie als Text.
+# LAMP (bis 2026-10 nginx + SQLite): Apache 2.4 mit PHP ueber php-fpm,
+# MariaDB 11.4 (MySQL-kompatibel, Port 3306 auch ueber das Netz) und
+# phpMyAdmin (http://<pixy>/phpmyadmin/). Apache und phpMyAdmin kommen aus
+# meta-openembedded/meta-webserver, MariaDB aus meta-oe; myboard-lamp zieht
+# sie nach und bringt Konfiguration, Datenbank myboard und Benutzer mit.
 # myboard-web bringt die Seiten (Datenstrom-Empfang + Anzeige) mit.
-IMAGE_INSTALL:append = " nginx php-fpm php-cli myboard-web"
-# streamd nimmt dauerhaft offene Datenstroeme per TCP (Port 9100) entgegen —
-# ueber PHP-FPM ist das nicht moeglich, da FPM einen Request erst
-# vollstaendig entgegennimmt, bevor er das Skript erreicht.
+IMAGE_INSTALL:append = " myboard-lamp php-cli perl myboard-web"
+# streamd nimmt dauerhaft offene Datenstroeme per TCP (Port 9100) entgegen
+# und schreibt sie in MariaDB (60 Transaktionen/s) — ueber PHP-FPM ist das
+# nicht moeglich, da FPM einen Request erst vollstaendig entgegennimmt,
+# bevor er das Skript erreicht.
 IMAGE_INSTALL:append = " streamd"
 
 # Browser-Betrieb: Firefox ESR im Kiosk-Modus anstelle der Qt-Oberflaeche,
@@ -108,10 +111,8 @@ set_board_timezone() {
 #   iproute2-ss  "ss" liegt in einem eigenen Unterpaket und kommt mit
 #                iproute2 allein NICHT mit.
 #   net-tools    netstat, ifconfig, route — klassische Netzwerkwerkzeuge.
-#   sqlite3      Datenbank samt Kommandozeilenwerkzeug. PHP bringt die
-#                sqlite3-Erweiterung bereits mit (PACKAGECONFIG des
-#                php-Rezepts), die Seiten koennen also direkt darauf
-#                zugreifen.
+#   (sqlite3     bis 2026-10 fuer den Verlauf; jetzt MariaDB, siehe oben.
+#                libsqlite3 kann als Abhaengigkeit anderer Pakete bleiben.)
 #
 # Hinweis zur Touchscreen-Kalibrierung (xinput-calibrator weiter unten):
 # Unter X11 bedient libinput den PenMount, NICHT tslib. tslib wirkt nur bei
@@ -127,7 +128,6 @@ IMAGE_INSTALL:append = " \
 	iproute2-ss \
 	net-tools \
 	iptables \
-	sqlite3 \
 	libftdi \
 	alsa-utils \
 	alsa-state \

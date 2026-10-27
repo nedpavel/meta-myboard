@@ -6,8 +6,8 @@ HTML/CSS/JavaScript in Firefox. Am Gerät im Kiosk, im Netz mit jedem Browser:
     http://192.168.1.200/gui/
 
 ```
-Firefox  ── /gui/  ──► nginx :80 ── /usr/share/myboard-webgui/www   (statisch)
-         ── /api/  ──► nginx :80 ── 127.0.0.1:8081 myboard-webgui-api
+Firefox  ── /gui/  ──► Apache :80 ── /usr/share/myboard-webgui/www   (statisch)
+         ── /api/  ──► Apache :80 ── 127.0.0.1:8081 myboard-webgui-api
                                       ├─ CAN   can0 roh, Dekodierung wie CanMatrix/CANopen
                                       ├─ DDS   /run/idu2-mvb.sock (wie DdsClient)
                                       └─ USB   Update der Web-App vom Stick

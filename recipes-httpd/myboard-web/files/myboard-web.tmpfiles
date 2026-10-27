@@ -1,11 +1,12 @@
-# Datenverzeichnis fuer den Datenstrom. php-fpm laeuft als Benutzer
-# "nobody" (siehe php-fpm.conf) und muss hier schreiben duerfen.
+# Datenverzeichnis fuer den Datenstrom (upload.php). php-fpm laeuft als
+# Benutzer "nobody" (siehe php-fpm.conf) und muss hier schreiben duerfen.
 d /var/www/localhost/data 0775 nobody www-data -
 
-# Die Seiten liegen im Paket unter /usr/share/myboard-web und werden erst
-# beim Boot in die Web-Wurzel verlinkt. So beansprucht das Paket nicht
-# /var/www/localhost[/html] — das gehoert nginx, und RPM meldete sonst
-# einen Dateikonflikt.
+# Web-Wurzel von Apache (DocumentRoot in conf.d/00-myboard.conf, myboard-lamp).
+# Die Seiten liegen im Paket unter /usr/share/myboard-web und werden beim
+# Boot hier verlinkt (frueher gehoerte das Verzeichnis dem nginx-Paket, und
+# RPM meldete bei einer eigenen Datei darin einen Konflikt).
+d /var/www/localhost/html 0755 root root -
 L+ /var/www/localhost/html/index.php  - - - - /usr/share/myboard-web/index.php
 L+ /var/www/localhost/html/upload.php - - - - /usr/share/myboard-web/upload.php
 L+ /var/www/localhost/html/daten.php  - - - - /usr/share/myboard-web/daten.php
