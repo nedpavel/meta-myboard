@@ -68,6 +68,8 @@ IMAGE_INSTALL:append = " myboard-lamp php-cli perl myboard-web"
 # nicht moeglich, da FPM einen Request erst vollstaendig entgegennimmt,
 # bevor er das Skript erreicht.
 IMAGE_INSTALL:append = " streamd"
+# Hardkeys der Front: je Druck eine Zeile in myboard.tasten
+IMAGE_INSTALL:append = " myboard-tasten"
 
 # Browser-Betrieb: Firefox ESR im Kiosk-Modus anstelle der Qt-Oberflaeche,
 # zu starten mit "browser-start" (bis 2026-10 surf/WebKitGTK). Firefox

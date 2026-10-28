@@ -21,8 +21,23 @@ Alle Layer liegen nebeneinander unter einer gemeinsamen Wurzel (hier `~/Embedded
 ├── meta-qt6/             # Upstream (Klon)
 ├── meta-browser/         # Upstream (Klon), davon nur meta-firefox in bblayers
 ├── meta-myboard/         # <-- DIESES Repo
+├── private/              # Kundendokumente, NICHT versioniert (siehe unten)
+│   └── mvb-trak.txt      #   MVB-Busbeschreibung "MVB (trak).txt"
 └── build/                # generiert, NICHT versioniert (tmp/, sstate-cache/, downloads/)
 ```
+
+`private/mvb-trak.txt` ist die Busbeschreibung des Fahrzeugs. Aus ihr erzeugt
+das Rezept `idu2-mvb` beim Bauen die Signalliste für die Prozessdaten
+(`local.conf`: `MVB_BUSBESCHREIBUNG`). Sie gehört dem Kunden und kommt
+deshalb **nicht** ins (öffentliche) Repository — auf einem neuen Rechner von
+Hand ablegen:
+
+```bash
+mkdir -p ~/Embedded/private
+cp "/pfad/zu/MVB (trak).txt" ~/Embedded/private/mvb-trak.txt
+```
+
+Fehlt sie, baut das Image trotzdem (mit Warnung), nur ohne Prozessdaten.
 
 ## 2. Upstream-Layer klonen und auf die gepinnte Revision setzen
 

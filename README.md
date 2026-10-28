@@ -26,6 +26,34 @@ Enthält:
 - **`recipes-httpd/streamd`, `recipes-httpd/myboard-web`** — Datenstrom auf
   TCP-Port 9100 → MariaDB-Tabelle `myboard.werte` (60 Transaktionen/s,
   höchstens 100 000 Zeilen), Anzeige unter `http://<pixy>/`.
+- **`recipes-extended/idu2-mvb`** — das Display am MVB, als IDU2 (Vorgabe) oder
+  mit `--rolle IDU1` als IDU1: Lebenszeichen, Prozessdaten, DDS-Abfrage an
+  DIA1. Optionen in `OPTIONEN` (`/etc/default/idu2-mvb`).
+  - Prozessdaten: Die Sink-Ports der Rolle laut Busbeschreibung werden im
+    Takt ihrer Zykluszeit gelesen (kein Interrupt, Polling, rund 300
+    Lesungen/s) und jede Lesung je Signal in `myboard.mvb_prozessdaten`
+    geschrieben — mit Beschreibung, Datentyp (bool, uint8/16/32, int16,
+    float, datetime, string), `gelesen` und `geaendert`. Die Tabelle ist
+    eine MEMORY-Tabelle (schont die CFast, Inhalt nach Neustart neu
+    angelegt). Die Signalliste entsteht beim Bauen aus
+    `~/Embedded/private/mvb-trak.txt` (siehe [SETUP.md](SETUP.md)).
+  - Source-Ports: alle drei der Rolle (IDU2 491/492/498, IDU1 481/488/489),
+    gesendet im Takt ihrer Zykluszeit und nach jeder Änderung, jedes Senden
+    ebenfalls in `mvb_prozessdaten`. Werte: Vorgabe 0 (Befehle nicht
+    gedrückt), fest in `/etc/idu2-mvb/quellen.conf`, zur Laufzeit über den
+    Socket
+    (`{"befehl": "setzen", "signal": ..., "wert": ..., "dauer": s}`).
+  - DDS: Jede Seite landet zusätzlich in `myboard.dds_meldungen` (Stand in
+    `myboard.dds_stand`): neuer Cache_index von DIA1 → Inhalt ersetzt,
+    Blättern → Seiten kommen dazu.
+  - `--ohne-pd` / `--ohne-db` schalten Prozessdaten / alle
+    Datenbankeinträge ab.
+- **`recipes-extended/myboard-tasten`** — Hardkeys der Front (32 Tasten,
+  Belegung laut INC-100 FW User Manual 5.11): je Druck eine Zeile in
+  `myboard.tasten` mit Beschriftung, Position P41,n, Zeit und Haltedauer.
+  Liest die Tastatur direkt vom Kernel, die Oberflächen bekommen die Tasten
+  weiterhin. Ansehen z. B. mit
+  `mariadb -e "SELECT gedrueckt, taste, position, dauer_ms FROM myboard.tasten ORDER BY id DESC LIMIT 20"`.
 - **`conf/machine`** — Maschinendefinition.
 - **`recipes-extended/images/myboard-image.bb`** — das Ziel-Image (mit tzdata,
   Zeitzone Europe/Zurich, NTP-Sync, NFS-Dev-Mount, CAN, xorg-conf).

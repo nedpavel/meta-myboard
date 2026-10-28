@@ -1,21 +1,45 @@
 #!/usr/bin/env python3
-"""IDU2 am MVB: Lebenszeichen ab dem Start, DDS-Abfrage an DIA1 auf
-Anfrage.
+"""IDU am MVB: Lebenszeichen ab dem Start, Prozessdaten in MariaDB,
+DDS-Abfrage an DIA1 auf Anfrage.
 
-Der Dienst haelt das Display als IDU2 (Geraet 240) dauernd am Bus. Weil
-/dev/mvblli0 exklusiv ist, laeuft alles ueber ihn - auch die DDS-Abfrage
-der Bedienoberflaeche. Die kommt so ohne Initialisierungszeit aus: der
-Controller laeuft schon, das Lebenszeichen auch.
+Der Dienst haelt das Display dauernd am Bus, als IDU2 ("IDU Wagen",
+Geraet 240 = F0H, Vorgabe) oder mit --rolle IDU1 als IDU1 ("IDU
+Traktion", Geraet 238 = EEH). Weil /dev/mvblli0 exklusiv ist, laeuft alles
+ueber ihn - auch die DDS-Abfrage der Bedienoberflaeche. Die kommt so ohne
+Initialisierungszeit aus: der Controller laeuft schon, das Lebenszeichen
+auch. Als IDU1 nur, wenn kein echtes IDU1 am Bus haengt: sonst senden zwei
+Geraete auf denselben Ports.
 
-Lebenszeichen: Telegramm IDU2-491 laut Busbeschreibung (MVB (trak).txt),
-Port 491, 4 Byte, Zyklus 256 ms; IDU2-XMVBLifeSig als CARD16 big-endian ab
-Byte 0, gelesen von FLG1N, FLG2N und IDU1, im Sekundentakt hochgezaehlt.
-Byte 2 traegt Luefterbefehle an FLG1N und bleibt 0. Ohne laufendes
-Lebenszeichen gilt IDU2 fuer FLG und DIA1 als nicht da.
+Lebenszeichen laut Busbeschreibung (MVB (trak).txt): IDU2-XMVBLifeSig auf
+Port 491 (4 Byte, Zyklus 256 ms) bzw. IDU1-XMVBLifeSig auf Port 481
+(8 Byte, 256 ms), CARD16 big-endian ab Byte 0, gelesen von FLG1N, FLG2N
+und dem anderen IDU, im Sekundentakt hochgezaehlt. Ohne laufendes
+Lebenszeichen gilt das IDU fuer FLG und DIA1 als nicht da.
+
+Source-Ports: alle drei der Rolle (IDU2: 491, 492, 498; IDU1: 481, 488,
+489; mit --nur-lebenszeichen nur den ersten), gesendet im Takt ihrer
+Zykluszeit und sofort nach jeder Aenderung. Jedes Signal darin hat einen
+Wert - Vorgabe 0 bzw. leer, fuer Befehle und Softkeys "nicht gedrueckt" -,
+fest gesetzt mit --wert NAME=WERT (z. B. Software-Version, Fahrzeugname)
+oder zur Laufzeit ueber den Socket (Bildnummer, Softkeys als Puls).
 
 Einrichtung wie im erfolgreichen Lauf stufe8/ef1 (2026-10-12): Adresse
 240, Einleitungsbetrieb auf Leitung A, MD-Bit im DSW, Anmeldung von
 Messages ueber EF1 (MD_CONF mit negativer Prioritaet).
+
+Prozessdaten: Die Sink-Ports der Rolle (wo das IDU in der Busbeschreibung
+als $SINKMEMB steht; IDU2 69 Ports, IDU1 70) richtet der Dienst als Senken
+ein und liest sie im Takt ihrer Zykluszeit (64..1024 ms). Fuer
+Prozessdaten gibt es keinen Interrupt - der Controller schreibt sie selbst
+in den Traffic Store, read() liefert den Stand oder ETIMEDOUT, wenn er
+aelter als die Sink-Time-Schwelle ist. Jedes Signal steht mit Beschreibung
+in myboard.mvb_prozessdaten, dazu die gesendeten Signale der Rolle. Jede
+Lesung wird geschrieben (Wert, frisch, gelesen; geaendert bei neuem Wert),
+in einem eigenen Thread; die Tabelle ist eine MEMORY-Tabelle, damit rund
+300 Schreibvorgaenge pro Sekunde nicht auf die CFast gehen. Die
+Signalliste (/usr/share/idu2-mvb/mvb-signale.tsv) erzeugt mvbtrak2tsv.py
+beim Bauen aus der Busbeschreibung; fehlt sie, laeuft der Dienst ohne
+Prozessdaten.
 
 DDS-Abfrage: dieselben Frames wie ddsabfrage.py (Mitschnitt des Displays).
 IDU2 schickt die Anfrage an DIA1 (Geraet 46), beantwortet CC/AK und die
@@ -32,7 +56,12 @@ Antwort eine JSON-Zeile:
     {"befehl": "dds", "seite": 1, "neu": true}
                            Seite 1 neu von DIA1 (auch ohne "seite")
     {"befehl": "letzte"}   letztes Ergebnis, ohne neue Abfrage
-    {"befehl": "status"}   Lebenszeichen, Frames, laufende Abfrage
+    {"befehl": "status"}   Rolle, Lebenszeichen, Frames, laufende Abfrage,
+                           Prozessdaten-Zaehler
+    {"befehl": "setzen", "signal": "IDU2-XScreenNum", "wert": 3}
+                           Source-Signal setzen; mit "dauer": S als Puls,
+                           danach wieder der vorige Wert
+    {"befehl": "quellen"}  aktuelle Werte aller Source-Signale
 
 Aufbau der Anfrage laut "MVB Dokumentation IC2000 Payload Structure"
 (Abschnitt 4.2.2.1, dort IDU1 -> VCU1): Datenbytes 0-4 Header, 5 Source,
@@ -54,6 +83,15 @@ und wird beim Blaettern unveraendert zurueckgeschickt, nie hochgezaehlt.
 Fuer die vorige Seite gibt es kein Command: schon geholte Seiten kommen aus
 dem Zwischenspeicher des Dienstes, bis Seite 1 neu abgefragt wird.
 
+MariaDB: Jede DDS-Antwort von DIA1 landet in myboard.dds_meldungen (Stand
+in myboard.dds_stand). Hat die Antwort einen anderen Cache_index als die
+Tabelle, wird ihr Inhalt ersetzt - DIA1 hat neuere Meldungen, oder Seite 1
+wurde neu abgefragt. Beim Blaettern (gleicher Cache_index) kommen die
+Seiten dazu. Geschrieben wird in einem eigenen Thread ueber PyMySQL, als
+root ueber den Unix-Socket: fehlt MariaDB oder ist sie langsam, laeuft das
+Lebenszeichen ungestoert weiter, und die Seiten werden nachgetragen,
+sobald die Datenbank da ist.
+
 /dev/mvblli0 ist exklusiv. Fuer ddsabfrage.py und mvbdiff.py:
 
     systemctl stop idu2-mvb     ...     systemctl start idu2-mvb
@@ -63,29 +101,46 @@ Optionen (auch ueber OPTIONEN in /etc/default/idu2-mvb):
     --ohne-dsw-md      MD-Bit im DSW nicht setzen
     --ef0              Messages ueber EF0 statt EF1 anmelden
     --takt S           Lebenszeichen alle S Sekunden erhoehen (Vorgabe 1)
-    --alle-quellen     auch 492 (8 Byte) und 498 (16 Byte) senden, Nullen
+    --rolle IDU1|IDU2  Rolle am Bus (Vorgabe IDU2)
+    --nur-lebenszeichen  nur den Port des Lebenszeichens senden, nicht die
+                       weiteren Source-Ports der Rolle
+    --wert NAME=WERT   Wert eines Source-Signals (mehrfach), z. B.
+                       --wert IDU2-XSWVersion=0x0102; nach den Werten aus
+    --werte-datei PFAD (Vorgabe /etc/idu2-mvb/quellen.conf, eine Zeile
+                       NAME=WERT je Signal, Leerzeichen im Wert erlaubt)
     --socket PFAD      Steuersocket (Vorgabe /run/idu2-mvb.sock)
     --anzahl N         DDS-Meldungen je Seite, 1..255 (Vorgabe 16; das
                        Original-Display fragt 21 an, DIA1 liefert
                        hoechstens 25)
+    --ohne-pd          Sink-Ports nicht einrichten, keine Prozessdaten
+    --signale PFAD     Signalliste (Vorgabe /usr/share/idu2-mvb/
+                       mvb-signale.tsv)
+    --ohne-db          nichts in MariaDB speichern (DDS und Prozessdaten)
+    --db-socket PFAD   Socket von MariaDB (Vorgabe /var/lib/mysql/mysql.sock)
 
 Eine Anfrage ueber den Socket kann die Anzahl mit "anzahl" ueberschreiben.
 """
 
+import datetime
 import errno
 import fcntl
 import json
 import os
+import pwd
+import queue
 import select
 import signal
 import socket
 import struct
 import sys
+import threading
 import time
 
 DEV = "/dev/mvblli0"
 SOCK = "/run/idu2-mvb.sock"
-OWN_ADDR = 240
+DB_SOCK = "/var/lib/mysql/mysql.sock"
+SIGNALE = "/usr/share/idu2-mvb/mvb-signale.tsv"
+WERTE = "/etc/idu2-mvb/quellen.conf"
 DIA1_ADDR = 0x2E
 ABFRAGE_TIMEOUT = 15.0
 
@@ -100,9 +155,14 @@ IOC = {
     "HWINIT":         0x40104C15,
 }
 PD, MD_LOW = 1, 3
-PD_SRC = 2
-LS_PORT, LS_SIZE = 491, 4
-EXTRA_SRC = ((492, 8), (498, 16))
+PD_SINK, PD_SRC = 1, 2
+# Rolle laut Busbeschreibung: Geraeteadresse, Port des Lebenszeichens
+# (XMVBLifeSig ab Byte 0), weitere Source-Ports - je (Port, Laenge in Byte,
+# Zykluszeit in ms)
+ROLLEN = {
+    "IDU1": (0xEE, (481, 8, 256), ((488, 8, 1024), (489, 16, 1024))),
+    "IDU2": (0xF0, (491, 4, 256), ((492, 8, 256), (498, 16, 1024))),
+}
 DSW_MD = 0x1000
 CTRL_CLEAR, CTRL_LINE_A = 0x03, 0x08
 
@@ -281,7 +341,9 @@ def log(msg):
 
 def parse_args(argv):
     o = {"single": True, "dsw_md": True, "ef1": True, "takt": 1.0,
-         "alle": False, "socket": SOCK, "anzahl": 16}
+         "alle": True, "socket": SOCK, "anzahl": 16, "db": True,
+         "db_socket": DB_SOCK, "rolle": "IDU2", "pd": True,
+         "signale": SIGNALE, "werte": [], "werte_datei": WERTE}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -291,8 +353,20 @@ def parse_args(argv):
             o["dsw_md"] = False
         elif a == "--ef0":
             o["ef1"] = False
-        elif a == "--alle-quellen":
+        elif a == "--alle-quellen":     # inzwischen Vorgabe
             o["alle"] = True
+        elif a == "--nur-lebenszeichen":
+            o["alle"] = False
+        elif a == "--wert":
+            i += 1
+            name, gleich, wert = argv[i].partition("=")
+            if not gleich:
+                log("--wert erwartet NAME=WERT")
+                sys.exit(2)
+            o["werte"].append((name.strip(), wert))
+        elif a == "--werte-datei":
+            i += 1
+            o["werte_datei"] = argv[i]
         elif a == "--takt":
             i += 1
             o["takt"] = float(argv[i])
@@ -305,11 +379,568 @@ def parse_args(argv):
             if not 1 <= o["anzahl"] <= 255:
                 log("--anzahl muss zwischen 1 und 255 liegen")
                 sys.exit(2)
+        elif a == "--ohne-db":
+            o["db"] = False
+        elif a == "--db-socket":
+            i += 1
+            o["db_socket"] = argv[i]
+        elif a == "--rolle":
+            i += 1
+            o["rolle"] = argv[i].upper()
+            if o["rolle"] not in ROLLEN:
+                log("--rolle muss IDU1 oder IDU2 sein")
+                sys.exit(2)
+        elif a == "--ohne-pd":
+            o["pd"] = False
+        elif a == "--signale":
+            i += 1
+            o["signale"] = argv[i]
         else:
             log("Unbekannte Option: %s" % a)
             sys.exit(2)
         i += 1
     return o
+
+
+# ---------------------------------------------------------------- MariaDB
+
+DDS_SPALTEN = ("ereignisnr", "pos", "seite", "uic", "prio", "zaehler",
+               "kommt", "geht", "status", "knoten", "knoten2", "meldung",
+               "meldnr", "stoer", "ref7", "ref8", "nr", "roh",
+               "cache_index", "abgerufen")
+# Schluessel ist die EreignisNr (wie in Dia1.auswerten). pos und seite
+# fehlen, wenn DIA1 von sich aus schickt - dann bleiben die alten stehen.
+SQL_MELDUNG = (
+    "INSERT INTO dds_meldungen (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s"
+    % (", ".join(DDS_SPALTEN), ", ".join(["%s"] * len(DDS_SPALTEN)),
+       ", ".join("%s = COALESCE(VALUES(%s), %s)" % (s, s, s)
+                 if s in ("pos", "seite") else "%s = VALUES(%s)" % (s, s)
+                 for s in DDS_SPALTEN[1:])))
+
+
+def db_verbinden(pymysql, sock, autocommit=False):
+    # unix_socket: Datenbank-Benutzer = Linux-Benutzer (root)
+    return pymysql.connect(
+        unix_socket=sock, database="myboard", charset="utf8mb4",
+        user=pwd.getpwuid(os.geteuid()).pw_name, autocommit=autocommit,
+        connect_timeout=5, read_timeout=10, write_timeout=10)
+
+
+def db_zeit(sec):
+    """Zeit eines DDS-Satzes fuer DATETIME, wie dds_time; None = keine."""
+    if sec == 0xFFFFFFFF:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(sec))
+
+
+def dds_zeile(m, seite, cache, jetzt):
+    """Eine Meldung aus dds_meldungen() als Werte fuer SQL_MELDUNG."""
+    kommt, geht = struct.unpack_from("<II", bytes.fromhex(m["roh"]), 9)
+    return (m["ereignisnr"], m.get("pos"), seite, m["uic"], m["prio"],
+            m["zaehler"], db_zeit(kommt), db_zeit(geht), m["status"],
+            m["knoten"], m["knoten2"], m["text"], m["meldnr"], m["stoer"],
+            m["ref7"], m["ref8"], m["nr"], m["roh"], cache, jetzt)
+
+
+class DdsDb:
+    """Schreibt die DDS-Antworten von DIA1 nach myboard.dds_meldungen.
+
+    Eigener Thread mit Warteschlange: die Hauptschleife bedient das MVB
+    (Lebenszeichen, Ring des Treibers) und wartet nie auf die Datenbank.
+    Ist MariaDB nicht da, bleiben die Seiten in der Warteschlange und
+    werden geschrieben, sobald sie erreichbar ist."""
+
+    WARTEN = 5              # s bis zum naechsten Versuch
+    VERSUCHE = 12           # bei SQL-Fehlern (nicht Verbindung): 1 min,
+                            # reicht fuer myboard-db-setup beim Erststart
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.q = queue.Queue(maxsize=200)
+        self.verworfen = 0
+        self.db = None
+        try:
+            import pymysql
+        except ImportError:
+            self.pymysql = None
+            log("PyMySQL fehlt - DDS-Meldungen werden nicht in MariaDB "
+                "gespeichert")
+            return
+        self.pymysql = pymysql
+        threading.Thread(target=self.laufen, name="dds-db",
+                         daemon=True).start()
+
+    def speichern(self, erg, seite):
+        """Antwort von DIA1 zum Schreiben vormerken (Hauptschleife)."""
+        if self.pymysql is None or "cache_index" not in erg:
+            return
+        try:
+            cache = erg["cache_index"]
+            jetzt = time.strftime("%Y-%m-%d %H:%M:%S")
+            zeilen = [dds_zeile(m, seite, cache, jetzt)
+                      for m in erg["meldungen"]]
+            self.q.put_nowait((cache, seite, bool(erg.get("letzte")), jetzt,
+                               zeilen))
+        except queue.Full:
+            self.verworfen += 1
+            if self.verworfen % 100 == 1:
+                log("MariaDB: Warteschlange voll, %d DDS-Seite(n) verworfen"
+                    % self.verworfen)
+        except Exception as e:      # nie die MVB-Schleife anhalten
+            log("MariaDB: DDS-Seite nicht vorgemerkt: %r" % e)
+
+    def laufen(self):
+        gestoert = False
+        while True:
+            job = self.q.get()
+            versuche = 0
+            while True:
+                try:
+                    self.schreiben(*job)
+                    if gestoert:
+                        log("MariaDB wieder erreichbar")
+                        gestoert = False
+                    break
+                except Exception as e:
+                    self.trennen()
+                    versuche += 1
+                    verbindung = isinstance(e, (
+                        OSError, self.pymysql.err.OperationalError,
+                        self.pymysql.err.InterfaceError))
+                    if not gestoert:
+                        log("MariaDB: %s - neuer Versuch alle %d s"
+                            % (e, self.WARTEN))
+                        gestoert = True
+                    if not verbindung and versuche >= self.VERSUCHE:
+                        log("MariaDB: DDS-Seite nach %d Versuchen verworfen: "
+                            "%s" % (versuche, e))
+                        break
+                    time.sleep(self.WARTEN)
+
+    def trennen(self):
+        if self.db is not None:
+            try:
+                self.db.close()
+            except Exception:
+                pass
+            self.db = None
+
+    def schreiben(self, cache, seite, letzte, jetzt, zeilen):
+        if self.db is None:
+            self.db = db_verbinden(self.pymysql, self.sock)
+        with self.db.cursor() as c:
+            c.execute("SELECT cache_index FROM dds_stand WHERE id = 1 "
+                      "FOR UPDATE")
+            r = c.fetchone()
+            # Anderer Cache_index: DIA1 hat neuere Meldungen oder Seite 1
+            # wurde neu abgefragt - der alte Inhalt gilt nicht mehr
+            neu = r is None or r[0] != cache
+            if neu:
+                c.execute("DELETE FROM dds_meldungen")
+                c.execute("REPLACE INTO dds_stand (id, cache_index, "
+                          "geaendert, aktualisiert, vollstaendig) "
+                          "VALUES (1, %s, %s, %s, %s)",
+                          (cache, jetzt, jetzt, letzte))
+            else:
+                c.execute("UPDATE dds_stand SET aktualisiert = %s, "
+                          "vollstaendig = vollstaendig OR %s WHERE id = 1",
+                          (jetzt, letzte))
+            if zeilen:
+                c.executemany(SQL_MELDUNG, zeilen)
+        self.db.commit()
+        log("MariaDB: %s, %d Meldungen, Cache_index %d%s"
+            % ("Seite %d" % seite if seite else "von DIA1 aus", len(zeilen),
+               cache, " - neu, alter Inhalt ersetzt" if neu else ""))
+
+
+# ------------------------------------------------------------ Prozessdaten
+
+def signale_laden(pfad, rolle):
+    """Signale der Rolle aus der Signalliste (mvbtrak2tsv.py), je ein dict
+    mit richtung 'lesen' (Sink: das IDU steht als Empfaenger da) oder
+    'schreiben' (Source: Telegramm des IDU)."""
+    out = []
+    with open(pfad, encoding="utf-8") as f:
+        for zeile in f:
+            w = zeile.rstrip("\n").split("\t")
+            if zeile.startswith("#") or len(w) != 15:
+                continue
+            (port, tgm, quelle, zyklus, port_bytes, name, typ, datentyp,
+             byte, bit, nbytes, faktor, einheit, senken, text) = w
+            if quelle == rolle:
+                richtung = "schreiben"
+            elif rolle in senken.split(","):
+                richtung = "lesen"
+            else:
+                continue
+            out.append({"port": int(port), "telegramm": tgm, "quelle": quelle,
+                        "zyklus": int(zyklus), "port_bytes": int(port_bytes),
+                        "name": name, "typ": typ, "datentyp": datentyp,
+                        "byte": int(byte), "bit": int(bit),
+                        "bytes": int(nbytes), "faktor": float(faktor),
+                        "einheit": einheit, "senken": senken, "text": text,
+                        "richtung": richtung})
+    return out
+
+
+GANZZAHL = {"uint8": "B", "uint16": "H", "uint32": "I", "int16": "h"}
+
+
+def pd_wert(s, daten):
+    """Wert eines Signals aus den Portdaten (big-endian wie am MVB) als
+    (wert, wert_zeit, wert_text, roh) - die Spalten in mvb_prozessdaten -
+    oder None, wenn der Port dafuer zu kurz ist.
+
+    bool: Bit bit % 8 in Byte byte + bit // 8, roh ist dieses Byte.
+    uint8/16/32, int16: Ganzzahl. float: int16 * faktor (1000 Hex = 100 %).
+    datetime: Sekunden seit 1970 + Ticks/65536 - als double exakt in wert,
+    lesbar (UTC, auf Mikrosekunden) in wert_zeit. string: Zeichen bis zum
+    ersten Nullbyte in wert_text."""
+    b, dt = s["byte"], s["datentyp"]
+    if dt == "bool":
+        i = b + s["bit"] // 8
+        if i >= len(daten):
+            return None
+        return (daten[i] >> (s["bit"] % 8)) & 1, None, None, "%02x" % daten[i]
+    roh = daten[b:b + s["bytes"]]
+    if len(roh) < s["bytes"]:
+        return None
+    if dt in GANZZAHL:
+        return struct.unpack(">" + GANZZAHL[dt], roh)[0], None, None, roh.hex(" ")
+    if dt == "float":
+        return (struct.unpack(">h", roh)[0] * s["faktor"], None, None,
+                roh.hex(" "))
+    if dt == "datetime":
+        sek, ticks = struct.unpack(">IH", roh)
+        zeit = datetime.datetime(1970, 1, 1) + datetime.timedelta(
+            seconds=sek, microseconds=round(ticks * 1000000 / 65536))
+        return (sek + ticks / 65536, zeit.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                None, roh.hex(" "))
+    if dt == "string":
+        text = roh.split(b"\0", 1)[0].decode("latin-1").rstrip()
+        return None, None, text, roh.hex(" ")
+    return None, None, roh.hex(" "), roh.hex(" ")
+
+
+def zeit_ms(t):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) + \
+        ".%03d" % int(t % 1 * 1000)
+
+
+PD_SPALTEN = ("port", "name", "richtung", "telegramm", "quelle", "zyklus_ms",
+              "port_bytes", "typ", "datentyp", "byte_ofs", "bit_ofs",
+              "faktor", "einheit", "beschreibung", "senken", "wert",
+              "wert_zeit", "wert_text", "roh", "frisch", "gelesen",
+              "geaendert")
+SQL_PD_NEU = "INSERT INTO mvb_prozessdaten (%s) VALUES (%s)" % (
+    ", ".join(PD_SPALTEN), ", ".join(["%s"] * len(PD_SPALTEN)))
+SQL_PD_LESUNG = (
+    "INSERT INTO mvb_prozessdaten (port, name, wert, wert_zeit, wert_text, "
+    "roh, frisch, gelesen, geaendert) VALUES (%s, %s, %s, %s, %s, %s, %s, "
+    "%s, %s) ON DUPLICATE KEY UPDATE wert = VALUES(wert), "
+    "wert_zeit = VALUES(wert_zeit), wert_text = VALUES(wert_text), "
+    "roh = VALUES(roh), frisch = VALUES(frisch), gelesen = VALUES(gelesen), "
+    "geaendert = VALUES(geaendert)")
+
+
+class PdDb:
+    """Schreibt die Prozessdaten nach myboard.mvb_prozessdaten: jede Lesung
+    eines Sink-Ports (und jedes Senden eines eigenen Ports) als eine
+    Anweisung mit allen Signalen des Ports - Wert, frisch, gelesen;
+    geaendert nur, wenn sich der Wert aendert.
+
+    Die Tabelle ist eine MEMORY-Tabelle (db-setup.sql): rund 300 Lesungen
+    pro Sekunde gingen sonst als Redo-Log von InnoDB auf die CFast. Beim
+    Start und nach jedem Datenbankfehler wird sie neu angelegt - alle
+    Signale der Rolle mit Beschreibung und letztem Stand.
+
+    Eigener Thread wie DdsDb: die Hauptschleife reicht die Portdaten nur
+    weiter (melden). Ist MariaDB nicht erreichbar, fuehrt der Thread nur den
+    Stand im Speicher nach."""
+
+    WARTEN = 5
+
+    def __init__(self, sock, signale):
+        self.sock = sock
+        self.signale = signale
+        self.je_port = {}
+        for s in signale:
+            self.je_port.setdefault(s["port"], []).append(s)
+        self.eingang = queue.Queue(maxsize=5000)
+        self.werte = {}         # (port, name) -> (wert, zeit, text, roh, geaendert)
+        self.frisch = {}        # port -> True/False
+        self.gelesen = {}       # port -> Zeit der letzten Lesung
+        self.geschrieben = 0
+        self.verworfen = 0
+        self.db = None
+        try:
+            import pymysql
+        except ImportError:
+            self.pymysql = None
+            log("PyMySQL fehlt - Prozessdaten werden nicht gespeichert")
+            return
+        self.pymysql = pymysql
+        threading.Thread(target=self.laufen, name="pd-db", daemon=True).start()
+
+    def melden(self, port, daten, frisch, t):
+        """Eine Lesung aus der Hauptschleife (daten None, wenn nicht
+        frisch)."""
+        try:
+            self.eingang.put_nowait((port, daten, frisch, t))
+        except queue.Full:
+            self.verworfen += 1
+            if self.verworfen % 1000 == 1:
+                log("MariaDB (Prozessdaten) kommt nicht nach - %d Lesungen "
+                    "nicht geschrieben" % self.verworfen)
+
+    def laufen(self):
+        gestoert = False
+        naechster_versuch = 0.0
+        while True:
+            eintrag = self.eingang.get()
+            try:
+                zeilen = self.verarbeiten(*eintrag)
+            except Exception as e:      # der Thread darf nicht sterben
+                log("Prozessdaten: Auswertung fehlgeschlagen: %r" % e)
+                continue
+            if self.db is None and time.time() < naechster_versuch:
+                continue                # nur der Stand im Speicher
+            try:
+                if self.db is None:
+                    # MEMORY kennt keine Transaktionen: autocommit
+                    self.db = db_verbinden(self.pymysql, self.sock,
+                                           autocommit=True)
+                    self.anlegen()      # enthaelt schon diese Lesung
+                elif zeilen:
+                    with self.db.cursor() as c:
+                        c.executemany(SQL_PD_LESUNG, zeilen)
+                self.geschrieben += 1
+                if gestoert:
+                    log("MariaDB (Prozessdaten) wieder erreichbar")
+                    gestoert = False
+            except Exception as e:
+                self.trennen()
+                naechster_versuch = time.time() + self.WARTEN
+                if not gestoert:
+                    log("MariaDB (Prozessdaten): %s - neuer Versuch alle %d s"
+                        % (e, self.WARTEN))
+                    gestoert = True
+
+    def verarbeiten(self, port, daten, frisch, t):
+        """Stand im Speicher nachfuehren; Zeilen fuer SQL_PD_LESUNG."""
+        gelesen = zeit_ms(t)
+        self.frisch[port] = frisch
+        self.gelesen[port] = gelesen
+        zeilen = []
+        for s in self.je_port.get(port, ()):
+            k = (port, s["name"])
+            w = pd_wert(s, daten) if daten is not None else None
+            if w is not None:
+                alt = self.werte.get(k)
+                # geaendert: Zeit der Lesung, die den neuen Wert brachte
+                self.werte[k] = w + (gelesen if alt is None or alt[:3] != w[:3]
+                                     else alt[4],)
+            wert = self.werte.get(k, (None,) * 5)
+            zeilen.append(k + wert[:4] + (frisch, gelesen, wert[4]))
+        return zeilen
+
+    def trennen(self):
+        if self.db is not None:
+            try:
+                self.db.close()
+            except Exception:
+                pass
+            self.db = None
+
+    def zeile(self, s):
+        wert = self.werte.get((s["port"], s["name"]), (None,) * 5)
+        return ((s["port"], s["name"], s["richtung"], s["telegramm"][:30],
+                 s["quelle"][:20], s["zyklus"], s["port_bytes"], s["typ"][:16],
+                 s["datentyp"], s["byte"], s["bit"], s["faktor"],
+                 s["einheit"], s["text"][:500], s["senken"][:100])
+                + wert[:4] + (self.frisch.get(s["port"]),
+                              self.gelesen.get(s["port"]), wert[4]))
+
+    def anlegen(self):
+        with self.db.cursor() as c:
+            c.execute("DELETE FROM mvb_prozessdaten")
+            c.executemany(SQL_PD_NEU, [self.zeile(s) for s in self.signale])
+        log("MariaDB: mvb_prozessdaten angelegt, %d Signale - ab jetzt jede "
+            "Lesung" % len(self.signale))
+
+
+class PdAbfrage:
+    """Liest die Sink-Ports im Takt ihrer Zykluszeit (Polling: fuer
+    Prozessdaten gibt es keinen Interrupt) und gibt jede Lesung an PdDb
+    weiter. Laeuft in der Hauptschleife, wie das Lebenszeichen."""
+
+    def __init__(self, mvb, ports, db):
+        self.mvb = mvb
+        self.ports = dict(ports)        # Port -> (Laenge, Zyklus in ms)
+        self.db = db
+        jetzt = time.time()
+        self.faellig = {p: jetzt for p in self.ports}
+        self.lesungen = 0
+
+    def naechste(self):
+        return min(self.faellig.values(), default=None)
+
+    def abfragen(self, jetzt):
+        for port, f in list(self.faellig.items()):
+            if f > jetzt:
+                continue
+            laenge, zyklus = self.ports[port]
+            f += zyklus / 1000
+            self.faellig[port] = f if f > jetzt else jetzt + zyklus / 1000
+            try:
+                daten, frisch = self.mvb.pd_read(port, laenge), True
+            except OSError as e:
+                if e.errno == errno.ETIMEDOUT:
+                    daten, frisch = None, False
+                elif e.errno == errno.ENETDOWN:
+                    continue
+                else:
+                    log("Port %d nicht lesbar (%s) - wird nicht mehr "
+                        "abgefragt" % (port, os.strerror(e.errno)))
+                    del self.faellig[port]
+                    continue
+            self.lesungen += 1
+            self.db.melden(port, daten, frisch, jetzt)
+
+
+def pd_kodieren(s, wert, daten):
+    """Gegenstueck zu pd_wert: wert in die Portdaten (bytearray) schreiben.
+    Wirft ValueError, TypeError oder struct.error, wenn er nicht passt."""
+    b, dt = s["byte"], s["datentyp"]
+    if dt == "bool":
+        i, m = b + s["bit"] // 8, 1 << (s["bit"] % 8)
+        if wert not in (0, 1):          # auch True/False
+            raise ValueError("bool: 0 oder 1")
+        daten[i] = (daten[i] | m) if wert else (daten[i] & ~m & 0xFF)
+        return
+    n = s["bytes"]
+    if dt in GANZZAHL:
+        roh = struct.pack(">" + GANZZAHL[dt], int(wert))
+    elif dt == "float":
+        roh = struct.pack(">h", round(float(wert) / s["faktor"]))
+    elif dt == "datetime":
+        t = float(wert)
+        sek = int(t)
+        roh = struct.pack(">IH", sek, min(0xFFFF, round((t - sek) * 65536)))
+    elif dt == "string":
+        roh = str(wert).encode("latin-1")[:n].ljust(n, b"\0")
+    else:
+        roh = bytes.fromhex(str(wert))[:n].ljust(n, b"\0")
+    daten[b:b + n] = roh
+
+
+def wert_aus_text(s, text):
+    """Wert fuer pd_kodieren aus Text (--wert NAME=WERT)."""
+    dt = s["datentyp"]
+    if dt == "bool":
+        t = text.strip().lower()
+        if t in ("1", "true", "ein", "ja"):
+            return 1
+        if t in ("0", "false", "aus", "nein"):
+            return 0
+        raise ValueError("bool: 0 oder 1")
+    if dt in GANZZAHL:
+        return int(text, 0)
+    if dt in ("float", "datetime"):
+        return float(text)
+    return text
+
+
+class Quellen:
+    """Inhalt der Source-Ports der Rolle und ihr Senden.
+
+    Jeder Port hat einen Puffer in Portlaenge, jedes Signal darin einen
+    Wert: Vorgabe 0 bzw. leer - fuer Befehle und Softkeys "nicht
+    gedrueckt". Setzen lassen sie sich mit --wert NAME=WERT und ueber den
+    Socket ({"befehl": "setzen", "signal": ..., "wert": ..., "dauer": s}),
+    mit "dauer" als Puls: danach gilt wieder der vorige Wert. Das
+    Lebenszeichen fuehrt der Dienst selbst.
+
+    Gesendet wird jeder Port im Takt seiner Zykluszeit - der Busmaster holt
+    ihn in diesem Takt - und sofort nach jeder Aenderung; jedes Senden geht
+    mit allen Signalen an PdDb."""
+
+    def __init__(self, mvb, ports, signale, ls_port, db):
+        self.mvb = mvb
+        self.db = db
+        self.daten = {p: bytearray(n) for p, n, _ in ports}
+        self.zyklus = {p: z for p, _, z in ports}
+        self.signale = {s["name"]: s for s in signale
+                        if s["port"] in self.daten}
+        self.ls_port = ls_port
+        self.faellig = {p: 0.0 for p in self.daten}      # gleich senden
+        self.pulse = {}         # Signal -> (Ende, Wert danach)
+        self.fehler = {}        # Port -> Zahl der Fehlversuche
+
+    def lebenszeichen(self, wert):
+        struct.pack_into(">H", self.daten[self.ls_port], 0, wert)
+        self.faellig[self.ls_port] = 0.0
+
+    def setzen(self, name, wert, dauer=None):
+        """Signal setzen; liefert einen Fehlertext oder None."""
+        s = self.signale.get(name)
+        if s is None:
+            return "kein Source-Signal dieser Rolle: %s" % name
+        if s["port"] == self.ls_port and s["byte"] < 2:
+            return "das Lebenszeichen fuehrt der Dienst selbst"
+        puffer = bytearray(self.daten[s["port"]])
+        vorher = pd_wert(s, bytes(puffer))
+        try:
+            pd_kodieren(s, wert, puffer)
+        except (ValueError, TypeError, struct.error, UnicodeError) as e:
+            return "%s (%s): %s" % (name, s["datentyp"], e)
+        self.daten[s["port"]][:] = puffer
+        self.faellig[s["port"]] = 0.0
+        if dauer:
+            alt = self.pulse.get(name)
+            danach = alt[1] if alt else (vorher[2] if s["datentyp"] == "string"
+                                         else vorher[0])
+            self.pulse[name] = (time.time() + float(dauer), danach)
+        else:
+            self.pulse.pop(name, None)
+        return None
+
+    def werte(self):
+        out = []
+        for s in self.signale.values():
+            w = pd_wert(s, bytes(self.daten[s["port"]]))
+            out.append({"signal": s["name"], "port": s["port"],
+                        "datentyp": s["datentyp"],
+                        "wert": w[2] if s["datentyp"] == "string" else w[0]})
+        return out
+
+    def naechste(self):
+        return min(list(self.faellig.values())
+                   + [e for e, _ in self.pulse.values()])
+
+    def senden(self, jetzt):
+        for name, (ende, danach) in list(self.pulse.items()):
+            if ende <= jetzt:
+                del self.pulse[name]
+                self.setzen(name, danach)
+        for port, f in self.faellig.items():
+            if f > jetzt:
+                continue
+            daten = bytes(self.daten[port])
+            self.faellig[port] = jetzt + self.zyklus[port] / 1000
+            try:
+                self.mvb.pd_write(port, daten)
+            except OSError as e:
+                n = self.fehler.get(port, 0) + 1
+                self.fehler[port] = n
+                if n == 1:
+                    log("Port %d nicht geschrieben: %s"
+                        % (port, os.strerror(e.errno)))
+                continue
+            if self.fehler.pop(port, 0):
+                log("Port %d wieder geschrieben" % port)
+            if self.db:
+                self.db.melden(port, daten, True, jetzt)
 
 
 class Mvb:
@@ -332,6 +963,15 @@ class Mvb:
         struct.pack_into("<HH", buf, 0, PD, port)
         buf[4:4 + len(data)] = data
         os.writev(self.fd, [memoryview(buf)[:len(data)]])
+
+    def pd_read(self, port, size):
+        """Daten eines Sink-Ports; OSError ETIMEDOUT, wenn sie aelter als
+        die Sink-Time-Schwelle sind. Wie bei pd_write ist die Laenge die
+        Portgroesse, der Treiber nimmt die ganze Struktur."""
+        buf = bytearray(38)
+        struct.pack_into("<HH", buf, 0, PD, port)
+        os.readv(self.fd, [memoryview(buf)[:size]])
+        return bytes(buf[4:4 + size])
 
     def md_write(self, dest, tail):
         buf = bytearray(38)
@@ -356,8 +996,9 @@ class Dia1:
     """Message-Transport mit DIA1: beantwortet dessen Frames, fuehrt die
     DDS-Abfrage und liefert das Ergebnis an den wartenden Client."""
 
-    def __init__(self, mvb):
+    def __init__(self, mvb, db=None):
         self.mvb = mvb
+        self.db = db            # DdsDb oder None (--ohne-db)
         self.next_ref = 0x0043
         self.conns = {}
         self.pending = None     # laufende Abfrage
@@ -508,11 +1149,15 @@ class Dia1:
                          erg["kopf"]))
         if not p:
             self.letzte = erg           # DIA1 hat von sich aus geschickt
+            if self.db:
+                self.db.speichern(erg, None)
             return None, erg
         erg["angefragt"] = p["anzahl"]
         if p["antwort"]:
             erg["antwort"] = p["antwort"]
         self.auswerten(p, meld, erg)
+        if self.db:
+            self.db.speichern(erg, erg["seite"])
         erg["dauer_s"] = round(time.time() - p["t0"], 2)
         self.pending = None
         self.letzte = erg
@@ -571,23 +1216,71 @@ def main():
 
     mvb = Mvb(fd)
     wert = 0
+    rolle = o["rolle"]
+    adresse, (ls_port, ls_laenge, ls_zyklus), weitere = ROLLEN[rolle]
+
+    # Signale der Rolle: Inhalt der Source-Ports, Sink-Ports, Datenbank
+    signale = []
     try:
-        ports = [(LS_PORT, LS_SIZE)] + (list(EXTRA_SRC) if o["alle"] else [])
-        cfg = struct.pack("<H", len(ports))
-        for p, s in ports:
-            cfg += struct.pack("<HHH", p, s, PD_SRC)
-        mvb.io("WRITE_DEV_ADDR", OWN_ADDR)
+        signale = signale_laden(o["signale"], rolle)
+    except OSError as e:
+        log("Signalliste %s: %s - keine Prozessdaten, Source-Ports nur mit "
+            "Lebenszeichen und Nullen" % (o["signale"], e.strerror))
+    pd_db, senken = None, {}
+    if signale and o["db"] and o["pd"]:
+        pd_db = PdDb(o["db_socket"], signale)
+        if pd_db.pymysql is None:
+            pd_db = None
+    if pd_db:
+        eigene = {ls_port} | {p for p, _, _ in weitere}
+        for s in signale:
+            if (s["richtung"] == "lesen" and s["port"] not in eigene
+                    and s["port_bytes"] in (2, 4, 8, 16, 32)):
+                senken[s["port"]] = (s["port_bytes"], s["zyklus"])
+
+    quellen = Quellen(
+        mvb, [(ls_port, ls_laenge, ls_zyklus)]
+        + (list(weitere) if o["alle"] else []),
+        [s for s in signale if s["richtung"] == "schreiben"], ls_port, pd_db)
+    quellen.lebenszeichen(wert)
+    # feste Werte: erst die Datei, dann --wert
+    werte = []
+    try:
+        with open(o["werte_datei"], encoding="utf-8") as f:
+            for zeile in f:
+                name, gleich, text = zeile.rstrip("\r\n").partition("=")
+                if gleich and not name.lstrip().startswith("#"):
+                    werte.append((name.strip(), text))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log("%s: %s" % (o["werte_datei"], e.strerror))
+    for name, text in werte + o["werte"]:
+        s = quellen.signale.get(name)
+        try:
+            grund = (quellen.setzen(name, wert_aus_text(s, text)) if s
+                     else "kein gesendetes Source-Signal der Rolle %s" % rolle)
+        except ValueError as e:
+            grund = "%s: %s" % (s["datentyp"], e)
+        log("--wert %s=%s: %s" % (name, text, grund or "gesetzt"))
+
+    try:
+        cfg = struct.pack("<H", len(quellen.daten) + len(senken))
+        for p, puffer in quellen.daten.items():
+            cfg += struct.pack("<HHH", p, len(puffer), PD_SRC)
+        for p, (s, _) in sorted(senken.items()):
+            cfg += struct.pack("<HHH", p, s, PD_SINK)
+        mvb.io("WRITE_DEV_ADDR", adresse)
         mvb.io("HWINIT", bytearray(struct.pack("<QBBHHB x",
                                                0, 1, 1, 0xFFF, 0xFFF, 0)))
         mvb.io("MD_CONF", bytearray(struct.pack("<H",
                                                 0xFFFF if o["ef1"] else 0)))
         mvb.io("PD_CONF", bytearray(cfg))
         # Quellen werden erst mit dem ersten write() aktiv
-        mvb.pd_write(LS_PORT, struct.pack(">HH", wert, 0))
-        for p, s in ports[1:]:
-            mvb.pd_write(p, bytes(s))
+        for p, puffer in quellen.daten.items():
+            mvb.pd_write(p, bytes(puffer))
         cmd = CTRL_CLEAR | (CTRL_LINE_A if o["single"] else 0)
-        mvb.io("WRITE_CONTROL", bytearray(struct.pack("<HHBx", OWN_ADDR, 43,
+        mvb.io("WRITE_CONTROL", bytearray(struct.pack("<HHBx", adresse, 43,
                                                       cmd)))
         if o["dsw_md"]:
             mvb.io("WRITE_DSW", (DSW_MD << 16) | DSW_MD)
@@ -596,6 +1289,7 @@ def main():
         log("Einrichtung fehlgeschlagen: %s" % os.strerror(e.errno))
         os.close(fd)
         return 1
+    pd = PdAbfrage(mvb, senken, pd_db) if senken else None
 
     try:
         os.unlink(o["socket"])
@@ -608,15 +1302,25 @@ def main():
     srv.setblocking(False)
     clients = {}            # socket -> Eingangspuffer
 
-    log("IDU2 (Geraet %d) am MVB: Lebenszeichen auf Port %d alle %g s, %s, "
-        "%s, Messages ueber %s%s; Steuerung %s"
-        % (OWN_ADDR, LS_PORT, o["takt"],
+    log("%s (Geraet %d = %02XH) am MVB: Lebenszeichen auf Port %d alle %g s, "
+        "%s, %s, Messages ueber %s%s; Steuerung %s"
+        % (rolle, adresse, adresse, ls_port, o["takt"],
            "Leitung A allein" if o["single"] else "zwei Leitungen",
            "MD-Bit im DSW" if o["dsw_md"] else "DSW ohne MD-Bit",
            "EF1" if o["ef1"] else "EF0",
-           ", dazu 492/498" if o["alle"] else "", o["socket"]))
+           ", dazu " + "/".join(str(p) for p, _, _ in weitere) if o["alle"]
+           else "", o["socket"]))
+    if pd_db:
+        log("Prozessdaten: %d Sink-Ports mit %d Signalen, im Takt ihrer "
+            "Zykluszeit gelesen, und %d gesendete Signale - jede Lesung -> "
+            "myboard.mvb_prozessdaten"
+            % (len(senken), sum(1 for s in signale if s["port"] in senken),
+               sum(1 for s in signale if s["richtung"] == "schreiben")))
+    elif not (o["db"] and o["pd"]):
+        log("Prozessdaten: aus (%s)" % ("--ohne-db" if not o["db"]
+                                        else "--ohne-pd"))
 
-    dia = Dia1(mvb)
+    dia = Dia1(mvb, DdsDb(o["db_socket"]) if o["db"] else None)
 
     def send(cl, obj):
         if cl is None or cl not in clients:
@@ -664,19 +1368,38 @@ def main():
         elif befehl == "letzte":
             send(cl, dia.letzte or {"ok": False,
                                     "fehler": "noch keine DDS-Daten"})
+        elif befehl == "setzen":
+            dauer = req.get("dauer")
+            if dauer is not None and not (isinstance(dauer, (int, float))
+                                          and 0 < dauer <= 3600):
+                send(cl, {"ok": False, "fehler": "dauer 0..3600 s"})
+                return
+            grund = quellen.setzen(str(req.get("signal")), req.get("wert"),
+                                   dauer)
+            send(cl, {"ok": False, "fehler": grund} if grund else {"ok": True})
+        elif befehl == "quellen":
+            send(cl, {"ok": True, "rolle": rolle, "signale": quellen.werte()})
         elif befehl == "status":
-            send(cl, {"ok": True, "lebenszeichen": wert,
+            send(cl, {"ok": True, "rolle": rolle, "adresse": adresse,
+                      "lebenszeichen": wert,
                       "abfrage_laeuft": bool(dia.pending),
                       "frames_empfangen": dia.rx,
-                      "frames_andere_geraete": dia.fremd})
+                      "frames_andere_geraete": dia.fremd,
+                      "pd_ports": len(pd.faellig) if pd else 0,
+                      "pd_lesungen": pd.lesungen if pd else 0,
+                      "pd_geschrieben": pd_db.geschrieben if pd_db else 0,
+                      "pd_nicht_geschrieben": pd_db.verworfen if pd_db else 0})
         else:
             send(cl, {"ok": False, "fehler": "unbekannter Befehl"})
 
-    fehler = 0
     naechster = time.time() + o["takt"]
     letzte_meldung = time.time()
     while not stop["jetzt"]:
         wait = 0.01 if dia.pending or dia.conns else 0.1
+        bald = min(quellen.naechste(), naechster)
+        if pd and pd.faellig:
+            bald = min(bald, pd.naechste())
+        wait = min(wait, max(0.0, bald - time.time()))
         try:
             r, _, _ = select.select([srv] + list(clients), [], [], wait)
         except InterruptedError:
@@ -724,24 +1447,20 @@ def main():
         cl, erg = dia.check_timeout()
         if erg is not None:
             send(cl, erg)
+        if pd:
+            pd.abfragen(time.time())
 
         if time.time() >= naechster:
             naechster += o["takt"]
             wert = (wert + 1) & 0xFFFF
-            try:
-                mvb.pd_write(LS_PORT, struct.pack(">HH", wert, 0))
-                if fehler:
-                    log("Lebenszeichen wieder geschrieben (Wert %04X)" % wert)
-                    fehler = 0
-            except OSError as e:
-                fehler += 1
-                if fehler == 1:
-                    log("Lebenszeichen nicht geschrieben: %s"
-                        % os.strerror(e.errno))
+            quellen.lebenszeichen(wert)
             if time.time() - letzte_meldung >= 600:
                 log("Lebenszeichen laeuft, Wert %04X, Frames %d (andere "
-                    "Geraete %d)" % (wert, dia.rx, dia.fremd))
+                    "Geraete %d), Prozessdaten-Lesungen %d"
+                    % (wert, dia.rx, dia.fremd, pd.lesungen if pd else 0))
                 letzte_meldung = time.time()
+        # Source-Ports im Takt ihrer Zykluszeit und nach jeder Aenderung
+        quellen.senden(time.time())
 
     # STOP und close() nehmen das Geraet vom Bus und setzen den
     # Controller zurueck

@@ -1,0 +1,19 @@
+[Unit]
+Description=Hardkeys der Front nach MariaDB (myboard.tasten)
+Documentation=file:/usr/bin/myboard-tasten
+# Ohne MariaDB laeuft der Dienst trotzdem und traegt spaeter nach
+After=mysqld.service myboard-db-setup.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/bin/myboard-tasten
+# Eigener Benutzer: Anmeldung an MariaDB ueber unix_socket als 'tasten';
+# /dev/input/event* gehoeren der Gruppe input
+User=tasten
+Group=tasten
+SupplementaryGroups=input
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

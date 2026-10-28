@@ -1,14 +1,31 @@
 # Optionen fuer idu2-mvb.py (Dienst idu2-mvb)
 #
+#   --rolle IDU1|IDU2  Rolle am Bus (Vorgabe IDU2 = Geraet 240, Lebenszeichen
+#                      auf 491; IDU1 = Geraet 238, Lebenszeichen auf 481).
+#                      IDU1 nur, wenn kein echtes IDU1 am Bus haengt!
 #   --zwei-leitungen   Zweileitungsbetrieb statt Leitung A allein
 #   --ohne-dsw-md      MD-Bit im DSW nicht setzen
 #   --ef0              Messages ueber EF0 statt EF1 anmelden
 #   --takt S           Lebenszeichen alle S Sekunden erhoehen (Vorgabe 1)
-#   --alle-quellen     auch Port 492 und 498 senden (nur Nullen)
+#   --nur-lebenszeichen  nur den Port des Lebenszeichens senden (491 bzw.
+#                      481), nicht die weiteren Source-Ports der Rolle
+#                      (IDU2: 492, 498; IDU1: 488, 489)
+#   --wert NAME=WERT   Wert eines Source-Signals, mehrfach moeglich, ohne
+#                      Leerzeichen; Vorgabe 0 bzw. leer (Befehle: nicht
+#                      gedrueckt). Feste Werte besser in
+#                      /etc/idu2-mvb/quellen.conf (Leerzeichen erlaubt).
+#                      Zur Laufzeit ueber den Socket: {"befehl": "setzen",
+#                      "signal": NAME, "wert": W[, "dauer": S]}
+#   --werte-datei PFAD statt /etc/idu2-mvb/quellen.conf
 #   --socket PFAD      Steuersocket (Vorgabe /run/idu2-mvb.sock)
 #   --anzahl N         DDS-Meldungen je Seite, 1..255 (Vorgabe 16; das
 #                      Original-Display fragt 21 an, DIA1 liefert
 #                      hoechstens 25)
+#   --ohne-pd          keine Sink-Ports, keine Prozessdaten in MariaDB
+#   --signale PFAD     Signalliste (Vorgabe /usr/share/idu2-mvb/mvb-signale.tsv)
+#   --ohne-db          nichts in MariaDB speichern (DDS und Prozessdaten)
+#   --db-socket PFAD   Socket von MariaDB (Vorgabe /var/lib/mysql/mysql.sock)
 #
+# Beispiel: OPTIONEN="--rolle IDU1"
 # Nach einer Aenderung: systemctl restart idu2-mvb
 OPTIONEN=""
