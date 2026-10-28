@@ -1,7 +1,8 @@
 /* MyBoard Web-Oberflaeche - Bedienung wie myboard-gui (Qt).
  *
- * Tasten wie MainWindow::keyPressEvent: C/Esc -> Hauptmenue; 1-6 Seiten;
- * Pfeile: Wagenwahl, auf der DDS-Seite Meldung waehlen/blaettern;
+ * Tasten wie MainWindow::keyPressEvent: C/Esc -> Hauptmenue; 1-7 Seiten;
+ * Pfeile: Wagenwahl, auf der DDS-Seite Meldung waehlen/blaettern, auf der
+ * Softkey-Seite Taste waehlen (E/Enter drueckt);
  * Update-Seite: 1 = Ja, 2 = Nein. Touch/Maus ueber die Knoepfe.
  * Daten: /api/ (Dienst myboard-webgui-api).
  */
@@ -9,7 +10,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 const SEITEN = Array.from(document.querySelectorAll('#seiten > .seite'));
-const MENUE = 0, DDS = 4, UPDATE = 5;
+const MENUE = 0, DDS = 4, UPDATE = 5, SOFTKEYS = 7;
 let seite = MENUE;
 
 /* ------------------------------------------------------------ Skalierung */
@@ -41,6 +42,7 @@ function zeigeSeite(i) {
   $('#titel').textContent = SEITEN[i].dataset.titel;
   seite = i;
   usbPruefen(i === UPDATE);       /* wie m_usbTimer: nur auf der Update-Seite */
+  skAnzeigen(i === SOFTKEYS);     /* wie m_skTimer */
 }
 
 document.querySelectorAll('.leiste button[data-seite]').forEach((b) =>
@@ -303,6 +305,148 @@ async function updateStarten() {
 $('#ja').addEventListener('click', updateStarten);
 $('#nein').addEventListener('click', () => { if (usbDa) zeigeSeite(MENUE); });
 
+/* ------------------------------------------------------------ Softkeys */
+/* Wie die Softkey-Seite in Qt: welche Softkeys es gibt, sagt idu2-mvb
+   (/api/softkeys, je nach Rolle IDU1/IDU2); ein Druck (/api/softkey) ist
+   dort ein Puls auf dem Source-Port. Abgefragt wird nur, solange die Seite
+   offen ist. */
+const sk = { timer: null, laeuft: false, signatur: '', spalten: [],
+             spalte: 0, zeile: 0, meldungBis: 0, dauer: 1 };
+
+function skStatus(text, farbe) {
+  const s = $('#sk-status');
+  s.textContent = text;
+  s.style.color = farbe;
+}
+
+async function skAbfragen() {
+  if (sk.laeuft) return;                  /* vorige Anfrage noch unterwegs */
+  sk.laeuft = true;
+  let a;
+  try {
+    a = await (await fetch('/api/softkeys', { cache: 'no-store' })).json();
+  } catch (e) {
+    a = { ok: false, fehler: 'Dienst myboard-webgui-api nicht erreichbar' };
+  }
+  sk.laeuft = false;
+  if (seite === SOFTKEYS) skStand(a);
+}
+
+function skAufbauen(gruppen, rueck) {
+  const r = $('#sk-rueck');
+  r.textContent = '';
+  r.style.gridTemplateColumns = 'repeat(' + Math.max(1, Math.ceil(rueck.length / 2)) + ', 1fr)';
+  rueck.forEach((x) => {
+    const d = document.createElement('div');
+    d.textContent = x.text;
+    d.dataset.signal = x.signal;
+    r.appendChild(d);
+  });
+  if (!rueck.length) {
+    const d = document.createElement('div');
+    d.className = 'leer';
+    d.textContent = 'Keine Rückmeldungen (Prozessdaten in idu2-mvb aus)';
+    r.appendChild(d);
+  }
+  const g = $('#sk-gruppen');
+  g.textContent = '';
+  sk.spalten = [];
+  gruppen.forEach((gr, c) => {
+    const sp = document.createElement('div');
+    sp.className = 'sk-spalte';
+    const h = document.createElement('h3');
+    h.textContent = gr.name;
+    sp.appendChild(h);
+    const knoepfe = [];
+    gr.tasten.forEach((t, z) => {
+      const b = document.createElement('button');
+      b.textContent = t.text;
+      b.dataset.signal = t.signal;
+      b.addEventListener('click', () => { skWaehlen(c, z); skDruecken(t.signal); });
+      sp.appendChild(b);
+      knoepfe.push(b);
+    });
+    g.appendChild(sp);
+    sk.spalten.push(knoepfe);
+  });
+  skWaehlen(Math.min(sk.spalte, sk.spalten.length - 1), sk.zeile);
+}
+
+function skStand(a) {
+  if (!a.ok) {
+    skStatus('Softkeys nicht verfügbar: ' + (a.fehler || 'Fehler'), '#C0392B');
+    return;
+  }
+  const gruppen = a.gruppen || [], rueck = a.rueckmeldungen || [];
+  sk.dauer = a.dauer || 1;
+  /* neu aufbauen nur, wenn sich die Tasten aendern (andere Rolle) */
+  const sig = [a.rolle].concat(...gruppen.map((g) => g.tasten.map((t) => t.signal)),
+                               rueck.map((x) => 'r:' + x.signal)).join(',');
+  if (sig !== sk.signatur) {
+    sk.signatur = sig;
+    skAufbauen(gruppen, rueck);
+  }
+  /* Knoepfe blau, solange der Puls laeuft */
+  const knopf = new Map(sk.spalten.flat().map((b) => [b.dataset.signal, b]));
+  gruppen.forEach((g) => g.tasten.forEach((t) => {
+    const b = knopf.get(t.signal);
+    if (b) b.classList.toggle('aktiv', t.wert === 1);
+  }));
+  /* Rueckmeldungen: gruen = 1, gestrichelt = Port veraltet */
+  rueck.forEach((x) => {
+    const d = $('#sk-rueck').querySelector('[data-signal="' + CSS.escape(x.signal) + '"]');
+    if (!d) return;
+    const alt = !x.frisch || x.wert == null;
+    d.classList.toggle('alt', alt);
+    d.classList.toggle('an', !alt && x.wert === 1);
+  });
+  if (Date.now() < sk.meldungBis) return;   /* Meldung zum letzten Druck steht */
+  if (!gruppen.length) skStatus('Keine Softkeys in der Rolle ' + a.rolle + '.', '#B9770E');
+  else skStatus('Rolle ' + a.rolle + ' · jeder Druck ist ein Puls von ' + sk.dauer
+                + ' s auf dem MVB · gestrichelte Rückmeldung = keine aktuellen Daten', '#555555');
+}
+
+async function skDruecken(signal) {
+  const b = sk.spalten.flat().find((x) => x.dataset.signal === signal);
+  const text = b ? b.textContent.replace(/\n/g, ' ') : signal;
+  let a;
+  try {
+    a = await (await fetch('/api/softkey', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signal: signal }),
+    })).json();
+  } catch (e) {
+    a = { ok: false, fehler: 'Dienst myboard-webgui-api nicht erreichbar' };
+  }
+  if (a.ok) skStatus(text + ': Puls ' + a.dauer + ' s gesendet', '#2E7D32');
+  else skStatus(text + ' nicht gesendet: ' + (a.fehler || 'Fehler'), '#C0392B');
+  sk.meldungBis = Date.now() + 4000;
+  skAbfragen();                           /* Knopf gleich blau zeigen */
+}
+
+function skWaehlen(spalte, zeile) {
+  if (!sk.spalten.length || spalte < 0) return;
+  zeile = Math.max(0, Math.min(zeile, sk.spalten[spalte].length - 1));
+  sk.spalten.forEach((sp, c) => sp.forEach((b, z) =>
+    b.classList.toggle('gewaehlt', c === spalte && z === zeile)));
+  sk.spalte = spalte;
+  sk.zeile = zeile;
+}
+
+function skPfeil(dx, dy) {
+  if (!sk.spalten.length) return;
+  skWaehlen(Math.max(0, Math.min(sk.spalte + dx, sk.spalten.length - 1)), sk.zeile + dy);
+}
+
+function skAnzeigen(an) {
+  clearInterval(sk.timer);
+  sk.timer = null;
+  if (an) {
+    skAbfragen();
+    sk.timer = setInterval(skAbfragen, 400);
+  }
+}
+
 /* ------------------------------------------------------------ Info */
 fetch('/api/info', { cache: 'no-store' }).then((r) => r.json()).then((i) => {
   $('#info-app').textContent = i.applikation;
@@ -325,7 +469,13 @@ document.addEventListener('keydown', (ev) => {
     startDds();
   } else if (seite === DDS && (k === 'ArrowDown' || k === 'ArrowUp')) {
     ddsPfeil(k === 'ArrowDown');
-  } else if (k >= '1' && k <= '6' && k.length === 1) {
+  } else if (seite === SOFTKEYS && k.startsWith('Arrow')) {
+    skPfeil(k === 'ArrowLeft' ? -1 : k === 'ArrowRight' ? 1 : 0,
+            k === 'ArrowUp' ? -1 : k === 'ArrowDown' ? 1 : 0);
+  } else if (seite === SOFTKEYS && k === 'Enter') {   /* Taste E der Front */
+    const b = (sk.spalten[sk.spalte] || [])[sk.zeile];
+    if (b) skDruecken(b.dataset.signal);
+  } else if (k >= '1' && k <= '7' && k.length === 1) {
     zeigeSeite(Number(k));
   } else if (k === 'ArrowUp') {           /* Wagen-Auswahl nach rechts */
     if (wagen < WAGEN.length - 1) { wagen++; wagenAnzeigen(); }

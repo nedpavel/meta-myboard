@@ -4,7 +4,7 @@
  * Prozesswert, Zustandsdaten, DDS-Speicher) via QStackedWidget.
  *
  * Bedienung: Touch/Maus (Buttons antippen) ODER Hardware-Tasten
- * (1-4 öffnen die Seiten, "C" führt zurück zum Hauptmenü).
+ * (1-7 öffnen die Seiten, "C" führt zurück zum Hauptmenü).
  */
 
 #ifndef MAINWINDOW_H
@@ -13,8 +13,10 @@
 #include <QWidget>
 #include <QStringList>
 #include <QHash>
+#include <QList>
 #include <QByteArray>
 #include <QJsonObject>   /* vollstaendig: moc braucht den Typ der Slot-Parameter */
+#include <QJsonArray>
 
 #include "canmatrix.h"
 
@@ -75,6 +77,16 @@ private:
     void     ddsStatus(const QString &text, const char *farbe);
     QWidget *buildUpdatePage();  /* Seite 5: App-Update ab USB-Stick    */
     QWidget *buildInfoPage();    /* Seite 6: mit Qt Designer (.ui) gebaut */
+    QWidget *buildSoftkeyPage(); /* Seite 7: Softkeys (Port 492 usw.)  */
+    void     softkeyAbfragen();   /* Stand von idu2-mvb holen           */
+    void     softkeyStand(const QJsonObject &antwort);
+    void     softkeyAufbauen(const QJsonArray &gruppen,
+                             const QJsonArray &rueck);
+    void     softkeyDruecken(const QString &signal);
+    void     softkeyWaehlen(int spalte, int zeile);
+    void     softkeyPfeil(int dx, int dy);
+    void     softkeyStil(QPushButton *b);
+    void     softkeyStatus(const QString &text, const char *farbe);
     void     showPage(int page); /* zentral: Seite + Titel umschalten   */
     void     updateCarSelection(); /* blauer Rand + "X" auf gewählten Wagen */
 
@@ -128,6 +140,25 @@ private:
     bool               m_ddsLetzte = false;   /* dahinter kommt nichts mehr   */
     bool               m_ddsAufwaerts = false; /* nach dem Laden letzte Zeile */
     QString            m_ddsInfo;             /* Statuszeile der Seite        */
+
+    /* --- Softkeys (Seite 7) ----------------------------------------
+       Welche Softkeys es gibt, sagt idu2-mvb (Befehl "softkeys", je nach
+       Rolle); jeder Druck ist dort ein Puls auf dem Source-Port. */
+    static const int SOFTKEY_PAGE = 7; /* Seitenindex der Softkey-Seite     */
+    static const int SOFTKEY_SPALTEN = 6; /* Gruppen nebeneinander (IDU2)   */
+    QTimer            *m_skTimer = nullptr;   /* fragt den Stand ab, solange
+                                                 die Seite offen ist         */
+    bool               m_skAbfrage = false;   /* Anfrage unterwegs            */
+    QLabel            *m_skStatus = nullptr;  /* Rolle / letzter Druck / Fehler */
+    QWidget           *m_skRueckBox = nullptr; /* Rueckmeldungen (Port 290)   */
+    QWidget           *m_skGruppenBox = nullptr; /* Spalten mit den Knoepfen  */
+    QString            m_skSignatur;          /* aufgebaute Tasten (Rolle)    */
+    QList<QList<QPushButton *>> m_skSpalten;  /* je Gruppe die Knoepfe        */
+    QHash<QString, QLabel *> m_skRueck;       /* Signal -> Anzeige            */
+    int                m_skSpalte = 0;        /* Auswahl mit den Pfeiltasten  */
+    int                m_skZeile = 0;
+    double             m_skDauer = 1.0;       /* Pulsdauer laut idu2-mvb      */
+    qint64             m_skMeldungBis = 0;    /* Meldung zum Druck stehen lassen */
 };
 
 #endif /* MAINWINDOW_H */

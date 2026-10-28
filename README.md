@@ -37,6 +37,11 @@ Enthält:
     eine MEMORY-Tabelle (schont die CFast, Inhalt nach Neustart neu
     angelegt). Die Signalliste entsteht beim Bauen aus
     `~/Embedded/private/mvb-trak.txt` (siehe [SETUP.md](SETUP.md)).
+  - Softkeys: Seite 7 der Qt- und der Web-Oberfläche (Taste `7`) schickt die
+    Befehle aus Port 492 (Türen-Test, Visiteur, Licht/HLK, Klima-Prüflauf)
+    und die Lüfterbefehle als Puls von 1 s; die Liste liefert idu2-mvb
+    (`softkeys`/`softkey` über den Socket), dazu die Rückmeldungen aus
+    Port 290.
   - Source-Ports: alle drei der Rolle (IDU2 491/492/498, IDU1 481/488/489),
     gesendet im Takt ihrer Zykluszeit und nach jeder Änderung, jedes Senden
     ebenfalls in `mvb_prozessdaten`. Werte: Vorgabe 0 (Befehle nicht

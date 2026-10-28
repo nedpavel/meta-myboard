@@ -25,6 +25,8 @@ add_executable(myboard-gui
     canopen.h
     ddsclient.cpp
     ddsclient.h
+    iduanfrage.cpp
+    iduanfrage.h
     infopage.ui
     images.qrc
     can.qrc

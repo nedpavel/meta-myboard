@@ -151,6 +151,34 @@ td.gegangen { color: #666666; }
 }
 .ja-nein.stick #ja, .ja-nein.stick #nein { color: #000000; cursor: pointer; }
 
+/* Softkey-Seite: wie buildSoftkeyPage in Qt (Knopf 30 px hoch, Schrift
+   9 px, Gruppenkopf pt(8.5), Rueckmeldungen pt(7.5)) */
+.softkeys { background: var(--bg); border: var(--b) solid var(--rand); padding: 6px 8px; gap: 4px; }
+.softkeys h2 { margin: 0; font-size: 18.67px; color: var(--blau); }      /* pt(14) */
+.sk-rueck-kopf { font-size: 10px; color: #666666; }
+.sk-rueck { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+.sk-rueck div {
+  font-size: 10px; text-align: center; padding: 1px; white-space: nowrap; overflow: hidden;
+  background: var(--zelle); color: var(--text); border: var(--b) solid var(--rand);
+}
+.sk-rueck div.an { background: var(--ok); color: white; border-color: var(--ok); }
+.sk-rueck div.alt { background: var(--bg); color: #A0A0A0; border-style: dashed; }
+.sk-rueck div.leer { grid-column: 1 / -1; text-align: left; border: none; background: none;
+  font-style: italic; color: var(--grau); }
+.sk-gruppen {
+  flex: 1; min-height: 0; margin-top: 2px; display: grid; gap: 4px;
+  grid-template-columns: repeat(6, 1fr); align-content: start;   /* immer 6 Spalten breit */
+}
+.sk-spalte { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sk-spalte h3 { margin: 0; font-size: 11.33px; color: var(--blau); }
+.sk-spalte button {
+  height: 30px; flex: none; min-width: 0; padding: 0; white-space: pre-line; font-size: 9px;
+  background: var(--zelle); color: var(--text); border: var(--b) solid var(--rand);
+}
+.sk-spalte button.aktiv { background: var(--blau); color: white; }
+.sk-spalte button.gewaehlt { border: var(--b2) solid #E67E22; }
+.sk-hinweis { align-self: center; font-size: 12px; font-style: italic; color: var(--grau); }
+
 /* Info-Seite: in Qt mit festen Punktgroessen (Designer), auf 1024x768
    umgerechnet: 20pt = 16.67px, 12pt = 10px, Raender 18/12 px. */
 .info { background: var(--bg); border: var(--b) solid var(--rand); padding: 7.5px 11.25px; gap: 6.25px; }

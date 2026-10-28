@@ -6,7 +6,8 @@
  * Bedienung:
  *   - Touch/Maus: Buttons direkt antippen
  *   - Hardware:   1=Zugsübersicht, 2=Prozesswert,
- *                 3=Zustandsdaten, 4=DDS-Speicher,
+ *                 3=Zustandsdaten, 4=DDS-Speicher, 5=Update App,
+ *                 6=Info, 7=Softkeys,
  *                 "C" = zurück zum Hauptmenü
  */
 
@@ -35,9 +36,11 @@
 #include <QColor>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QGridLayout>
 #include "canreader.h"
 #include "canopen.h"
 #include "ddsclient.h"
+#include "iduanfrage.h"
 #include "ui_infopage.h"   /* aus infopage.ui via uic (AUTOUIC) generiert */
 
 /* ------------------------------------------------------------------ */
@@ -186,6 +189,13 @@ MainWindow::MainWindow(const QSize &screen, QWidget *parent)
     /* Seite 6 — mit Qt Designer (infopage.ui) gebaut (Index INFO_PAGE) */
     m_stack->addWidget(buildInfoPage());
     m_pageTitles << "Info";         /* Index 6 */
+
+    /* Seite 7 — Softkeys; der Stand kommt von idu2-mvb, abgefragt nur,
+       solange die Seite offen ist */
+    m_stack->addWidget(buildSoftkeyPage());
+    m_pageTitles << "Softkeys";     /* Index 7 = SOFTKEY_PAGE */
+    m_skTimer = new QTimer(this);
+    connect(m_skTimer, &QTimer::timeout, this, &MainWindow::softkeyAbfragen);
 
     setLayout(root);
 
@@ -465,6 +475,7 @@ QWidget *MainWindow::buildButtonRow()
         { "DDS -\nSpeicher",  4 },
         { "Update\nApp",      UPDATE_PAGE },  /* Taste 5 */
         { "Info",             INFO_PAGE   },  /* Taste 6 (Designer-.ui) */
+        { "Softkeys",         SOFTKEY_PAGE }, /* Taste 7 */
     };
 
     for (const auto &f : funcs) {
@@ -480,8 +491,8 @@ QWidget *MainWindow::buildButtonRow()
         lay->addWidget(btn, 1);
     }
 
-    /* Es gibt jetzt 6 belegte Funktionstasten (1..6), daher nur noch 2 leere. */
-    for (int i = 0; i < 2; i++) {
+    /* Es gibt jetzt 7 belegte Funktionstasten (1..7), daher nur noch 1 leere. */
+    for (int i = 0; i < 1; i++) {
         QPushButton *btn = new QPushButton("");
         btn->setStyleSheet(btnStyle);
         btn->setMinimumWidth(0);
@@ -980,6 +991,319 @@ void MainWindow::onDdsFehler(const QString &meldung)
 }
 
 /* ------------------------------------------------------------------ */
+/* Softkey-Seite — Befehle an FLG2N (Port 492) und die Luefter         */
+/*                                                                      */
+/* Welche Softkeys es gibt und wie sie heissen, sagt idu2-mvb (Befehl   */
+/* "softkeys", je nach Rolle IDU1/IDU2). Ein Druck ("softkey") ist dort */
+/* ein Puls auf dem Source-Port (Vorgabe 1 s). Die Rueckmeldungen kommen */
+/* aus Port 290 von FLG2N. Bedienung: antippen, oder Pfeile waehlen und */
+/* E (Return) druecken.                                                 */
+/* ------------------------------------------------------------------ */
+
+QWidget *MainWindow::buildSoftkeyPage()
+{
+    QFrame *page = new QFrame();
+    page->setStyleSheet(
+        QString("QFrame { background-color: %1; border: 1px solid %2; }")
+            .arg(COL_BG).arg(COL_BORDER));
+
+    QVBoxLayout *lay = new QVBoxLayout(page);
+    lay->setContentsMargins(px(8), px(6), px(8), px(6));
+    lay->setSpacing(px(4));
+
+    QLabel *titleLabel = new QLabel("Befehle an den Zug");
+    QFont tf; tf.setPointSizeF(pt(14)); tf.setBold(true);
+    titleLabel->setFont(tf);
+    titleLabel->setStyleSheet(QString("color: %1; border: none;").arg(COL_BLUE));
+    lay->addWidget(titleLabel);
+
+    m_skStatus = new QLabel("Frage den Dienst idu2-mvb …");
+    m_skStatus->setWordWrap(true);
+    QFont sf; sf.setPointSizeF(pt(9));
+    m_skStatus->setFont(sf);
+    m_skStatus->setStyleSheet("color: #888888; border: none;");
+    lay->addWidget(m_skStatus);
+
+    /* Platzhalter; softkeyAufbauen() setzt die echten Inhalte ein */
+    m_skRueckBox = new QWidget();
+    lay->addWidget(m_skRueckBox);
+    m_skGruppenBox = new QWidget();
+    lay->addWidget(m_skGruppenBox, 1);
+
+    QPushButton *back = new QPushButton("◄  Zurück  (C)");
+    back->setStyleSheet(QString(
+        "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
+        "  font-size: %5px; padding: %6px %7px; }"
+        "QPushButton:pressed { background-color: %4; color: white; }")
+        .arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER).arg(COL_BLUE)
+        .arg(px(13)).arg(px(5)).arg(px(18)));
+    back->setFocusPolicy(Qt::NoFocus);
+    connect(back, &QPushButton::clicked, this, &MainWindow::backToMenu);
+
+    QLabel *hint = new QLabel("antippen oder ▲▼◄► wählen, E drückt");
+    QFont hf; hf.setPointSizeF(pt(9)); hf.setItalic(true);
+    hint->setFont(hf);
+    hint->setStyleSheet("color: #888888; border: none;");
+
+    QHBoxLayout *btnRow = new QHBoxLayout();
+    btnRow->addWidget(back);
+    btnRow->addStretch();
+    btnRow->addWidget(hint);
+    lay->addLayout(btnRow);
+
+    return page;
+}
+
+void MainWindow::softkeyStatus(const QString &text, const char *farbe)
+{
+    m_skStatus->setText(text);
+    m_skStatus->setStyleSheet(QString("color: %1; border: none;").arg(farbe));
+}
+
+void MainWindow::softkeyAbfragen()
+{
+    if (m_skAbfrage)
+        return;                         /* vorige Anfrage noch unterwegs */
+    m_skAbfrage = true;
+    iduAnfrage(this, QJsonObject{{"befehl", "softkeys"}},
+               [this](const QJsonObject &antwort) {
+        m_skAbfrage = false;
+        softkeyStand(antwort);
+    });
+}
+
+/* Knopf: blau, solange der Puls laeuft; orange umrandet, wenn mit den
+   Pfeiltasten gewaehlt. Stil nur setzen, wenn er sich aendert. */
+void MainWindow::softkeyStil(QPushButton *b)
+{
+    const bool aktiv = b->property("aktiv").toBool();
+    const bool gew = b->property("gewaehlt").toBool();
+    const QString stil = QString(
+        "QPushButton { background-color: %1; color: %2;"
+        "  border: %3px solid %4; font-size: %5px; padding: 0px; }"
+        "QPushButton:pressed { background-color: %6; color: white; }")
+        .arg(aktiv ? COL_BLUE : COL_CELL)
+        .arg(aktiv ? "white" : COL_TEXT)
+        .arg(gew ? px(2) : 1)
+        .arg(gew ? "#E67E22" : COL_BORDER)
+        .arg(px(9))
+        .arg(COL_BLUE);
+    if (b->styleSheet() != stil)
+        b->setStyleSheet(stil);
+}
+
+void MainWindow::softkeyAufbauen(const QJsonArray &gruppen,
+                                 const QJsonArray &rueck)
+{
+    /* Rueckmeldungen: Beschriftung, darunter Felder in zwei Reihen */
+    QWidget *rBox = new QWidget();
+    rBox->setStyleSheet("border: none;");
+    QVBoxLayout *rAussen = new QVBoxLayout(rBox);
+    rAussen->setContentsMargins(0, 0, 0, 0);
+    rAussen->setSpacing(px(1));
+    QLabel *rKopf = new QLabel("Rückmeldungen von FLG2N (Port 290) — grün = ein");
+    QFont rf; rf.setPointSizeF(pt(7.5));
+    rKopf->setFont(rf);
+    rKopf->setStyleSheet("color: #666666;");
+    rAussen->addWidget(rKopf);
+    QGridLayout *rLay = new QGridLayout();
+    rLay->setSpacing(px(3));
+    rAussen->addLayout(rLay);
+    m_skRueck.clear();
+    const int proReihe = qMax(1, int((rueck.size() + 1) / 2));
+    for (int i = 0; i < rueck.size(); ++i) {
+        const QJsonObject r = rueck.at(i).toObject();
+        QLabel *l = new QLabel(r.value("text").toString());
+        l->setAlignment(Qt::AlignCenter);
+        QFont lf; lf.setPointSizeF(pt(7.5));
+        l->setFont(lf);
+        rLay->addWidget(l, i / proReihe, i % proReihe);
+        m_skRueck.insert(r.value("signal").toString(), l);
+    }
+    if (rueck.isEmpty()) {
+        QLabel *l = new QLabel("Keine Rückmeldungen (Prozessdaten in idu2-mvb aus)");
+        QFont lf; lf.setPointSizeF(pt(8)); lf.setItalic(true);
+        l->setFont(lf);
+        l->setStyleSheet("color: #888888;");
+        rLay->addWidget(l, 0, 0);
+    }
+    /* replaceWidget gibt den alten Eintrag ab - er gehoert dann uns */
+    delete m_skRueckBox->parentWidget()->layout()->replaceWidget(m_skRueckBox, rBox);
+    m_skRueckBox->deleteLater();
+    m_skRueckBox = rBox;
+
+    /* Je Gruppe eine Spalte: Ueberschrift, darunter die Knoepfe */
+    QWidget *gBox = new QWidget();
+    gBox->setStyleSheet("border: none;");
+    QHBoxLayout *gLay = new QHBoxLayout(gBox);
+    gLay->setContentsMargins(0, px(2), 0, 0);
+    gLay->setSpacing(px(4));
+    m_skSpalten.clear();
+    for (int c = 0; c < gruppen.size(); ++c) {
+        const QJsonObject g = gruppen.at(c).toObject();
+        QVBoxLayout *col = new QVBoxLayout();
+        col->setSpacing(px(3));
+        QLabel *kopf = new QLabel(g.value("name").toString());
+        QFont kf; kf.setPointSizeF(pt(8.5)); kf.setBold(true);
+        kopf->setFont(kf);
+        kopf->setStyleSheet(QString("color: %1;").arg(COL_BLUE));
+        col->addWidget(kopf);
+
+        QList<QPushButton *> knoepfe;
+        const QJsonArray tasten = g.value("tasten").toArray();
+        for (int r = 0; r < tasten.size(); ++r) {
+            const QJsonObject t = tasten.at(r).toObject();
+            QPushButton *b = new QPushButton(t.value("text").toString());
+            const QString signal = t.value("signal").toString();
+            b->setProperty("signal", signal);
+            b->setFixedHeight(px(30));
+            b->setMinimumWidth(0);
+            b->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+            b->setFocusPolicy(Qt::NoFocus);
+            connect(b, &QPushButton::clicked, this, [this, c, r, signal]() {
+                softkeyWaehlen(c, r);
+                softkeyDruecken(signal);
+            });
+            softkeyStil(b);
+            col->addWidget(b);
+            knoepfe << b;
+        }
+        col->addStretch();
+        gLay->addLayout(col, 1);
+        m_skSpalten << knoepfe;
+    }
+    /* Spalten immer ein Sechstel breit, auch bei wenigen Gruppen (IDU1) */
+    if (gruppen.size() < SOFTKEY_SPALTEN)
+        gLay->addStretch(SOFTKEY_SPALTEN - int(gruppen.size()));
+    delete m_skGruppenBox->parentWidget()->layout()->replaceWidget(m_skGruppenBox, gBox);
+    m_skGruppenBox->deleteLater();
+    m_skGruppenBox = gBox;
+
+    softkeyWaehlen(qMin(m_skSpalte, int(m_skSpalten.size()) - 1), m_skZeile);
+}
+
+void MainWindow::softkeyStand(const QJsonObject &antwort)
+{
+    if (!antwort.value("ok").toBool()) {
+        softkeyStatus("Softkeys nicht verfügbar: "
+                      + antwort.value("fehler").toString(), "#C0392B");
+        return;
+    }
+    const QJsonArray gruppen = antwort.value("gruppen").toArray();
+    const QJsonArray rueck = antwort.value("rueckmeldungen").toArray();
+    const QString rolle = antwort.value("rolle").toString();
+    m_skDauer = antwort.value("dauer").toDouble(1.0);
+
+    /* Neu aufbauen nur, wenn sich die Tasten aendern (andere Rolle) */
+    QStringList sig(rolle);
+    for (const QJsonValue &g : gruppen)
+        for (const QJsonValue &t : g.toObject().value("tasten").toArray())
+            sig << t.toObject().value("signal").toString();
+    for (const QJsonValue &r : rueck)
+        sig << "r:" + r.toObject().value("signal").toString();
+    if (sig.join(',') != m_skSignatur) {
+        m_skSignatur = sig.join(',');
+        softkeyAufbauen(gruppen, rueck);
+    }
+
+    /* Knoepfe: blau, solange der Puls laeuft */
+    QHash<QString, QPushButton *> knopf;
+    for (const auto &spalte : m_skSpalten)
+        for (QPushButton *b : spalte)
+            knopf.insert(b->property("signal").toString(), b);
+    for (const QJsonValue &g : gruppen)
+        for (const QJsonValue &tv : g.toObject().value("tasten").toArray()) {
+            const QJsonObject t = tv.toObject();
+            QPushButton *b = knopf.value(t.value("signal").toString());
+            if (!b)
+                continue;
+            b->setProperty("aktiv", t.value("wert").toInt() == 1);
+            softkeyStil(b);
+        }
+
+    /* Rueckmeldungen: gruen = 1, grau = 0, gestrichelt = Port veraltet */
+    for (const QJsonValue &rv : rueck) {
+        const QJsonObject r = rv.toObject();
+        QLabel *l = m_skRueck.value(r.value("signal").toString());
+        if (!l)
+            continue;
+        const bool frisch = r.value("frisch").toBool();
+        const bool an = r.value("wert").toInt() == 1;
+        QString stil;
+        if (!frisch || r.value("wert").isNull())
+            stil = QString("background-color: %1; color: #A0A0A0;"
+                           " border: 1px dashed %2;").arg(COL_BG).arg(COL_BORDER);
+        else if (an)
+            stil = "background-color: #2E7D32; color: white; border: 1px solid #2E7D32;";
+        else
+            stil = QString("background-color: %1; color: %2;"
+                           " border: 1px solid %3;").arg(COL_CELL).arg(COL_TEXT).arg(COL_BORDER);
+        stil += QString(" padding: %1px;").arg(px(1));
+        if (l->styleSheet() != stil)
+            l->setStyleSheet(stil);
+    }
+
+    if (QDateTime::currentMSecsSinceEpoch() < m_skMeldungBis)
+        return;                         /* Meldung zum letzten Druck steht */
+    if (gruppen.isEmpty())
+        softkeyStatus(QString("Keine Softkeys in der Rolle %1.").arg(rolle),
+                      "#B9770E");
+    else
+        softkeyStatus(QString("Rolle %1 · jeder Druck ist ein Puls von %2 s "
+                              "auf dem MVB · gestrichelte Rückmeldung = keine "
+                              "aktuellen Daten")
+                          .arg(rolle).arg(m_skDauer), "#555555");
+}
+
+void MainWindow::softkeyDruecken(const QString &signal)
+{
+    QString text = signal;
+    for (const auto &spalte : m_skSpalten)
+        for (QPushButton *b : spalte)
+            if (b->property("signal").toString() == signal)
+                text = b->text().replace('\n', ' ');
+    iduAnfrage(this, QJsonObject{{"befehl", "softkey"}, {"signal", signal}},
+               [this, text](const QJsonObject &antwort) {
+        if (antwort.value("ok").toBool())
+            softkeyStatus(QString("%1: Puls %2 s gesendet")
+                              .arg(text).arg(antwort.value("dauer").toDouble()),
+                          "#2E7D32");
+        else
+            softkeyStatus(QString("%1 nicht gesendet: %2")
+                              .arg(text, antwort.value("fehler").toString()),
+                          "#C0392B");
+        m_skMeldungBis = QDateTime::currentMSecsSinceEpoch() + 4000;
+        softkeyAbfragen();              /* Knopf gleich blau zeigen */
+    });
+}
+
+void MainWindow::softkeyWaehlen(int spalte, int zeile)
+{
+    if (m_skSpalten.isEmpty() || spalte < 0)
+        return;
+    zeile = qBound(0, zeile, int(m_skSpalten.at(spalte).size()) - 1);
+    for (int c = 0; c < m_skSpalten.size(); ++c)
+        for (int r = 0; r < m_skSpalten.at(c).size(); ++r) {
+            QPushButton *b = m_skSpalten.at(c).at(r);
+            const bool gew = (c == spalte && r == zeile);
+            if (b->property("gewaehlt").toBool() != gew) {
+                b->setProperty("gewaehlt", gew);
+                softkeyStil(b);
+            }
+        }
+    m_skSpalte = spalte;
+    m_skZeile = zeile;
+}
+
+void MainWindow::softkeyPfeil(int dx, int dy)
+{
+    if (m_skSpalten.isEmpty())
+        return;
+    const int spalte = qBound(0, m_skSpalte + dx, int(m_skSpalten.size()) - 1);
+    softkeyWaehlen(spalte, m_skZeile + dy);
+}
+
+/* ------------------------------------------------------------------ */
 /* Info-Seite — komplett in Qt Designer (infopage.ui) gestaltet         */
 /* uic (AUTOUIC) erzeugt daraus ui_infopage.h mit Ui::InfoPage.         */
 /* ------------------------------------------------------------------ */
@@ -1010,6 +1334,14 @@ void MainWindow::showPage(int page)
         m_usbTimer->start(1000);   /* danach jede Sekunde   */
     } else {
         m_usbTimer->stop();
+    }
+
+    /* Softkey-Stand nur abfragen, solange die Seite offen ist */
+    if (page == SOFTKEY_PAGE) {
+        softkeyAbfragen();
+        m_skTimer->start(400);
+    } else {
+        m_skTimer->stop();
     }
 }
 
@@ -1081,6 +1413,25 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         }
     }
 
+    /* --- Softkey-Seite: Pfeile waehlen, E (Return) loest aus --- */
+    if (m_stack->currentIndex() == SOFTKEY_PAGE) {
+        switch (key) {
+        case Qt::Key_Up:    softkeyPfeil(0, -1); return;
+        case Qt::Key_Down:  softkeyPfeil(0, 1);  return;
+        case Qt::Key_Left:  softkeyPfeil(-1, 0); return;
+        case Qt::Key_Right: softkeyPfeil(1, 0);  return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            if (m_skSpalte < m_skSpalten.size()
+                    && m_skZeile < m_skSpalten.at(m_skSpalte).size())
+                softkeyDruecken(m_skSpalten.at(m_skSpalte).at(m_skZeile)
+                                    ->property("signal").toString());
+            return;
+        default:
+            break;                      /* Ziffern wechseln die Seite */
+        }
+    }
+
     /* --- Hauptmenü / Unterseiten --- */
     switch (key) {
     case Qt::Key_1:
@@ -1100,6 +1451,9 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
         break;
     case Qt::Key_6:                     /* Designer-Info-Seite öffnen */
         showPage(INFO_PAGE);
+        break;
+    case Qt::Key_7:                     /* Softkeys */
+        showPage(SOFTKEY_PAGE);
         break;
     case Qt::Key_Up:       /* Pfeil hoch = Wagen-Auswahl nach RECHTS */
         if (m_selectedCar < CAR_COUNT - 1) {

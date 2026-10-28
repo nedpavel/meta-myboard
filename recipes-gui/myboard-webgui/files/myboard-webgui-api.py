@@ -10,6 +10,10 @@ Apache reicht /api/ an ihn weiter (127.0.0.1:8081).
                           hoechstens 4x/s die geaenderten Zeilen
     GET  /api/can/stand   die ganze Tabelle als JSON
     POST /api/dds         {"seite": N, "neu": bool} -> idu2-mvb, Antwort 1:1
+    GET  /api/softkeys    Softkeys der Rolle mit Zustand und Rueckmeldungen
+                          (idu2-mvb "softkeys"), Antwort 1:1
+    POST /api/softkey     {"signal": "IDU2-BTestSound"} -> idu2-mvb "softkey"
+                          (Puls); erlaubt sind nur Signale der Softkey-Liste
     GET  /api/usb         {"stick": bool}
     POST /api/update      Web-App vom USB-Stick einspielen
     GET  /api/info        Angaben fuer die Info-Seite
@@ -56,6 +60,7 @@ CAN_ERR_FLAG, CAN_EFF_FLAG = 0x20000000, 0x80000000
 CAN_EFF_MASK, CAN_SFF_MASK = 0x1FFFFFFF, 0x000007FF
 SSE_TAKT = 0.25         # hoechstens 4 Pakete/s je Browser
 DDS_TIMEOUT = 60.0      # wie DdsClient (TIMEOUT_MS)
+SOFTKEY_TIMEOUT = 3.0   # wie iduAnfrage in Qt
 UPDATE_MNT = "/mnt/usb-update"
 
 
@@ -368,16 +373,20 @@ def can_quelle(stand, pfad):
         time.sleep(0.5)
 
 
-# ------------------------------------------------------------ DDS
+# ------------------------------------------------------------ idu2-mvb
 def dds_abfrage(sock_pfad, seite, neu):
-    """Eine Anfrage an idu2-mvb wie DdsClient: eine JSON-Zeile hin, die
-    erste Zeile zurueck."""
+    return idu_anfrage(sock_pfad, {"befehl": "dds", "seite": seite, "neu": neu},
+                       DDS_TIMEOUT)
+
+
+def idu_anfrage(sock_pfad, anfrage, timeout):
+    """Eine Anfrage an idu2-mvb wie DdsClient bzw. iduAnfrage in Qt: eine
+    JSON-Zeile hin, die erste Zeile zurueck."""
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(DDS_TIMEOUT)
+        s.settimeout(timeout)
         s.connect(sock_pfad)
-        s.sendall(json.dumps({"befehl": "dds", "seite": seite, "neu": neu})
-                  .encode() + b"\n")
+        s.sendall(json.dumps(anfrage).encode() + b"\n")
         buf = b""
         while b"\n" not in buf:
             d = s.recv(65536)
@@ -504,6 +513,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"applikation": "myboard-webgui " + VERSION,
                               "maschine": os.uname().machine,
                               "can": self.O["can"], "status": self.STAND.status})
+        if pfad == "/api/softkeys":
+            return self.json(idu_anfrage(self.O["dds"], {"befehl": "softkeys"},
+                                         SOFTKEY_TIMEOUT))
         if pfad == "/gui" or pfad.startswith("/gui/"):
             return self.datei(pfad[len("/gui"):] or "/")
         self.json({"ok": False, "fehler": "unbekannt: " + pfad}, 404)
@@ -519,6 +531,14 @@ class Handler(BaseHTTPRequestHandler):
                     or not isinstance(neu, bool):
                 return self.json({"ok": False, "fehler": "seite 1..999, neu true/false"}, 400)
             return self.json(dds_abfrage(self.O["dds"], seite, neu))
+        if pfad == "/api/softkey":
+            # welche Signale erlaubt sind, prueft idu2-mvb (Softkey-Liste)
+            signal_name = req.get("signal")
+            if not isinstance(signal_name, str) or not 0 < len(signal_name) < 40:
+                return self.json({"ok": False, "fehler": "signal fehlt"}, 400)
+            return self.json(idu_anfrage(
+                self.O["dds"], {"befehl": "softkey", "signal": signal_name},
+                SOFTKEY_TIMEOUT))
         if pfad == "/api/update":
             return self.json(update_einspielen(self.O["www"]))
         self.json({"ok": False, "fehler": "unbekannt: " + pfad}, 404)

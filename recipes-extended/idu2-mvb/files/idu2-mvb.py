@@ -62,6 +62,12 @@ Antwort eine JSON-Zeile:
                            Source-Signal setzen; mit "dauer": S als Puls,
                            danach wieder der vorige Wert
     {"befehl": "quellen"}  aktuelle Werte aller Source-Signale
+    {"befehl": "softkeys"} Softkeys der Rolle in Gruppen, mit Zustand, und
+                           ihre Rueckmeldungen (Port 290) - fuer die Seite
+                           "Softkeys" der Oberflaechen
+    {"befehl": "softkey", "signal": "IDU2-BTestSound"}
+                           Softkey druecken: Puls von --softkey-dauer s;
+                           nur Signale aus der Softkey-Liste
 
 Aufbau der Anfrage laut "MVB Dokumentation IC2000 Payload Structure"
 (Abschnitt 4.2.2.1, dort IDU1 -> VCU1): Datenbytes 0-4 Header, 5 Source,
@@ -112,6 +118,7 @@ Optionen (auch ueber OPTIONEN in /etc/default/idu2-mvb):
     --anzahl N         DDS-Meldungen je Seite, 1..255 (Vorgabe 16; das
                        Original-Display fragt 21 an, DIA1 liefert
                        hoechstens 25)
+    --softkey-dauer S  Dauer eines Softkey-Pulses (Vorgabe 1 s)
     --ohne-pd          Sink-Ports nicht einrichten, keine Prozessdaten
     --signale PFAD     Signalliste (Vorgabe /usr/share/idu2-mvb/
                        mvb-signale.tsv)
@@ -163,6 +170,71 @@ ROLLEN = {
     "IDU1": (0xEE, (481, 8, 256), ((488, 8, 1024), (489, 16, 1024))),
     "IDU2": (0xF0, (491, 4, 256), ((492, 8, 256), (498, 16, 1024))),
 }
+
+# Softkeys der Bedienoberflaeche (Seite "Softkeys" in Qt und Web): Gruppe,
+# dann je Taste das Source-Signal ohne Rollen-Praefix und die Beschriftung
+# ("\n" bricht um). Die Oberflaeche zeigt nur, was die Rolle sendet - IDU2
+# alle Gruppen, IDU1 nur die Luefter. Jeder Druck ist ein Puls
+# (--softkey-dauer, Vorgabe 1 s wie "Puls 1s" in der Busbeschreibung).
+SOFTKEYS = (
+    ("Türen-Test", (
+        ("BDrTstStart", "Testmodus\nStart"),
+        ("BDrTstStop", "Testmodus\nEnde"),
+        ("BDrTestCls1", "Testschliessung\nprimär"),
+        ("BDrTestCls2", "Testschliessung\nredundant"),
+        ("BDrTestOpen", "Testöffnung"))),
+    ("Visiteur", (
+        ("BTestSound", "Testton"),
+        ("BTestPict", "Testbild"),
+        ("BTestLamps", "Test\nLeselampen"),
+        ("BTrainRes", "Zug-\nreservation"),
+        ("LSumWinMode", "Sommer /\nWinter"),
+        ("LBlkRelCool", "Kälte sperren /\nfreigeben"),
+        ("BResNrToggl", "Reserv.-Nr.\n1–7 ↔ 11–17"))),
+    ("Eigener Zug", (
+        ("BTrLightOn", "Licht ein"),
+        ("BTrLightOff", "Licht aus"),
+        ("BTrLightHlf", "Licht halb"),
+        ("BTrHLKOn", "HLK ein"),
+        ("BTrHLKOff", "HLK aus"),
+        ("BTrTempUp", "Temperatur +"),
+        ("BTrTempDn", "Temperatur −"))),
+    ("Ganzer Zug", (
+        ("BDTrLightOn", "Licht ein"),
+        ("BDTrLighOff", "Licht aus"),
+        ("BDTrLighHlf", "Licht halb"),
+        ("BDTrHLKOn", "HLK ein"),
+        ("BDTrHLKOff", "HLK aus"),
+        ("BDTrTempUp", "Temperatur +"),
+        ("BDTrTempDn", "Temperatur −"))),
+    ("Klima-Prüflauf", tuple(
+        ("BTstCool%d#%d" % (g, w), "Wagen %d\nGerät %d" % (w, g))
+        for w in (1, 2, 3, 4) for g in (1, 2))),
+    ("Lüfter", (
+        ("BSrVent1Up", "Stromrichter 1\nauf"),
+        ("BSrVent1Dn", "Stromrichter 1\nab"),
+        ("BSrVent2Up", "Stromrichter 2\nauf"),
+        ("BSrVent2Dn", "Stromrichter 2\nab"),
+        ("BTrVent1Up", "Trafo 1\nauf"),
+        ("BTrVent1Dn", "Trafo 1\nab"),
+        ("BTrVent2Up", "Trafo 2\nauf"),
+        ("BTrVent2Dn", "Trafo 2\nab"))),
+)
+# Rueckmeldungen zu den Softkeys: Sink-Signale aus Port 290 (FLG2N)
+RUECKMELDUNGEN = (
+    ("TT-MTrLightOn", "Licht ein"),
+    ("TT-MTrLightHlf", "Licht halb"),
+    ("TT-MKomfHLKOn", "Komfort-HLK"),
+    ("TT-MSummerMode", "Sommer"),
+    ("TT-MWinterMode", "Winter"),
+    ("TT-MTrReserved", "reserviert"),
+    ("TT-MReadLTstOn", "Test Leselampen"),
+    ("TT-MPISSoundTst", "Testton"),
+    ("TT-MPISDispTst", "Testbild"),
+    ("TT-MCoolBlocked", "Kälte gesperrt"),
+    ("TT-MCoolReleased", "Kälte frei"),
+    ("TT-MResNrHigh", "Res.-Nr. 11–17"),
+)
 DSW_MD = 0x1000
 CTRL_CLEAR, CTRL_LINE_A = 0x03, 0x08
 
@@ -343,7 +415,8 @@ def parse_args(argv):
     o = {"single": True, "dsw_md": True, "ef1": True, "takt": 1.0,
          "alle": True, "socket": SOCK, "anzahl": 16, "db": True,
          "db_socket": DB_SOCK, "rolle": "IDU2", "pd": True,
-         "signale": SIGNALE, "werte": [], "werte_datei": WERTE}
+         "signale": SIGNALE, "werte": [], "werte_datei": WERTE,
+         "softkey_dauer": 1.0}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -367,6 +440,12 @@ def parse_args(argv):
         elif a == "--werte-datei":
             i += 1
             o["werte_datei"] = argv[i]
+        elif a == "--softkey-dauer":
+            i += 1
+            o["softkey_dauer"] = float(argv[i])
+            if not 0.1 <= o["softkey_dauer"] <= 10:
+                log("--softkey-dauer muss zwischen 0.1 und 10 s liegen")
+                sys.exit(2)
         elif a == "--takt":
             i += 1
             o["takt"] = float(argv[i])
@@ -666,6 +745,9 @@ class PdDb:
         self.je_port = {}
         for s in signale:
             self.je_port.setdefault(s["port"], []).append(s)
+        # Name -> Port der gelesenen Signale (Rueckmeldungen der Softkeys)
+        self.port_von = {s["name"]: s["port"] for s in signale
+                         if s["richtung"] == "lesen"}
         self.eingang = queue.Queue(maxsize=5000)
         self.werte = {}         # (port, name) -> (wert, zeit, text, roh, geaendert)
         self.frisch = {}        # port -> True/False
@@ -760,6 +842,15 @@ class PdDb:
                  s["einheit"], s["text"][:500], s["senken"][:100])
                 + wert[:4] + (self.frisch.get(s["port"]),
                               self.gelesen.get(s["port"]), wert[4]))
+
+    def lesewert(self, name):
+        """(Wert, frisch) eines gelesenen Signals oder None; aus dem
+        Stand im Speicher, also auch ohne MariaDB."""
+        port = self.port_von.get(name)
+        if port is None:
+            return None
+        return (self.werte.get((port, name), (None,) * 5)[0],
+                self.frisch.get(port))
 
     def anlegen(self):
         with self.db.cursor() as c:
@@ -941,6 +1032,32 @@ class Quellen:
                 log("Port %d wieder geschrieben" % port)
             if self.db:
                 self.db.melden(port, daten, True, jetzt)
+
+
+def softkey_liste(quellen, pd_db, rolle):
+    """Softkeys der Rolle fuer die Oberflaeche: (Gruppen, Rueckmeldungen).
+    Gruppe {"name", "tasten": [{"signal", "text", "wert"}]} - wert 1,
+    solange der Puls laeuft; Rueckmeldung {"signal", "text", "wert",
+    "frisch"}. Nur Signale, die es in der Rolle gibt."""
+    gruppen = []
+    for name, tasten in SOFTKEYS:
+        liste = []
+        for kurz, text in tasten:
+            s = quellen.signale.get("%s-%s" % (rolle, kurz))
+            if s is None or s["datentyp"] != "bool":
+                continue
+            wert = pd_wert(s, bytes(quellen.daten[s["port"]]))
+            liste.append({"signal": s["name"], "text": text,
+                          "wert": wert[0] if wert else None})
+        if liste:
+            gruppen.append({"name": name, "tasten": liste})
+    rueck = []
+    for name, text in RUECKMELDUNGEN:
+        w = pd_db.lesewert(name) if pd_db else None
+        if w is not None:
+            rueck.append({"signal": name, "text": text, "wert": w[0],
+                          "frisch": w[1]})
+    return gruppen, rueck
 
 
 class Mvb:
@@ -1379,6 +1496,26 @@ def main():
             send(cl, {"ok": False, "fehler": grund} if grund else {"ok": True})
         elif befehl == "quellen":
             send(cl, {"ok": True, "rolle": rolle, "signale": quellen.werte()})
+        elif befehl == "softkeys":
+            gruppen, rueck = softkey_liste(quellen, pd_db, rolle)
+            send(cl, {"ok": True, "rolle": rolle, "dauer": o["softkey_dauer"],
+                      "gruppen": gruppen, "rueckmeldungen": rueck})
+        elif befehl == "softkey":
+            # nur Softkeys der Liste - die Oberflaeche setzt keine
+            # beliebigen Signale
+            signal_name = str(req.get("signal"))
+            gruppen, _ = softkey_liste(quellen, pd_db, rolle)
+            if not any(t["signal"] == signal_name for g in gruppen
+                       for t in g["tasten"]):
+                send(cl, {"ok": False, "fehler": "kein Softkey der Rolle %s: %s"
+                          % (rolle, signal_name)})
+                return
+            grund = quellen.setzen(signal_name, 1, o["softkey_dauer"])
+            if grund:
+                send(cl, {"ok": False, "fehler": grund})
+                return
+            log("Softkey %s (%g s)" % (signal_name, o["softkey_dauer"]))
+            send(cl, {"ok": True, "dauer": o["softkey_dauer"]})
         elif befehl == "status":
             send(cl, {"ok": True, "rolle": rolle, "adresse": adresse,
                       "lebenszeichen": wert,

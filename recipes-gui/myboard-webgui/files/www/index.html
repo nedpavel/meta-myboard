@@ -38,7 +38,7 @@ Speicher</button>
         <button data-seite="5">Update
 App</button>
         <button data-seite="6">Info</button>
-        <button></button>
+        <button data-seite="7">Softkeys</button>
         <button></button>
         <button>S</button>
         <button>LF</button>
@@ -119,6 +119,20 @@ ab USB-Stick upgedatet werden?</div>
       </dl>
       <div class="dehnen"></div>
       <p class="info-hinweis">◄  C = zurück zum Hauptmenü</p>
+    </section>
+
+    <!-- 7: Softkeys - welche es gibt, sagt idu2-mvb (je nach Rolle) -->
+    <section class="seite softkeys" data-titel="Softkeys">
+      <h2>Befehle an den Zug</h2>
+      <div id="sk-status" class="status">Frage den Dienst idu2-mvb …</div>
+      <div class="sk-rueck-kopf">Rückmeldungen von FLG2N (Port 290) — grün = ein</div>
+      <div id="sk-rueck" class="sk-rueck"></div>
+      <div id="sk-gruppen" class="sk-gruppen"></div>
+      <div class="knopfzeile">
+        <button class="zurueck">◄  Zurück  (C)</button>
+        <div class="dehnen"></div>
+        <span class="sk-hinweis">antippen oder ▲▼◄► wählen, E drückt</span>
+      </div>
     </section>
 
   </main>
