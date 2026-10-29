@@ -25,6 +25,12 @@
 #   --signale PFAD     Signalliste (Vorgabe /usr/share/idu2-mvb/mvb-signale.tsv)
 #   --ohne-db          nichts in MariaDB speichern (DDS und Prozessdaten)
 #   --db-socket PFAD   Socket von MariaDB (Vorgabe /var/lib/mysql/mysql.sock)
+#   --bild-wartezeit S nach einem Wechsel der Bildnummer (XScreenNum) so
+#                      lange warten, bevor der Softkey hinausgeht (Vorgabe
+#                      0.15; sicher waeren rund 1.5 - Port 498 hat 1024 ms
+#                      Zyklus). Beispiel: OPTIONEN="--bild-wartezeit 1.5"
+#   --db-takt MS       Source-Zeilen von icn.mvb_prozessdaten alle MS ms auf
+#                      Werte der Applikation pruefen (Vorgabe 10)
 #
 # Beispiel: OPTIONEN="--rolle IDU1"
 # Nach einer Aenderung: systemctl restart idu2-mvb

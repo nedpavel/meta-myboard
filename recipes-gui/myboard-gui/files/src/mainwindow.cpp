@@ -1264,11 +1264,18 @@ void MainWindow::softkeyDruecken(const QString &signal)
                 text = b->text().replace('\n', ' ');
     iduAnfrage(this, QJsonObject{{"befehl", "softkey"}, {"signal", signal}},
                [this, text](const QJsonObject &antwort) {
-        if (antwort.value("ok").toBool())
-            softkeyStatus(QString("%1: Puls %2 s gesendet")
-                              .arg(text).arg(antwort.value("dauer").toDouble()),
-                          "#2E7D32");
-        else
+        if (antwort.value("ok").toBool()) {
+            /* Bildnummer: FLG2N nimmt den Softkey nur mit ihr an; war eine
+               andere gesetzt, folgt der Puls, sobald die neue am Bus ist */
+            QString t = QString("%1: Puls %2 s")
+                            .arg(text).arg(antwort.value("dauer").toDouble());
+            if (antwort.value("bild").isDouble())
+                t += QString(", Bildnummer %1").arg(antwort.value("bild").toInt());
+            const double warten = antwort.value("verzoegerung").toDouble();
+            t += warten > 0 ? QString(", folgt in %1 ms").arg(qRound(warten * 1000))
+                            : QString(" gesendet");
+            softkeyStatus(t, "#2E7D32");
+        } else
             softkeyStatus(QString("%1 nicht gesendet: %2")
                               .arg(text, antwort.value("fehler").toString()),
                           "#C0392B");

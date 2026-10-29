@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS icn.dds_stand (
 -- Texte (AR_CHAR8_n, ARn) stehen zusaetzlich je Byte als eigene Zeile
 -- <Name>_ArrByte<i> (uint8) - so wie in icn_datafields; ueber den Namen
 -- lassen sich damit alle Signale mit icn_datafields verknuepfen.
+-- Senden: Die Applikation schreibt in eine Zeile mit richtung 'schreiben'
+-- den Wert (wert, bei Texten wert_text), z. B.
+--   UPDATE icn.mvb_prozessdaten SET wert = 3 WHERE name = 'IDU2-XScreenNum';
+-- idu2-mvb prueft diese Zeilen alle 10 ms, sendet den Port sofort und
+-- schreibt den gesendeten Wert mit roh zurueck. Ungueltige Werte
+-- (Lebenszeichen, Wertebereich, NULL) ersetzt es durch den gesendeten.
 -- MEMORY statt InnoDB: rund 300 Lesungen pro Sekunde gingen sonst als
 -- Redo-Log auf die CFast (Dutzende GB am Tag). Der Inhalt ist nach einem
 -- Neustart von MariaDB weg, bis idu2-mvb ihn neu anlegt - das tut es beim
@@ -119,8 +125,11 @@ CREATE TABLE IF NOT EXISTS icn.mvb_prozessdaten (
     gelesen       DATETIME(3)       NULL,     -- letzte Lesung des Ports
     geaendert     DATETIME(3)       NULL,     -- letzte Aenderung des Werts
     PRIMARY KEY (port, name),
-    KEY mvb_name (name)
+    KEY mvb_name (name),
+    KEY mvb_port (port)      -- frisch/gelesen je Port in einer Anweisung
 ) ENGINE=MEMORY;
+-- Tabellen von vor 2026-10-29 haben den Index auf port noch nicht
+ALTER TABLE icn.mvb_prozessdaten ADD INDEX IF NOT EXISTS mvb_port (port);
 
 -- Hardkeys der Front, geschrieben von myboard-tasten: eine Zeile je Druck,
 -- sofort beim Druecken; losgelassen und dauer_ms kommen beim Loslassen

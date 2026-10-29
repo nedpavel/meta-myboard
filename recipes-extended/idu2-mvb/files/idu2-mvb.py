@@ -20,8 +20,9 @@ Source-Ports: alle drei der Rolle (IDU2: 491, 492, 498; IDU1: 481, 488,
 489; mit --nur-lebenszeichen nur den ersten), gesendet im Takt ihrer
 Zykluszeit und sofort nach jeder Aenderung. Jedes Signal darin hat einen
 Wert - Vorgabe 0 bzw. leer, fuer Befehle und Softkeys "nicht gedrueckt" -,
-fest gesetzt mit --wert NAME=WERT (z. B. Software-Version, Fahrzeugname)
-oder zur Laufzeit ueber den Socket (Bildnummer, Softkeys als Puls).
+fest gesetzt mit --wert NAME=WERT (z. B. Software-Version, Fahrzeugname),
+zur Laufzeit ueber den Socket (Bildnummer, Softkeys als Puls) oder von der
+Applikation in icn.mvb_prozessdaten (siehe unten).
 
 Einrichtung wie im erfolgreichen Lauf stufe8/ef1 (2026-10-12): Adresse
 240, Einleitungsbetrieb auf Leitung A, MD-Bit im DSW, Anmeldung von
@@ -40,6 +41,29 @@ in einem eigenen Thread; die Tabelle ist eine MEMORY-Tabelle, damit rund
 Signalliste (/usr/share/idu2-mvb/mvb-signale.tsv) erzeugt mvbtrak2tsv.py
 beim Bauen aus der Busbeschreibung; fehlt sie, laeuft der Dienst ohne
 Prozessdaten.
+
+Senden aus der Datenbank: Die Applikation schreibt den Wert eines
+Source-Signals in dessen Zeile (richtung 'schreiben') - in wert, bei Texten
+in wert_text:
+
+    UPDATE icn.mvb_prozessdaten SET wert = 3 WHERE name = 'IDU2-XScreenNum'
+
+Fuer einen Softkey mit Bildnummer (SOFTKEY_BILD) setzt der Dienst wie
+beim Befehl "softkey" zuerst IDU2-XScreenNum; war es eine andere Nummer,
+geht der Softkey erst --bild-wartezeit s spaeter hinaus (Vorgabe 0,15 s),
+und sein Loslassen ebenso viel spaeter (Pulslaenge bleibt). So lange
+laesst er den Wert der Applikation in der Zeile stehen.
+
+Ein Thread liest die Zeilen alle --db-takt ms (Vorgabe 10). Weicht ein
+Wert von dem ab, den der Dienst zuletzt in die Zeile geschrieben hat, hat
+ihn die Applikation geaendert. Die Hauptschleife setzt ihn wie "setzen"
+und sendet den Port sofort; danach stehen der gesendete Wert und roh in
+der Zeile (bei float der auf das MVB-Raster gerundete Wert). Werte,
+die nicht gehen (Lebenszeichen, Wertebereich, NULL), ersetzt der Dienst
+gleich wieder durch den gesendeten Wert und meldet sie einmal im Journal.
+Eigene Aenderungen (Lebenszeichen, Puls, Socket) schreibt der Dienst nur,
+wenn die Zeile noch seinen letzten Stand hat - einen neueren Wert der
+Applikation ueberschreibt er nicht, er sendet ihn.
 
 DDS-Abfrage: dieselben Frames wie ddsabfrage.py (Mitschnitt des Displays).
 IDU2 schickt die Anfrage an DIA1 (Geraet 46), beantwortet CC/AK und die
@@ -67,7 +91,10 @@ Antwort eine JSON-Zeile:
                            "Softkeys" der Oberflaechen
     {"befehl": "softkey", "signal": "IDU2-BTestSound"}
                            Softkey druecken: Puls von --softkey-dauer s;
-                           nur Signale aus der Softkey-Liste
+                           nur Signale aus der Softkey-Liste. Vorher die
+                           Bildnummer, die FLG2N zu dem Softkey erwartet
+                           (SOFTKEY_BILD) - war es eine andere, folgt der
+                           Puls nach "verzoegerung" s (Antwort)
 
 Aufbau der Anfrage laut "MVB Dokumentation IC2000 Payload Structure"
 (Abschnitt 4.2.2.1, dort IDU1 -> VCU1): Datenbytes 0-4 Header, 5 Source,
@@ -119,11 +146,16 @@ Optionen (auch ueber OPTIONEN in /etc/default/idu2-mvb):
                        Original-Display fragt 21 an, DIA1 liefert
                        hoechstens 25)
     --softkey-dauer S  Dauer eines Softkey-Pulses (Vorgabe 1 s)
+    --bild-wartezeit S nach einem Wechsel der Bildnummer so lange warten,
+                       bevor der Softkey hinausgeht (Vorgabe 0.15; sicher
+                       waeren rund 1.5, Port 498 hat 1024 ms Zyklus)
     --ohne-pd          Sink-Ports nicht einrichten, keine Prozessdaten
     --signale PFAD     Signalliste (Vorgabe /usr/share/idu2-mvb/
                        mvb-signale.tsv)
     --ohne-db          nichts in MariaDB speichern (DDS und Prozessdaten)
     --db-socket PFAD   Socket von MariaDB (Vorgabe /var/lib/mysql/mysql.sock)
+    --db-takt MS       Source-Zeilen der Tabelle alle MS Millisekunden auf
+                       Werte der Applikation pruefen (Vorgabe 10)
 
 Eine Anfrage ueber den Socket kann die Anzahl mit "anzahl" ueberschreiben.
 """
@@ -235,6 +267,29 @@ RUECKMELDUNGEN = (
     ("TT-MCoolReleased", "Kälte frei"),
     ("TT-MResNrHigh", "Res.-Nr. 11–17"),
 )
+# Bildnummer (XScreenNum), die FLG2N zu einem Softkey erwartet - mit einer
+# anderen verwirft es ihn (Laborbus 2026-10-29: mit 0 und 1 kein Softkey
+# angenommen). Liste aus der Original-Anwendung, Signal ohne
+# Rollen-Praefix. Die Luefter-Softkeys (Port 491, FLG1N) stehen nicht
+# darin; fuer sie bleibt die Bildnummer, wie sie ist.
+SOFTKEY_BILD = {kurz: bild for bild, kurze in (
+    (100, ("LSumWinMode", "LBlkRelCool", "BTestLamps", "BTestPict",
+           "BTestSound")),
+    (120, ("BDrTestCls1", "BDrTestCls2", "BDrTestOpen", "BDrTstStart",
+           "BDrTstStop")),
+    (200, ("BDTrHLKOff", "BDTrHLKOn", "BDTrLighHlf", "BDTrLighOff",
+           "BDTrLightOn", "BDTrTempDn", "BDTrTempUp", "BTrHLKOff", "BTrHLKOn",
+           "BTrLightHlf", "BTrLightOff", "BTrLightOn", "BTrTempDn",
+           "BTrTempUp", "BTrainRes", "BResNrToggl")),
+    (2710, tuple("BTstCool%d#%d" % (g, w) for g in (1, 2)
+                 for w in (1, 2, 3, 4))),
+) for kurz in kurze}
+# Wartezeit nach einem Wechsel der Bildnummer, bevor der Softkey hinausgeht
+# (--bild-wartezeit). Sicher waere ein Zyklus ihres Ports plus Nachlauf -
+# den Port 498 holt der Busmaster nur alle 1024 ms ab, also rund 1,5 s.
+# Gewaehlt ist ein Zehntel davon: der Softkey kommt schneller, kann FLG2N
+# aber noch mit der alten Nummer erreichen.
+BILD_WARTEN = 0.15
 DSW_MD = 0x1000
 CTRL_CLEAR, CTRL_LINE_A = 0x03, 0x08
 
@@ -416,7 +471,7 @@ def parse_args(argv):
          "alle": True, "socket": SOCK, "anzahl": 16, "db": True,
          "db_socket": DB_SOCK, "rolle": "IDU2", "pd": True,
          "signale": SIGNALE, "werte": [], "werte_datei": WERTE,
-         "softkey_dauer": 1.0}
+         "softkey_dauer": 1.0, "db_takt": 0.01, "bild_warten": BILD_WARTEN}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -463,6 +518,18 @@ def parse_args(argv):
         elif a == "--db-socket":
             i += 1
             o["db_socket"] = argv[i]
+        elif a == "--bild-wartezeit":
+            i += 1
+            o["bild_warten"] = float(argv[i])
+            if not 0 <= o["bild_warten"] <= 5:
+                log("--bild-wartezeit muss zwischen 0 und 5 s liegen")
+                sys.exit(2)
+        elif a == "--db-takt":
+            i += 1
+            o["db_takt"] = float(argv[i]) / 1000
+            if not 0.001 <= o["db_takt"] <= 1:
+                log("--db-takt muss zwischen 1 und 1000 ms liegen")
+                sys.exit(2)
         elif a == "--rolle":
             i += 1
             o["rolle"] = argv[i].upper()
@@ -731,13 +798,49 @@ SQL_PD_LESUNG = (
     "wert_zeit = VALUES(wert_zeit), wert_text = VALUES(wert_text), "
     "roh = VALUES(roh), frisch = VALUES(frisch), gelesen = VALUES(gelesen), "
     "geaendert = VALUES(geaendert)")
+# Source-Zeile: neuer Wert nur, wenn wert und wert_text noch so sind, wie
+# der Dienst sie zuletzt kennt - sonst hat die Applikation geschrieben
+SQL_PD_SOURCE = (
+    "UPDATE mvb_prozessdaten SET wert = %s, wert_zeit = %s, wert_text = %s, "
+    "roh = %s, geaendert = %s WHERE port = %s AND name = %s "
+    "AND wert <=> %s AND wert_text <=> %s")
+
+
+def sql_ports(ports):
+    """Eine Anweisung: frisch und gelesen fuer alle Zeilen der Ports
+    {port: (frisch, gelesen)}."""
+    reihe = sorted(ports.items())
+    sql = ("UPDATE mvb_prozessdaten SET frisch = CASE port %s END, "
+           "gelesen = CASE port %s END WHERE port IN (%s)" % (
+               " ".join(["WHEN %s THEN %s"] * len(reihe)),
+               " ".join(["WHEN %s THEN %s"] * len(reihe)),
+               ", ".join(["%s"] * len(reihe))))
+    werte = ([x for p, (f, _) in reihe for x in (p, f)]
+             + [x for p, (_, g) in reihe for x in (p, g)]
+             + [p for p, _ in reihe])
+    return sql, werte
 
 
 class PdDb:
     """Schreibt die Prozessdaten nach icn.mvb_prozessdaten: jede Lesung
-    eines Sink-Ports (und jedes Senden eines eigenen Ports) als eine
-    Anweisung mit allen Signalen des Ports - Wert, frisch, gelesen;
-    geaendert nur, wenn sich der Wert aendert.
+    eines Ports - frisch und gelesen fuer alle seine Zeilen, Wert und
+    geaendert nur fuer Zeilen, deren Wert sich geaendert hat.
+
+    Gesammelt wird BUENDEL Sekunden, dann geht alles in zwei Anweisungen
+    hinaus: eine mehrzeilige fuer die geaenderten Werte, eine fuer frisch
+    und gelesen aller Ports (Index auf port). Bei rund 300 Lesungen pro
+    Sekunde waeren es sonst ebenso viele Anweisungen mit allen Zeilen - das
+    schafft der Atom des Pixy nicht, die Warteschlange lief voll, und die
+    Tabelle hing 40 s hinterher. Kommt MariaDB trotzdem nicht nach, ersetzt
+    eine neuere Lesung eines Ports die noch nicht geschriebene aeltere
+    (zusammengefasst): die Tabelle bleibt aktuell.
+
+    Jedes Senden eines eigenen Ports setzt frisch und gelesen; Werte nur,
+    wo sie sich geaendert haben, und nur, wenn die Zeile noch den Stand hat,
+    den der Dienst kennt (in_db) - einen Wert, den die Applikation
+    hineingeschrieben und PdVonDb noch nicht gemeldet hat, ueberschreibt er
+    nicht. Uebernimmt die Hauptschleife einen Wert der Applikation, steht
+    ueber app_wert auch das in in_db.
 
     Die Tabelle ist eine MEMORY-Tabelle (db-setup.sql): rund 300 Lesungen
     pro Sekunde gingen sonst als Redo-Log von InnoDB auf die CFast. Beim
@@ -749,6 +852,7 @@ class PdDb:
     Stand im Speicher nach."""
 
     WARTEN = 5
+    BUENDEL = 0.02
 
     def __init__(self, sock, signale):
         self.sock = sock
@@ -756,14 +860,14 @@ class PdDb:
         self.je_port = {}
         for s in signale:
             self.je_port.setdefault(s["port"], []).append(s)
-        # Name -> Port der gelesenen Signale (Rueckmeldungen der Softkeys)
-        self.port_von = {s["name"]: s["port"] for s in signale
-                         if s["richtung"] == "lesen"}
-        self.eingang = queue.Queue(maxsize=5000)
+        self.eingang = queue.Queue(maxsize=50000)
         self.werte = {}         # (port, name) -> (wert, zeit, text, roh, geaendert)
+        self.in_db = {}         # Source-Zeilen: (port, name) -> (wert, text, roh)
+        self.gehalten = set()   # Source-Zeilen, die auf ihr Bild warten
         self.frisch = {}        # port -> True/False
         self.gelesen = {}       # port -> Zeit der letzten Lesung
         self.geschrieben = 0
+        self.zusammengefasst = 0
         self.verworfen = 0
         self.db = None
         try:
@@ -778,64 +882,137 @@ class PdDb:
     def melden(self, port, daten, frisch, t):
         """Eine Lesung aus der Hauptschleife (daten None, wenn nicht
         frisch)."""
+        self.rein((port, daten, frisch, t))
+
+    def app_wert(self, port, name, stand):
+        """Die Hauptschleife uebernimmt einen Wert der Applikation: so
+        (wert, text, roh) steht die Zeile jetzt in der Tabelle. Kommt vor
+        dem Senden in die Warteschlange, also auch vor dessen Zeilen."""
+        self.rein(("app", (port, name), stand))
+
+    def halten(self, port, name, an):
+        """Zeile eines Softkeys, dessen Wert auf seine Bildnummer wartet:
+        so lange nicht mit dem alten Stand ueberschreiben."""
+        self.rein(("halten", (port, name), an))
+
+    def rein(self, eintrag):
         try:
-            self.eingang.put_nowait((port, daten, frisch, t))
+            self.eingang.put_nowait(eintrag)
         except queue.Full:
             self.verworfen += 1
             if self.verworfen % 1000 == 1:
                 log("MariaDB (Prozessdaten) kommt nicht nach - %d Lesungen "
                     "nicht geschrieben" % self.verworfen)
 
+    def buendel(self):
+        """Erster Eintrag, dann alles, was BUENDEL Sekunden lang dazukommt,
+        und was danach schon wartet (Rueckstand)."""
+        out = [self.eingang.get()]
+        ende = time.monotonic() + self.BUENDEL
+        while True:
+            rest = ende - time.monotonic()
+            try:
+                out.append(self.eingang.get(timeout=rest) if rest > 0
+                           else self.eingang.get_nowait())
+            except queue.Empty:
+                return out
+
     def laufen(self):
         gestoert = False
         naechster_versuch = 0.0
         while True:
-            eintrag = self.eingang.get()
-            try:
-                zeilen = self.verarbeiten(*eintrag)
-            except Exception as e:      # der Thread darf nicht sterben
-                log("Prozessdaten: Auswertung fehlgeschlagen: %r" % e)
-                continue
-            if self.db is None and time.time() < naechster_versuch:
-                continue                # nur der Stand im Speicher
-            try:
-                if self.db is None:
-                    # MEMORY kennt keine Transaktionen: autocommit
-                    self.db = db_verbinden(self.pymysql, self.sock,
-                                           autocommit=True)
-                    self.anlegen()      # enthaelt schon diese Lesung
-                elif zeilen:
-                    with self.db.cursor() as c:
-                        c.executemany(SQL_PD_LESUNG, zeilen)
-                self.geschrieben += 1
-                if gestoert:
-                    log("MariaDB (Prozessdaten) wieder erreichbar")
-                    gestoert = False
-            except Exception as e:
+            buendel = self.buendel()
+            letzte = {e[0]: i for i, e in enumerate(buendel)
+                      if e[0] not in ("app", "halten")}
+            zeilen, ports, fehler = [], {}, None
+            # Stand im Speicher: immer, auch ohne MariaDB
+            for i, e in enumerate(buendel):
+                if e[0] == "app":
+                    self.in_db[e[1]] = e[2]
+                elif e[0] == "halten":
+                    if e[2]:
+                        self.gehalten.add(e[1])
+                    else:
+                        self.gehalten.discard(e[1])
+                elif letzte[e[0]] != i:         # neuere Lesung folgt
+                    self.zusammengefasst += 1
+                else:
+                    try:
+                        z, source = self.verarbeiten(*e)
+                    except Exception as x:      # der Thread darf nicht sterben
+                        log("Prozessdaten: Auswertung fehlgeschlagen: %r" % x)
+                        continue
+                    zeilen += z
+                    ports[e[0]] = (e[2], self.gelesen[e[0]])
+                    # Source-Zeilen gleich, in der Reihenfolge der Meldungen
+                    # der Applikation (in_db)
+                    if source and self.db is not None and fehler is None:
+                        try:
+                            self.source_schreiben(source)
+                        except Exception as x:
+                            fehler = x
+            if fehler is None and (self.db is not None
+                                   or time.time() >= naechster_versuch):
+                try:
+                    if self.db is None:
+                        # MEMORY kennt keine Transaktionen: autocommit
+                        self.db = db_verbinden(self.pymysql, self.sock,
+                                               autocommit=True)
+                        self.anlegen()  # enthaelt schon dieses Buendel
+                    elif ports:
+                        with self.db.cursor() as c:
+                            if zeilen:
+                                c.executemany(SQL_PD_LESUNG, zeilen)
+                            c.execute(*sql_ports(ports))
+                    self.geschrieben += len(ports)
+                except Exception as x:
+                    fehler = x
+            if fehler is not None:
                 self.trennen()
                 naechster_versuch = time.time() + self.WARTEN
                 if not gestoert:
                     log("MariaDB (Prozessdaten): %s - neuer Versuch alle %d s"
-                        % (e, self.WARTEN))
+                        % (fehler, self.WARTEN))
                     gestoert = True
+            elif gestoert and self.db is not None:
+                log("MariaDB (Prozessdaten) wieder erreichbar")
+                gestoert = False
 
     def verarbeiten(self, port, daten, frisch, t):
-        """Stand im Speicher nachfuehren; Zeilen fuer SQL_PD_LESUNG."""
+        """Stand im Speicher nachfuehren. Liefert die Zeilen mit neuem Wert
+        fuer SQL_PD_LESUNG (Sink-Port) und, fuer einen eigenen Port, die
+        geaenderten Zeilen fuer SQL_PD_SOURCE."""
         gelesen = zeit_ms(t)
         self.frisch[port] = frisch
         self.gelesen[port] = gelesen
-        zeilen = []
+        zeilen, source = [], []
         for s in self.je_port.get(port, ()):
             k = (port, s["name"])
             w = pd_wert(s, daten) if daten is not None else None
+            neu_wert = False
             if w is not None:
                 alt = self.werte.get(k)
+                neu_wert = alt is None or alt[:3] != w[:3]
                 # geaendert: Zeit der Lesung, die den neuen Wert brachte
-                self.werte[k] = w + (gelesen if alt is None or alt[:3] != w[:3]
-                                     else alt[4],)
+                self.werte[k] = w + (gelesen if neu_wert else alt[4],)
             wert = self.werte.get(k, (None,) * 5)
-            zeilen.append(k + wert[:4] + (frisch, gelesen, wert[4]))
-        return zeilen
+            if s["richtung"] == "lesen":
+                if neu_wert:
+                    zeilen.append(k + wert[:4] + (frisch, gelesen, wert[4]))
+                continue
+            neu = (wert[0], wert[2], wert[3])
+            alt = self.in_db.get(k, (None, None, None))
+            if neu != alt and k not in self.gehalten:
+                source.append((wert + k + alt[:2], k, neu))
+        return zeilen, source
+
+    def source_schreiben(self, geaendert):
+        with self.db.cursor() as c:
+            for werte, k, neu in geaendert:
+                # 0 Zeilen: die Applikation hat inzwischen geschrieben -
+                # PdVonDb meldet ihren Wert, die Hauptschleife sendet ihn
+                if c.execute(SQL_PD_SOURCE, werte):
+                    self.in_db[k] = neu
 
     def trennen(self):
         if self.db is not None:
@@ -854,21 +1031,154 @@ class PdDb:
                 + wert[:4] + (self.frisch.get(s["port"]),
                               self.gelesen.get(s["port"]), wert[4]))
 
-    def lesewert(self, name):
-        """(Wert, frisch) eines gelesenen Signals oder None; aus dem
-        Stand im Speicher, also auch ohne MariaDB."""
-        port = self.port_von.get(name)
-        if port is None:
-            return None
-        return (self.werte.get((port, name), (None,) * 5)[0],
-                self.frisch.get(port))
-
     def anlegen(self):
         with self.db.cursor() as c:
             c.execute("DELETE FROM mvb_prozessdaten")
             c.executemany(SQL_PD_NEU, [self.zeile(s) for s in self.signale])
+        stand = {}
+        for s in self.signale:
+            if s["richtung"] == "schreiben":
+                k = (s["port"], s["name"])
+                wert = self.werte.get(k, (None,) * 5)
+                stand[k] = (wert[0], wert[2], wert[3])
+        self.in_db = stand      # auf einmal - PdVonDb liest mit
         log("MariaDB: mvb_prozessdaten angelegt, %d Signale - ab jetzt jede "
             "Lesung" % len(self.signale))
+
+
+SQL_PD_APP = ("SELECT port, name, wert, wert_text, roh FROM mvb_prozessdaten "
+              "WHERE richtung = 'schreiben'")
+# Pruefsumme ueber die Werte der Source-Zeilen: eine Zeile statt aller
+SQL_PD_APP_SUMME = (
+    "SELECT BIT_XOR(CRC32(CONCAT_WS('|', port, name, IFNULL(wert, 'N'), "
+    "IFNULL(wert_text, 'N')))) FROM mvb_prozessdaten "
+    "WHERE richtung = 'schreiben'")
+
+
+class PdVonDb:
+    """Werte der Applikation fuer die Source-Signale: liest die Zeilen mit
+    richtung 'schreiben' alle takt Sekunden und meldet der Hauptschleife
+    jede, deren wert/wert_text nicht dem Stand entspricht, den PdDb von
+    ihr kennt (in_db: zuletzt selbst geschrieben oder von der Applikation
+    uebernommen) - den hat dann die Applikation geschrieben. Eigener Thread
+    mit eigener Verbindung; geweckt wird die Hauptschleife ueber eine Pipe
+    (fd in ihrem select).
+
+    Je Takt kommt nur eine Pruefsumme ueber wert und wert_text; alle Zeilen
+    holt der Thread, wenn sie sich aendert, und sonst alle WIEDER Sekunden
+    - das spart dem Atom des Pixy den groessten Teil der Arbeit.
+
+    in_db fuehrt der Thread von PdDb. Aendert er es waehrend der Abfrage
+    (Stand davor und danach verschieden), bleibt die Zeile bis zur
+    naechsten Abfrage liegen. Eine Zeile wird einmal gemeldet und noch
+    einmal, wenn sie nach WIEDER Sekunden immer noch abweicht (falls die
+    Meldung an PdDb verloren ging)."""
+
+    WARTEN = 1
+    WIEDER = 1.0
+
+    def __init__(self, sock, signale, pd_db, takt):
+        self.sock = sock
+        self.signale = {s["name"]: s for s in signale}
+        self.pd_db = pd_db
+        self.takt = takt
+        self.werte = queue.SimpleQueue()    # (Signal, wert, text, roh)
+        self.fd, self.wecker = os.pipe()
+        os.set_blocking(self.fd, False)
+        os.set_blocking(self.wecker, False)
+        self.abfragen = 0
+        self.gemeldet = 0
+        threading.Thread(target=self.laufen, name="pd-von-db",
+                         daemon=True).start()
+
+    def abholen(self):
+        try:
+            while os.read(self.fd, 4096):
+                pass
+        except BlockingIOError:
+            pass
+        out = []
+        while True:
+            try:
+                out.append(self.werte.get_nowait())
+            except queue.Empty:
+                return out
+
+    def laufen(self):
+        db, gestoert, gemeldet = None, False, {}
+        summe, voll_um, nochmal = None, 0.0, True
+        naechste = time.monotonic()
+        while True:
+            # fester Takt; wer mehr als einen Takt hinterher ist, holt
+            # nicht nach
+            naechste += self.takt
+            pause = naechste - time.monotonic()
+            if pause > 0:
+                time.sleep(pause)
+            elif pause < -self.takt:
+                naechste = time.monotonic()
+            try:
+                if db is None:
+                    db = db_verbinden(self.pd_db.pymysql, self.sock,
+                                      autocommit=True)
+                with db.cursor() as c:
+                    c.execute(SQL_PD_APP_SUMME)
+                    neu = c.fetchone()[0]
+                    voll = (nochmal or neu != summe
+                            or time.monotonic() - voll_um >= self.WIEDER)
+                    if voll:
+                        vorher = dict(self.pd_db.in_db)
+                        c.execute(SQL_PD_APP)
+                        zeilen = c.fetchall()
+                        nachher = self.pd_db.in_db
+                self.abfragen += 1
+                if gestoert:
+                    log("MariaDB (Werte der Applikation) wieder erreichbar")
+                    gestoert = False
+            except Exception as e:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+                    db = None
+                if not gestoert:
+                    log("MariaDB (Werte der Applikation): %s - neuer Versuch "
+                        "alle %d s" % (e, self.WARTEN))
+                    gestoert = True
+                time.sleep(self.WARTEN)
+                naechste = time.monotonic()
+                continue
+            if not voll:
+                continue
+            summe, voll_um, nochmal = neu, time.monotonic(), False
+            jetzt = time.monotonic()
+            wecken = False
+            for port, name, wert, text, roh in zeilen:
+                s = self.signale.get(name)
+                k = (port, name)
+                bekannt = vorher.get(k)
+                if s is None or s["port"] != port:
+                    continue
+                if bekannt is None or nachher.get(k) != bekannt:
+                    nochmal = True              # beim naechsten Takt
+                    continue
+                if (wert, text) == bekannt[:2]:
+                    gemeldet.pop(name, None)
+                    continue
+                alt = gemeldet.get(name)
+                if (alt and alt[0] == (wert, text)
+                        and jetzt - alt[1] < self.WIEDER):
+                    continue
+                gemeldet[name] = ((wert, text), jetzt)
+                self.werte.put((name, wert, text, roh))
+                self.gemeldet += 1
+                wecken = True
+            if wecken:
+                try:
+                    os.write(self.wecker, b"!")
+                except BlockingIOError:
+                    pass                # weckt schon
 
 
 class PdAbfrage:
@@ -876,10 +1186,14 @@ class PdAbfrage:
     Prozessdaten gibt es keinen Interrupt) und gibt jede Lesung an PdDb
     weiter. Laeuft in der Hauptschleife, wie das Lebenszeichen."""
 
-    def __init__(self, mvb, ports, db):
+    def __init__(self, mvb, ports, db, signale):
         self.mvb = mvb
         self.ports = dict(ports)        # Port -> (Laenge, Zyklus in ms)
         self.db = db
+        self.signal = {s["name"]: s for s in signale
+                       if s["port"] in self.ports}
+        self.letzte = {}                # Port -> letzte frische Daten
+        self.frisch = {}                # Port -> frisch bei der letzten Lesung
         jetzt = time.time()
         self.faellig = {p: jetzt for p in self.ports}
         self.lesungen = 0
@@ -907,7 +1221,21 @@ class PdAbfrage:
                     del self.faellig[port]
                     continue
             self.lesungen += 1
+            self.frisch[port] = frisch
+            if daten is not None:
+                self.letzte[port] = daten
             self.db.melden(port, daten, frisch, jetzt)
+
+    def lesewert(self, name):
+        """(Wert, frisch) eines gelesenen Signals aus der letzten Lesung -
+        fuer die Rueckmeldungen der Softkeys-Seite, unabhaengig davon, wie
+        weit MariaDB ist - oder None."""
+        s = self.signal.get(name)
+        if s is None:
+            return None
+        daten = self.letzte.get(s["port"])
+        w = pd_wert(s, daten) if daten is not None else None
+        return (w[0] if w else None), self.frisch.get(s["port"])
 
 
 def pd_kodieren(s, wert, daten):
@@ -965,7 +1293,18 @@ class Quellen:
 
     Gesendet wird jeder Port im Takt seiner Zykluszeit - der Busmaster holt
     ihn in diesem Takt - und sofort nach jeder Aenderung; jedes Senden geht
-    mit allen Signalen an PdDb."""
+    mit allen Signalen an PdDb.
+
+    Softkeys mit Bildnummer (SOFTKEY_BILD), von der Oberflaeche oder der
+    Applikation: Steht in XScreenNum eine andere Nummer, setzt mit_bild
+    sie sofort und plant den Softkey bild_warten Sekunden spaeter (siehe
+    BILD_WARTEN; den Port mit der Nummer holt der Busmaster nur alle
+    1024 ms). Was danach fuer
+    denselben Softkey kommt - das Loslassen der Applikation - wird um
+    dieselbe Zeit verschoben, so bleibt die Pulslaenge. Wechselt die
+    Bildnummer, bevor ein geplanter Softkey hinaus ist, verfaellt sein
+    Druecken (Meldung im Journal), ein Loslassen geht sofort hinaus - es
+    bleibt nichts gedrueckt haengen."""
 
     def __init__(self, mvb, ports, signale, ls_port, db):
         self.mvb = mvb
@@ -978,6 +1317,12 @@ class Quellen:
         self.faellig = {p: 0.0 for p in self.daten}      # gleich senden
         self.pulse = {}         # Signal -> (Ende, Wert danach)
         self.fehler = {}        # Port -> Zahl der Fehlversuche
+        self.bild_signal = next((n for n in self.signale
+                                 if n.endswith("-XScreenNum")), None)
+        self.bild_warten = BILD_WARTEN
+        self.bild_bereit = 0.0  # ab dann gilt die Bildnummer als bei FLG2N
+        self.geplant = []       # [Zeit, Signal, Wert, Dauer, Bild]
+        self.versatz = {}       # Signal -> Verschiebung, bis losgelassen
 
     def lebenszeichen(self, wert):
         struct.pack_into(">H", self.daten[self.ls_port], 0, wert)
@@ -994,10 +1339,13 @@ class Quellen:
         vorher = pd_wert(s, bytes(puffer))
         try:
             pd_kodieren(s, wert, puffer)
-        except (ValueError, TypeError, struct.error, UnicodeError) as e:
+        except (ValueError, TypeError, OverflowError, struct.error,
+                UnicodeError) as e:
             return "%s (%s): %s" % (name, s["datentyp"], e)
         self.daten[s["port"]][:] = puffer
         self.faellig[s["port"]] = 0.0
+        if name == self.bild_signal and pd_wert(s, bytes(puffer)) != vorher:
+            self.bild_bereit = time.time() + self.bild_warten
         if dauer:
             alt = self.pulse.get(name)
             danach = alt[1] if alt else (vorher[2] if s["datentyp"] == "string"
@@ -1006,6 +1354,108 @@ class Quellen:
         else:
             self.pulse.pop(name, None)
         return None
+
+    def pruefen(self, name, wert):
+        """Fehlertext, wenn setzen den Wert abweisen wuerde, sonst None."""
+        s = self.signale.get(name)
+        if s is None:
+            return "kein Source-Signal dieser Rolle: %s" % name
+        if s["port"] == self.ls_port and s["byte"] < 2:
+            return "das Lebenszeichen fuehrt der Dienst selbst"
+        try:
+            pd_kodieren(s, wert, bytearray(self.daten[s["port"]]))
+        except (ValueError, TypeError, OverflowError, struct.error,
+                UnicodeError) as e:
+            return "%s (%s): %s" % (name, s["datentyp"], e)
+        return None
+
+    def bild_fuer(self, name):
+        """Bildnummer, die der Softkey verlangt, oder None."""
+        if self.bild_signal is None or name not in self.signale:
+            return None
+        return SOFTKEY_BILD.get(name.split("-", 1)[-1])
+
+    def bild(self):
+        s = self.signale[self.bild_signal]
+        return pd_wert(s, bytes(self.daten[s["port"]]))[0]
+
+    def mit_bild(self, name, wert, dauer=None):
+        """Wie setzen, fuer einen Softkey aber erst seine Bildnummer (siehe
+        oben). Liefert (Fehlertext oder None, Verzoegerung in s)."""
+        bild = self.bild_fuer(name)
+        if bild is None:
+            return self.setzen(name, wert, dauer), 0.0
+        grund = self.pruefen(name, wert)
+        if grund:
+            return grund, 0.0
+        jetzt = time.time()
+        if wert and self.bild() != bild:
+            self.bild_wechsel(bild)
+        if name in self.versatz:            # verschoben, bis losgelassen
+            zeit = jetzt + self.versatz[name]
+        elif wert and jetzt < self.bild_bereit:
+            zeit = self.bild_bereit
+            if dauer is None:               # Loslassen kommt noch
+                self.versatz[name] = zeit - jetzt
+        else:
+            return self.setzen(name, wert, dauer), 0.0
+        self.geplant.append([zeit, name, wert, dauer, bild])
+        if self.db:
+            self.db.halten(self.signale[name]["port"], name, True)
+        return None, zeit - jetzt
+
+    def bild_wechsel(self, bild):
+        """Bildnummer setzen; geplante Softkeys anderer Bilder: Druecken
+        verfaellt, Loslassen geht sofort hinaus."""
+        for g in [g for g in self.geplant if g[4] != bild]:
+            self.ausplanen(g)
+            if g[2]:
+                log("Softkey %s verworfen: Bildnummer wechselt auf %d, bevor "
+                    "er hinaus war" % (g[1], bild))
+                self.versatz.pop(g[1], None)
+            else:
+                self.setzen(g[1], g[2], g[3])
+        self.setzen(self.bild_signal, bild)
+
+    def ausplanen(self, g):
+        self.geplant.remove(g)
+        if not any(x[1] == g[1] for x in self.geplant):
+            if not g[2]:
+                self.versatz.pop(g[1], None)
+            if self.db:
+                self.db.halten(self.signale[g[1]]["port"], g[1], False)
+
+    def geplant_fuer(self, name):
+        return any(g[1] == name for g in self.geplant)
+
+    def aus_db(self, name, wert, text, roh):
+        """Wert, den die Applikation in die Zeile des Signals geschrieben
+        hat (PdVonDb); liefert einen Fehlertext oder None. Der Port geht
+        in jedem Fall gleich hinaus - PdDb schreibt dabei die Zeile nach,
+        einen abgewiesenen Wert mit dem gueltigen zurueck."""
+        s = self.signale[name]
+        if self.db:
+            self.db.app_wert(s["port"], name, (wert, text, roh))
+        dt = s["datentyp"]
+        if dt == "string":
+            grund = None if text is not None else "wert_text ist NULL"
+        elif wert is None:
+            grund = "wert ist NULL"
+        elif dt in ("bool",) + tuple(GANZZAHL) and not float(wert).is_integer():
+            grund = "%s: keine ganze Zahl" % dt
+        else:
+            grund = None
+        if grund is None:
+            w = (text if dt == "string" else
+                 wert if dt in ("float", "datetime") else int(wert))
+            jetzt = pd_wert(s, bytes(self.daten[s["port"]]))
+            # schon gesendet (etwa ein laufender Puls) und nichts geplant:
+            # nicht setzen
+            if ((jetzt[2] if dt == "string" else jetzt[0]) != w
+                    or name in self.versatz or self.geplant_fuer(name)):
+                grund = self.mit_bild(name, w)[0]
+        self.faellig[s["port"]] = 0.0
+        return grund
 
     def werte(self):
         out = []
@@ -1018,9 +1468,27 @@ class Quellen:
 
     def naechste(self):
         return min(list(self.faellig.values())
-                   + [e for e, _ in self.pulse.values()])
+                   + [e for e, _ in self.pulse.values()]
+                   + [g[0] for g in self.geplant])
 
     def senden(self, jetzt):
+        for g in sorted(self.geplant, key=lambda g: g[0]):
+            zeit, name, wert, dauer, bild = g
+            if zeit > jetzt:
+                continue
+            if wert and self.bild() != bild:     # inzwischen anderes Bild
+                self.ausplanen(g)
+                self.versatz.pop(name, None)
+                log("Softkey %s verworfen: Bildnummer ist %s statt %d"
+                    % (name, self.bild(), bild))
+                continue
+            if wert and jetzt < self.bild_bereit:
+                g[0] = self.bild_bereit         # Nummer kam erneut
+                continue
+            self.ausplanen(g)
+            grund = self.setzen(name, wert, dauer)
+            if grund:
+                log("Softkey %s: %s" % (name, grund))
         for name, (ende, danach) in list(self.pulse.items()):
             if ende <= jetzt:
                 del self.pulse[name]
@@ -1045,7 +1513,7 @@ class Quellen:
                 self.db.melden(port, daten, True, jetzt)
 
 
-def softkey_liste(quellen, pd_db, rolle):
+def softkey_liste(quellen, pd, rolle):
     """Softkeys der Rolle fuer die Oberflaeche: (Gruppen, Rueckmeldungen).
     Gruppe {"name", "tasten": [{"signal", "text", "wert"}]} - wert 1,
     solange der Puls laeuft; Rueckmeldung {"signal", "text", "wert",
@@ -1058,13 +1526,17 @@ def softkey_liste(quellen, pd_db, rolle):
             if s is None or s["datentyp"] != "bool":
                 continue
             wert = pd_wert(s, bytes(quellen.daten[s["port"]]))
+            # wartet auf seine Bildnummer: schon als gedrueckt zeigen
+            if any(g[1] == s["name"] and g[2] for g in quellen.geplant):
+                wert = (1,)
             liste.append({"signal": s["name"], "text": text,
-                          "wert": wert[0] if wert else None})
+                          "wert": wert[0] if wert else None,
+                          "bild": quellen.bild_fuer(s["name"])})
         if liste:
             gruppen.append({"name": name, "tasten": liste})
     rueck = []
     for name, text in RUECKMELDUNGEN:
-        w = pd_db.lesewert(name) if pd_db else None
+        w = pd.lesewert(name) if pd else None
         if w is not None:
             rueck.append({"signal": name, "text": text, "wert": w[0],
                           "frisch": w[1]})
@@ -1370,6 +1842,7 @@ def main():
         mvb, [(ls_port, ls_laenge, ls_zyklus)]
         + (list(weitere) if o["alle"] else []),
         [s for s in signale if s["richtung"] == "schreiben"], ls_port, pd_db)
+    quellen.bild_warten = o["bild_warten"]
     quellen.lebenszeichen(wert)
     # feste Werte: erst die Datei, dann --wert
     werte = []
@@ -1417,7 +1890,11 @@ def main():
         log("Einrichtung fehlgeschlagen: %s" % os.strerror(e.errno))
         os.close(fd)
         return 1
-    pd = PdAbfrage(mvb, senken, pd_db) if senken else None
+    pd = PdAbfrage(mvb, senken, pd_db, signale) if senken else None
+    # Werte der Applikation aus den Source-Zeilen der Tabelle
+    von_db = (PdVonDb(o["db_socket"], list(quellen.signale.values()),
+                      pd_db, o["db_takt"]) if pd_db else None)
+    abgewiesen = {}             # Signal -> zuletzt gemeldeter Fehler
 
     try:
         os.unlink(o["socket"])
@@ -1441,9 +1918,11 @@ def main():
     if pd_db:
         log("Prozessdaten: %d Sink-Ports mit %d Signalen, im Takt ihrer "
             "Zykluszeit gelesen, und %d gesendete Signale - jede Lesung -> "
-            "icn.mvb_prozessdaten"
+            "icn.mvb_prozessdaten; Werte der Applikation fuer die %d "
+            "gesendeten alle %g ms aus der Tabelle"
             % (len(senken), sum(1 for s in signale if s["port"] in senken),
-               sum(1 for s in signale if s["richtung"] == "schreiben")))
+               sum(1 for s in signale if s["richtung"] == "schreiben"),
+               len(quellen.signale), o["db_takt"] * 1000))
     elif not (o["db"] and o["pd"]):
         log("Prozessdaten: aus (%s)" % ("--ohne-db" if not o["db"]
                                         else "--ohne-pd"))
@@ -1508,25 +1987,35 @@ def main():
         elif befehl == "quellen":
             send(cl, {"ok": True, "rolle": rolle, "signale": quellen.werte()})
         elif befehl == "softkeys":
-            gruppen, rueck = softkey_liste(quellen, pd_db, rolle)
+            gruppen, rueck = softkey_liste(quellen, pd, rolle)
             send(cl, {"ok": True, "rolle": rolle, "dauer": o["softkey_dauer"],
                       "gruppen": gruppen, "rueckmeldungen": rueck})
         elif befehl == "softkey":
             # nur Softkeys der Liste - die Oberflaeche setzt keine
             # beliebigen Signale
             signal_name = str(req.get("signal"))
-            gruppen, _ = softkey_liste(quellen, pd_db, rolle)
+            gruppen, _ = softkey_liste(quellen, pd, rolle)
             if not any(t["signal"] == signal_name for g in gruppen
                        for t in g["tasten"]):
                 send(cl, {"ok": False, "fehler": "kein Softkey der Rolle %s: %s"
                           % (rolle, signal_name)})
                 return
-            grund = quellen.setzen(signal_name, 1, o["softkey_dauer"])
+            bild_vorher = (quellen.bild() if quellen.bild_signal
+                           else None)
+            grund, warten = quellen.mit_bild(signal_name, 1,
+                                             o["softkey_dauer"])
             if grund:
                 send(cl, {"ok": False, "fehler": grund})
                 return
-            log("Softkey %s (%g s)" % (signal_name, o["softkey_dauer"]))
-            send(cl, {"ok": True, "dauer": o["softkey_dauer"]})
+            bild = quellen.bild_fuer(signal_name)
+            log("Softkey %s (%g s)%s" % (
+                signal_name, o["softkey_dauer"],
+                "" if bild is None else
+                ", Bildnummer %d%s" % (bild, "" if bild == bild_vorher else
+                                       " gesetzt")
+                + (", Puls in %.0f ms" % (warten * 1000) if warten else "")))
+            send(cl, {"ok": True, "dauer": o["softkey_dauer"],
+                      "bild": bild, "verzoegerung": round(warten, 3)})
         elif befehl == "status":
             send(cl, {"ok": True, "rolle": rolle, "adresse": adresse,
                       "lebenszeichen": wert,
@@ -1536,7 +2025,11 @@ def main():
                       "pd_ports": len(pd.faellig) if pd else 0,
                       "pd_lesungen": pd.lesungen if pd else 0,
                       "pd_geschrieben": pd_db.geschrieben if pd_db else 0,
-                      "pd_nicht_geschrieben": pd_db.verworfen if pd_db else 0})
+                      "pd_zusammengefasst": (pd_db.zusammengefasst if pd_db
+                                             else 0),
+                      "pd_nicht_geschrieben": pd_db.verworfen if pd_db else 0,
+                      "app_abfragen": von_db.abfragen if von_db else 0,
+                      "app_werte": von_db.gemeldet if von_db else 0})
         else:
             send(cl, {"ok": False, "fehler": "unbekannter Befehl"})
 
@@ -1549,10 +2042,14 @@ def main():
             bald = min(bald, pd.naechste())
         wait = min(wait, max(0.0, bald - time.time()))
         try:
-            r, _, _ = select.select([srv] + list(clients), [], [], wait)
+            r, _, _ = select.select([srv] + list(clients)
+                                    + ([von_db.fd] if von_db else []),
+                                    [], [], wait)
         except InterruptedError:
             continue
         for s in r:
+            if von_db and s == von_db.fd:
+                continue                # unten, bei jedem Durchlauf
             if s is srv:
                 try:
                     cl, _ = srv.accept()
@@ -1574,6 +2071,17 @@ def main():
                 line, clients[s] = clients[s].split(b"\n", 1)
                 if line.strip():
                     request(s, line.decode("utf-8", errors="replace"))
+
+        # Werte der Applikation; gesendet wird unten, im selben Durchlauf
+        for name, w, text, roh in von_db.abholen() if von_db else ():
+            grund = quellen.aus_db(name, w, text, roh)
+            if grund and abgewiesen.get(name) != grund:
+                log("Wert der Applikation fuer %s abgewiesen (%s) - "
+                    "zurueckgeschrieben" % (name, grund))
+            if grund:
+                abgewiesen[name] = grund
+            else:
+                abgewiesen.pop(name, None)
 
         # Empfangene Message-Frames leer lesen - auch ohne Abfrage, sonst
         # laeuft der Ring des Treibers ueber

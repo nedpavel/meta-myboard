@@ -19,18 +19,22 @@ Die Laenge eines Ports steht nur selten in der Datei, in dieser Reihenfolge
 gilt:
   1. ein fuenftes Feld der Telegrammzeile, B<n> = n Byte
      ("$TELEGRAM ETCS-862 ETCS 862 1024 B16");
-  2. das letzte belegte Byte aller Signale plus freie Bytes, die ein
-     Kommentar im Telegramm nennt ("4 bytes free", "Noch 4 Bits & 28 Bytes
-     frei");
-  3. sonst das letzte belegte Byte allein;
-jeweils aufgerundet auf eine MVB-Portgroesse (2, 4, 8, 16, 32 Byte) - fuer
-491/492/498 wie am Bus bestaetigt 4/8/16. Wo die Datei nichts sagt, kann
-ein Port laenger sein als abgeleitet; am Bus bleibt er dann auf frisch = 0.
+  2. sonst das letzte belegte Byte aller Signale,
+aufgerundet auf eine MVB-Portgroesse (2, 4, 8, 16, 32 Byte). Kommentare
+wie "Noch 4 Bits & 28 Bytes frei" nennen nur Reserve, nicht die Laenge:
+FLG2-290 ist am Bus 4 Byte lang. Geprueft gegen den Abzug des Traffic
+Memory mit der Herstelleranwendung (tests/mvbsnap/ports.txt): alle 73
+Ports darin haben die Laenge, die diese Regeln ergeben. Ein Port mit
+falscher Laenge bleibt am Bus auf frisch = 0.
 
 Bits: bit_ofs zaehlt ab byte_ofs durch, Byte fuer Byte, im Byte ab dem
 niederwertigsten Bit. Das Bit liegt also in Byte byte_ofs + bit_ofs/8, dort
 an Stelle bit_ofs % 8. So steht es bei den I/O-Geraeten der Datei
-("BIT 0 7 ;(Bit 15)", "BIT 0 8 ;(Bit 0)").
+("BIT 0 7 ;(Bit 15)", "BIT 0 8 ;(Bit 0)"), und so passen die echten Daten
+im Abzug: alle 60 gesetzten Bits der Senken liegen auf Signalen, keines auf
+einer freien Stelle (jede andere Zaehlweise trifft 5 bis 14 freie). Auch
+ein CARD8 kann im zweiten Byte eines Worts stehen ("CARD8 0 8") - es liegt
+dann in Byte byte_ofs + 1.
 
 Datentypen (Spalte datentyp), Werte big-endian wie am MVB:
 
@@ -132,10 +136,6 @@ def einlesen(pfad):
             s = zeile_dekodieren(roh.rstrip(b"\r\n")).strip()
             if s.startswith(";"):
                 text = s.lstrip(";").strip()
-                frei = re.search(r"(\d+)\s*Bytes?\s+(?:free|frei)\b", text,
-                                 re.I)
-                if frei and tgm is not None:
-                    tgm["frei"] += int(frei.group(1))
                 if text[:1] in ("-", "=", "*", "$"):
                     sammeln = False     # Trennlinie, auskommentierte Zeile
                 elif text and sammeln and sig is not None:
@@ -161,13 +161,15 @@ def einlesen(pfad):
                        "port": (int(port.group(1)) if port.group(1)
                                 else int(port.group(2), 16)),
                        "zyklus": int(zyklus.group()), "signale": [],
-                       "laenge": int(laenge.group(1)) if laenge else None,
-                       "frei": 0}
+                       "laenge": int(laenge.group(1)) if laenge else None}
                 telegramme.append(tgm)
             elif w[0] == "$SRCSIG" and len(w) >= 5 and tgm is not None:
                 k = kommentar.strip()
-                sig = {"name": w[1], "typ": w[2], "byte": int(w[3]),
-                       "bit": int(w[4]), "senken": [], "text": [k] if k else []}
+                byte, bit = int(w[3]), int(w[4])
+                if w[2] not in ("BIT", "BOOLEAN1"):
+                    byte, bit = byte + bit // 8, bit % 8    # "CARD8 0 8"
+                sig = {"name": w[1], "typ": w[2], "byte": byte,
+                       "bit": bit, "senken": [], "text": [k] if k else []}
                 tgm["signale"].append(sig)
                 sammeln = True
             elif w[0] == "$SINKMEMB" and len(w) >= 2 and sig is not None:
@@ -187,11 +189,9 @@ def portgroesse(tgm):
             print("Telegramm %s: B%d, aber Signale bis Byte %d"
                   % (tgm["name"], tgm["laenge"], belegt), file=sys.stderr)
         return tgm["laenge"]
-    ende = belegt + tgm["frei"]
     for g in PORTGROESSEN:
-        if ende <= g:
+        if belegt <= g:
             return g
-    # "2 bytes free" bei schon vollen 32 Byte (FLG2-282): Kommentar veraltet
     if belegt > 32:
         print("Telegramm %s: %d Byte belegt, mehr als 32"
               % (tgm["name"], belegt), file=sys.stderr)

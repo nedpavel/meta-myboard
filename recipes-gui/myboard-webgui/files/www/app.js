@@ -418,7 +418,13 @@ async function skDruecken(signal) {
   } catch (e) {
     a = { ok: false, fehler: 'Dienst myboard-webgui-api nicht erreichbar' };
   }
-  if (a.ok) skStatus(text + ': Puls ' + a.dauer + ' s gesendet', '#2E7D32');
+  /* Bildnummer: FLG2N nimmt den Softkey nur mit ihr an; war eine andere
+     gesetzt, folgt der Puls, sobald die neue sicher am Bus ist */
+  if (a.ok) skStatus(text + ': Puls ' + a.dauer + ' s'
+                     + (a.bild != null ? ', Bildnummer ' + a.bild : '')
+                     + (a.verzoegerung > 0
+                        ? ', folgt in ' + Math.round(a.verzoegerung * 1000) + ' ms'
+                        : ' gesendet'), '#2E7D32');
   else skStatus(text + ' nicht gesendet: ' + (a.fehler || 'Fehler'), '#C0392B');
   sk.meldungBis = Date.now() + 4000;
   skAbfragen();                           /* Knopf gleich blau zeigen */
