@@ -1,0 +1,16 @@
+#!/bin/sh
+# Datenbank icn in MariaDB einrichten (myboard-db-setup.service, bei jedem
+# Start): zuerst die Vorgabe des Applikationsingenieurs (icn_setup.sql -
+# Datenbank icn, Benutzer icn, Tabellen icn_*), dann unsere Tabellen,
+# Benutzer und das root-Passwort (db-setup.sql). Beide Dateien sind
+# wiederholbar. root meldet sich ueber den Unix-Socket ohne Passwort an.
+set -e
+ICN=/usr/share/myboard-lamp/icn_setup.sql
+if [ -f "$ICN" ]; then
+    /usr/bin/mariadb < "$ICN"
+    echo "icn_setup.sql eingespielt"
+else
+    echo "icn_setup.sql fehlt im Image - Datenbank icn nur mit den eigenen Tabellen"
+fi
+/usr/bin/mariadb < /usr/share/myboard-lamp/db-setup.sql
+echo "db-setup.sql eingespielt"

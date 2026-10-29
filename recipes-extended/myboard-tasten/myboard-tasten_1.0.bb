@@ -1,7 +1,7 @@
 SUMMARY = "Hardkeys der Front des Pixy 1000 nach MariaDB"
 DESCRIPTION = "Liest die 32 Tasten um den Bildschirm (USB-Tastatur des \
 System-Controllers, Belegung laut INC-100 FW User Manual 5.11) direkt vom \
-Kernel und schreibt je Druck eine Zeile nach myboard.tasten - mit \
+Kernel und schreibt je Druck eine Zeile nach icn.tasten - mit \
 Beschriftung, Position P41,n, Zeit und Haltedauer. Die Oberflaechen \
 bekommen die Tasten weiterhin."
 LICENSE = "MIT"

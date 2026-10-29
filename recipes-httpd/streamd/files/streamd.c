@@ -16,7 +16,7 @@
  * SCHREIBSTRATEGIE — bei bis zu 100 Werten/s:
  *   latest.txt  liegt im tmpfs (RAM) und wird bei JEDEM Wert aktualisiert.
  *               Die Anzeige liest immer den aktuellen Stand.
- *   werte       Tabelle in MariaDB (Datenbank myboard). Werte werden
+ *   werte       Tabelle in MariaDB (Datenbank icn). Werte werden
  *               gesammelt und 60-mal pro Sekunde in EINER Transaktion
  *               (mehrzeiliges INSERT) geschrieben; InnoDB schreibt jede
  *               Transaktion fest auf die CFast. Bei Stromausfall fehlen
@@ -29,7 +29,7 @@
  * und der Dienst verbindet sich jede Sekunde neu.
  *
  * Datenbank abfragen:
- *     mariadb myboard -e "SELECT zeit, wert FROM werte ORDER BY id DESC LIMIT 20;"
+ *     mariadb icn -e "SELECT zeit, wert FROM werte ORDER BY id DESC LIMIT 20;"
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -64,7 +64,7 @@
 #define PATH_LATEST    "/run/myboard-stream/latest.txt"
 #endif
 #ifndef DB_NAME
-#define DB_NAME        "myboard"
+#define DB_NAME        "icn"
 #endif
 #define DB_MAX_ZEILEN  100000     /* Verlauf begrenzen (Ringpuffer)       */
 #define KUERZEN_MS     60000      /* etwa minuetlich kuerzen              */

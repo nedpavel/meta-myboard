@@ -22,22 +22,27 @@ Alle Layer liegen nebeneinander unter einer gemeinsamen Wurzel (hier `~/Embedded
 ├── meta-browser/         # Upstream (Klon), davon nur meta-firefox in bblayers
 ├── meta-myboard/         # <-- DIESES Repo
 ├── private/              # Kundendokumente, NICHT versioniert (siehe unten)
-│   └── mvb-trak.txt      #   MVB-Busbeschreibung "MVB (trak).txt"
+│   ├── mvb-trak.txt      #   MVB-Busbeschreibung "MVB (trak).txt"
+│   └── icn_setup.sql     #   Datenbank icn des Applikationsingenieurs
 └── build/                # generiert, NICHT versioniert (tmp/, sstate-cache/, downloads/)
 ```
 
 `private/mvb-trak.txt` ist die Busbeschreibung des Fahrzeugs. Aus ihr erzeugt
 das Rezept `idu2-mvb` beim Bauen die Signalliste für die Prozessdaten
-(`local.conf`: `MVB_BUSBESCHREIBUNG`). Sie gehört dem Kunden und kommt
-deshalb **nicht** ins (öffentliche) Repository — auf einem neuen Rechner von
-Hand ablegen:
+(`local.conf`: `MVB_BUSBESCHREIBUNG`). `private/icn_setup.sql` legt die
+Datenbank `icn` in MariaDB an (Signale, Menü, Farben; `local.conf`:
+`ICN_SETUP_SQL`), das Rezept `myboard-lamp` bringt sie ins Image. Beide
+enthalten Daten des Kunden und kommen deshalb **nicht** ins (öffentliche)
+Repository — auf einem neuen Rechner von Hand ablegen:
 
 ```bash
 mkdir -p ~/Embedded/private
 cp "/pfad/zu/MVB (trak).txt" ~/Embedded/private/mvb-trak.txt
+cp /pfad/zu/icn_setup.sql ~/Embedded/private/icn_setup.sql
 ```
 
-Fehlt sie, baut das Image trotzdem (mit Warnung), nur ohne Prozessdaten.
+Fehlen sie, baut das Image trotzdem (mit Warnung), nur ohne Prozessdaten
+bzw. ohne die Tabellen des Applikationsingenieurs.
 
 ## 2. Upstream-Layer klonen und auf die gepinnte Revision setzen
 

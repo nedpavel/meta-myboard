@@ -1,7 +1,7 @@
 SUMMARY = "TCP receiver for continuous data streams"
 DESCRIPTION = "Nimmt einen dauerhaft offenen Datenstrom per TCP (Port 9100) \
 zeilenweise entgegen, legt den aktuellen Wert fuer die Anzeige ab und \
-schreibt den Verlauf in MariaDB (Datenbank myboard, Tabelle werte), \
+schreibt den Verlauf in MariaDB (Datenbank icn, Tabelle werte), \
 60 Transaktionen pro Sekunde. Ergaenzt upload.php: ueber PHP-FPM laesst \
 sich eine stehende Verbindung nicht verarbeiten, weil FPM einen Request \
 erst vollstaendig entgegennimmt."

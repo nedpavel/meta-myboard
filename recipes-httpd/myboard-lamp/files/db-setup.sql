@@ -1,7 +1,8 @@
--- Datenbank, Tabelle und Benutzer fuer das Pixy 1000 (MariaDB).
--- Laeuft bei jedem Start ueber myboard-db-setup.service; alles mit
--- IF NOT EXISTS, damit bestehende Daten und geaenderte Passwoerter
--- erhalten bleiben.
+-- Eigene Tabellen, Benutzer und root-Passwort in MariaDB (Pixy 1000).
+-- Laeuft bei jedem Start ueber myboard-db-setup.service, direkt nach
+-- icn_setup.sql des Applikationsingenieurs (Datenbank icn, Benutzer icn,
+-- Tabellen icn_*). Unsere Tabellen liegen in derselben Datenbank icn; alles
+-- mit IF NOT EXISTS, damit bestehende Daten erhalten bleiben.
 
 -- mariadb-install-db --rpm (install_db.service) legt anonyme Benutzer
 -- ''@'localhost' und ''@'<hostname>' an. ''@'localhost' ist spezifischer
@@ -13,11 +14,25 @@ DELETE FROM mysql.db WHERE Db = 'test' OR Db = 'test\\_%';
 FLUSH PRIVILEGES;
 DROP DATABASE IF EXISTS test;
 
-CREATE DATABASE IF NOT EXISTS myboard
+-- legt icn_setup.sql an; hier nur fuer den Fall, dass es im Image fehlt
+CREATE DATABASE IF NOT EXISTS icn
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+-- Bis 2026-10 lagen unsere Tabellen in der Datenbank myboard: mit Inhalt
+-- nach icn umziehen (nur beim ersten Start mit diesem Stand), dann myboard
+-- samt ihrer Rechte loeschen. mvb_prozessdaten (MEMORY) legt idu2-mvb
+-- ohnehin neu an.
+RENAME TABLE IF EXISTS myboard.werte TO icn.werte;
+RENAME TABLE IF EXISTS myboard.dds_meldungen TO icn.dds_meldungen;
+RENAME TABLE IF EXISTS myboard.dds_stand TO icn.dds_stand;
+RENAME TABLE IF EXISTS myboard.tasten TO icn.tasten;
+DROP DATABASE IF EXISTS myboard;
+DELETE FROM mysql.db WHERE Db = 'myboard';
+DELETE FROM mysql.tables_priv WHERE Db = 'myboard';
+FLUSH PRIVILEGES;
+
 -- Messwerte von streamd (TCP-Port 9100), Verlauf auf 100000 Zeilen begrenzt
-CREATE TABLE IF NOT EXISTS myboard.werte (
+CREATE TABLE IF NOT EXISTS icn.werte (
     id    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     zeit  DATETIME(3)     NOT NULL,
     wert  VARCHAR(1024)   NOT NULL,
@@ -29,7 +44,7 @@ CREATE TABLE IF NOT EXISTS myboard.werte (
 -- sich der Cache_index, ersetzt idu2-mvb den ganzen Inhalt; beim Blaettern
 -- (gleicher Cache_index) kommen die Seiten dazu. Spalten wie auf der Seite
 -- DDS-Speicher; Zeiten so, wie die Oberflaeche sie zeigt, NULL = keine.
-CREATE TABLE IF NOT EXISTS myboard.dds_meldungen (
+CREATE TABLE IF NOT EXISTS icn.dds_meldungen (
     ereignisnr   SMALLINT UNSIGNED NOT NULL PRIMARY KEY,
     pos          SMALLINT UNSIGNED NULL,     -- Platz in der Liste, ab 1
     seite        SMALLINT UNSIGNED NULL,     -- NULL: DIA1 schickte von sich aus
@@ -54,7 +69,7 @@ CREATE TABLE IF NOT EXISTS myboard.dds_meldungen (
 ) ENGINE=InnoDB;
 
 -- Stand der Tabelle oben, eine Zeile (id = 1)
-CREATE TABLE IF NOT EXISTS myboard.dds_stand (
+CREATE TABLE IF NOT EXISTS icn.dds_stand (
     id            TINYINT UNSIGNED  NOT NULL PRIMARY KEY,
     cache_index   SMALLINT UNSIGNED NOT NULL,
     geaendert     DATETIME          NOT NULL, -- seit wann dieser Cache_index
@@ -72,12 +87,15 @@ CREATE TABLE IF NOT EXISTS myboard.dds_stand (
 --   datetime                               wert (Unix-Zeit, exakt) und
 --                                          wert_zeit (UTC)
 --   string                                 wert_text
+-- Texte (AR_CHAR8_n, ARn) stehen zusaetzlich je Byte als eigene Zeile
+-- <Name>_ArrByte<i> (uint8) - so wie in icn_datafields; ueber den Namen
+-- lassen sich damit alle Signale mit icn_datafields verknuepfen.
 -- MEMORY statt InnoDB: rund 300 Lesungen pro Sekunde gingen sonst als
 -- Redo-Log auf die CFast (Dutzende GB am Tag). Der Inhalt ist nach einem
 -- Neustart von MariaDB weg, bis idu2-mvb ihn neu anlegt - das tut es beim
 -- Start ohnehin. MEMORY reserviert jede Zeile in voller Laenge, deshalb
 -- die Textspalten knapp (laengste Beschreibung 237 Zeichen).
-CREATE TABLE IF NOT EXISTS myboard.mvb_prozessdaten (
+CREATE TABLE IF NOT EXISTS icn.mvb_prozessdaten (
     port          SMALLINT UNSIGNED NOT NULL,
     name          VARCHAR(40)       NOT NULL,
     richtung      ENUM('lesen', 'schreiben') NOT NULL DEFAULT 'lesen',
@@ -110,7 +128,7 @@ CREATE TABLE IF NOT EXISTS myboard.mvb_prozessdaten (
 -- Standardbelegung (INC-100 FW User Manual 5.11, Figure 8); zeichen, hid
 -- und keycode zeigen, was die Taste wirklich gesendet hat. Hoechstens
 -- 100000 Zeilen, die aeltesten fallen weg.
-CREATE TABLE IF NOT EXISTS myboard.tasten (
+CREATE TABLE IF NOT EXISTS icn.tasten (
     id           BIGINT UNSIGNED   NOT NULL AUTO_INCREMENT PRIMARY KEY,
     gedrueckt    DATETIME(3)       NOT NULL,  -- Zeit des Kernels
     losgelassen  DATETIME(3)       NULL,
@@ -129,14 +147,21 @@ CREATE TABLE IF NOT EXISTS myboard.tasten (
 -- Linux-Benutzer muss so heissen wie der Datenbank-Benutzer (unix_socket).
 -- streamd laeuft als Benutzer streamd, php-fpm als nobody.
 CREATE USER IF NOT EXISTS 'streamd'@'localhost' IDENTIFIED VIA unix_socket;
-GRANT SELECT, INSERT, DELETE ON myboard.werte TO 'streamd'@'localhost';
+GRANT SELECT, INSERT, DELETE ON icn.werte TO 'streamd'@'localhost';
 
 CREATE USER IF NOT EXISTS 'nobody'@'localhost' IDENTIFIED VIA unix_socket;
-GRANT SELECT ON myboard.* TO 'nobody'@'localhost';
+GRANT SELECT ON icn.* TO 'nobody'@'localhost';
 
 -- myboard-tasten laeuft als Benutzer tasten
 CREATE USER IF NOT EXISTS 'tasten'@'localhost' IDENTIFIED VIA unix_socket;
-GRANT SELECT, INSERT, UPDATE, DELETE ON myboard.tasten TO 'tasten'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE ON icn.tasten TO 'tasten'@'localhost';
+
+-- root: Passwort SBB-ICN (phpMyAdmin, mariadb -u root -p). Am Geraet selbst
+-- meldet sich root weiter ohne Passwort ueber den Unix-Socket an - so
+-- arbeiten idu2-mvb und diese Einrichtung. Gesetzt bei jedem Start, wie das
+-- Passwort von icn in icn_setup.sql.
+ALTER USER 'root'@'localhost'
+    IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('SBB-ICN');
 
 -- Verwaltung ueber das Netz (MySQL Workbench) und phpMyAdmin.
 -- Passwort nach der Inbetriebnahme aendern:

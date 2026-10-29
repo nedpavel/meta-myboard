@@ -35,7 +35,7 @@ $alterSek = is_file($letztePfad) ? max(0, time() - filemtime($letztePfad)) : -1;
 /* Verlauf: bevorzugt aus der Datenbank (streamd), sonst aus stream.log */
 $verlauf = [];
 try {
-    $db = new mysqli('localhost', 'nobody', '', 'myboard', 0, DB_SOCKET);
+    $db = new mysqli('localhost', 'nobody', '', 'icn', 0, DB_SOCKET);
     /* Zeit mit Millisekunden wie in latest.txt (%f liefert 6 Stellen) */
     $res = $db->query("SELECT LEFT(DATE_FORMAT(zeit, '%Y-%m-%d %H:%i:%s.%f'), 23)
                               AS zeit, wert

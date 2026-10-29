@@ -7,7 +7,7 @@ USB-Tastatur (INC-100 FW User Manual, 5.11 "Front panel keyboard"; Pixy
 direkt vom Kernel (/dev/input/event*), ohne die Tastatur zu greifen - die
 Qt-Oberflaeche bzw. Firefox bekommen jede Taste wie bisher.
 
-Je Druck eine Zeile in myboard.tasten, geschrieben sofort beim Druecken;
+Je Druck eine Zeile in icn.tasten, geschrieben sofort beim Druecken;
 beim Loslassen kommen losgelassen und dauer_ms dazu. Haelt man eine Taste,
 schickt der Kernel Wiederholungen - die zaehlen nicht als neuer Druck.
 
@@ -173,7 +173,7 @@ class Tasten:
         try:
             if self.db is None:
                 self.db = self.pymysql.connect(
-                    unix_socket=self.sock, database="myboard",
+                    unix_socket=self.sock, database="icn",
                     charset="utf8mb4", autocommit=True,
                     user=pwd.getpwuid(os.geteuid()).pw_name,
                     connect_timeout=5, read_timeout=10, write_timeout=10)
@@ -241,7 +241,7 @@ def main():
     tasten = Tasten(sock, behalten)
     offen = {}                  # fd -> (Pfad, Name)
     gesucht = 0.0
-    log("myboard-tasten: Hardkeys der Front -> myboard.tasten")
+    log("myboard-tasten: Hardkeys der Front -> icn.tasten")
     while not stop["jetzt"]:
         if time.time() - gesucht > NEU_SUCHEN:
             gesucht = time.time()

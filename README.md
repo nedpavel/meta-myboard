@@ -17,23 +17,31 @@ Enthält:
   im Kiosk-Modus (`browser-start <URL>`).
 - **`recipes-httpd/myboard-lamp`** — LAMP: Apache 2.4 (Port 80) mit PHP über
   php-fpm, MariaDB 11.4 (Port 3306 auch übers Netz, InnoDB), phpMyAdmin unter
-  `http://<pixy>/phpmyadmin/`, Perl. Legt die Datenbank `myboard` an.
-  Anmeldung übers Netz und in phpMyAdmin als `admin` / `myboard` —
+  `http://<pixy>/phpmyadmin/`, Perl. Alle Daten liegen in der Datenbank
+  `icn`: die Vorgabe des Applikationsingenieurs (`icn_setup.sql` mit
+  `icn_datafields`, `icn_menu`, `icn_dp_colors`, `icn_internal_var` und
+  Benutzer `icn` / `SBB-ICN`; liegt wie die Busbeschreibung in
+  `~/Embedded/private/`, siehe [SETUP.md](SETUP.md)) und unsere Tabellen
+  `dds_meldungen`, `dds_stand`, `mvb_prozessdaten`, `tasten`, `werte`.
+  `root` hat das Passwort `SBB-ICN` (am Gerät selbst geht root weiter ohne
+  Passwort über den Unix-Socket). Übers Netz als `admin` / `myboard` —
   **nach der Inbetriebnahme ändern:**
   `mariadb -e "ALTER USER 'admin'@'%' IDENTIFIED BY '<neu>';"` (am Gerät als
-  root). `streamd` und PHP (als `nobody`) melden sich ohne Passwort über den
-  Unix-Socket an, übers Netz geht das nicht.
+  root). `streamd`, `tasten` und PHP (als `nobody`) melden sich ohne
+  Passwort über den Unix-Socket an, übers Netz geht das nicht.
 - **`recipes-httpd/streamd`, `recipes-httpd/myboard-web`** — Datenstrom auf
-  TCP-Port 9100 → MariaDB-Tabelle `myboard.werte` (60 Transaktionen/s,
+  TCP-Port 9100 → MariaDB-Tabelle `icn.werte` (60 Transaktionen/s,
   höchstens 100 000 Zeilen), Anzeige unter `http://<pixy>/`.
 - **`recipes-extended/idu2-mvb`** — das Display am MVB, als IDU2 (Vorgabe) oder
   mit `--rolle IDU1` als IDU1: Lebenszeichen, Prozessdaten, DDS-Abfrage an
   DIA1. Optionen in `OPTIONEN` (`/etc/default/idu2-mvb`).
   - Prozessdaten: Die Sink-Ports der Rolle laut Busbeschreibung werden im
     Takt ihrer Zykluszeit gelesen (kein Interrupt, Polling, rund 300
-    Lesungen/s) und jede Lesung je Signal in `myboard.mvb_prozessdaten`
+    Lesungen/s) und jede Lesung je Signal in `icn.mvb_prozessdaten`
     geschrieben — mit Beschreibung, Datentyp (bool, uint8/16/32, int16,
-    float, datetime, string), `gelesen` und `geaendert`. Die Tabelle ist
+    float, datetime, string), `gelesen` und `geaendert`; Texte zusätzlich je
+    Byte als `<Name>_ArrByteN` wie in `icn_datafields`, mit der sie sich über
+    den Signalnamen verknüpfen lassen. Die Tabelle ist
     eine MEMORY-Tabelle (schont die CFast, Inhalt nach Neustart neu
     angelegt). Die Signalliste entsteht beim Bauen aus
     `~/Embedded/private/mvb-trak.txt` (siehe [SETUP.md](SETUP.md)).
@@ -48,17 +56,17 @@ Enthält:
     gedrückt), fest in `/etc/idu2-mvb/quellen.conf`, zur Laufzeit über den
     Socket
     (`{"befehl": "setzen", "signal": ..., "wert": ..., "dauer": s}`).
-  - DDS: Jede Seite landet zusätzlich in `myboard.dds_meldungen` (Stand in
-    `myboard.dds_stand`): neuer Cache_index von DIA1 → Inhalt ersetzt,
+  - DDS: Jede Seite landet zusätzlich in `icn.dds_meldungen` (Stand in
+    `icn.dds_stand`): neuer Cache_index von DIA1 → Inhalt ersetzt,
     Blättern → Seiten kommen dazu.
   - `--ohne-pd` / `--ohne-db` schalten Prozessdaten / alle
     Datenbankeinträge ab.
 - **`recipes-extended/myboard-tasten`** — Hardkeys der Front (32 Tasten,
   Belegung laut INC-100 FW User Manual 5.11): je Druck eine Zeile in
-  `myboard.tasten` mit Beschriftung, Position P41,n, Zeit und Haltedauer.
+  `icn.tasten` mit Beschriftung, Position P41,n, Zeit und Haltedauer.
   Liest die Tastatur direkt vom Kernel, die Oberflächen bekommen die Tasten
   weiterhin. Ansehen z. B. mit
-  `mariadb -e "SELECT gedrueckt, taste, position, dauer_ms FROM myboard.tasten ORDER BY id DESC LIMIT 20"`.
+  `mariadb -e "SELECT gedrueckt, taste, position, dauer_ms FROM icn.tasten ORDER BY id DESC LIMIT 20"`.
 - **`conf/machine`** — Maschinendefinition.
 - **`recipes-extended/images/myboard-image.bb`** — das Ziel-Image (mit tzdata,
   Zeitzone Europe/Zurich, NTP-Sync, NFS-Dev-Mount, CAN, xorg-conf).

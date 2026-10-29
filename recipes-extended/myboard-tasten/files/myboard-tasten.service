@@ -1,5 +1,5 @@
 [Unit]
-Description=Hardkeys der Front nach MariaDB (myboard.tasten)
+Description=Hardkeys der Front nach MariaDB (icn.tasten)
 Documentation=file:/usr/bin/myboard-tasten
 # Ohne MariaDB laeuft der Dienst trotzdem und traegt spaeter nach
 After=mysqld.service myboard-db-setup.service

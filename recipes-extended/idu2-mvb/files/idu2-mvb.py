@@ -33,7 +33,7 @@ ein und liest sie im Takt ihrer Zykluszeit (64..1024 ms). Fuer
 Prozessdaten gibt es keinen Interrupt - der Controller schreibt sie selbst
 in den Traffic Store, read() liefert den Stand oder ETIMEDOUT, wenn er
 aelter als die Sink-Time-Schwelle ist. Jedes Signal steht mit Beschreibung
-in myboard.mvb_prozessdaten, dazu die gesendeten Signale der Rolle. Jede
+in icn.mvb_prozessdaten, dazu die gesendeten Signale der Rolle. Jede
 Lesung wird geschrieben (Wert, frisch, gelesen; geaendert bei neuem Wert),
 in einem eigenen Thread; die Tabelle ist eine MEMORY-Tabelle, damit rund
 300 Schreibvorgaenge pro Sekunde nicht auf die CFast gehen. Die
@@ -89,8 +89,8 @@ und wird beim Blaettern unveraendert zurueckgeschickt, nie hochgezaehlt.
 Fuer die vorige Seite gibt es kein Command: schon geholte Seiten kommen aus
 dem Zwischenspeicher des Dienstes, bis Seite 1 neu abgefragt wird.
 
-MariaDB: Jede DDS-Antwort von DIA1 landet in myboard.dds_meldungen (Stand
-in myboard.dds_stand). Hat die Antwort einen anderen Cache_index als die
+MariaDB: Jede DDS-Antwort von DIA1 landet in icn.dds_meldungen (Stand
+in icn.dds_stand). Hat die Antwort einen anderen Cache_index als die
 Tabelle, wird ihr Inhalt ersetzt - DIA1 hat neuere Meldungen, oder Seite 1
 wurde neu abgefragt. Beim Blaettern (gleicher Cache_index) kommen die
 Seiten dazu. Geschrieben wird in einem eigenen Thread ueber PyMySQL, als
@@ -500,7 +500,7 @@ SQL_MELDUNG = (
 def db_verbinden(pymysql, sock, autocommit=False):
     # unix_socket: Datenbank-Benutzer = Linux-Benutzer (root)
     return pymysql.connect(
-        unix_socket=sock, database="myboard", charset="utf8mb4",
+        unix_socket=sock, database="icn", charset="utf8mb4",
         user=pwd.getpwuid(os.geteuid()).pw_name, autocommit=autocommit,
         connect_timeout=5, read_timeout=10, write_timeout=10)
 
@@ -522,7 +522,7 @@ def dds_zeile(m, seite, cache, jetzt):
 
 
 class DdsDb:
-    """Schreibt die DDS-Antworten von DIA1 nach myboard.dds_meldungen.
+    """Schreibt die DDS-Antworten von DIA1 nach icn.dds_meldungen.
 
     Eigener Thread mit Warteschlange: die Hauptschleife bedient das MVB
     (Lebenszeichen, Ring des Treibers) und wartet nie auf die Datenbank.
@@ -637,7 +637,12 @@ class DdsDb:
 def signale_laden(pfad, rolle):
     """Signale der Rolle aus der Signalliste (mvbtrak2tsv.py), je ein dict
     mit richtung 'lesen' (Sink: das IDU steht als Empfaenger da) oder
-    'schreiben' (Source: Telegramm des IDU)."""
+    'schreiben' (Source: Telegramm des IDU).
+
+    Texte (datentyp string, AR_CHAR8_n und ARn) zusaetzlich je Byte als
+    eigenes Signal <Name>_ArrByte<i> (uint8, Byte byte+i) - so wie sie
+    icn_datafields des Applikationsingenieurs fuehrt; der Text selbst
+    bleibt als Signal mit wert_text."""
     out = []
     with open(pfad, encoding="utf-8") as f:
         for zeile in f:
@@ -652,13 +657,19 @@ def signale_laden(pfad, rolle):
                 richtung = "lesen"
             else:
                 continue
-            out.append({"port": int(port), "telegramm": tgm, "quelle": quelle,
-                        "zyklus": int(zyklus), "port_bytes": int(port_bytes),
-                        "name": name, "typ": typ, "datentyp": datentyp,
-                        "byte": int(byte), "bit": int(bit),
-                        "bytes": int(nbytes), "faktor": float(faktor),
-                        "einheit": einheit, "senken": senken, "text": text,
-                        "richtung": richtung})
+            s = {"port": int(port), "telegramm": tgm, "quelle": quelle,
+                 "zyklus": int(zyklus), "port_bytes": int(port_bytes),
+                 "name": name, "typ": typ, "datentyp": datentyp,
+                 "byte": int(byte), "bit": int(bit),
+                 "bytes": int(nbytes), "faktor": float(faktor),
+                 "einheit": einheit, "senken": senken, "text": text,
+                 "richtung": richtung}
+            out.append(s)
+            if datentyp == "string":
+                for i in range(s["bytes"]):
+                    out.append(dict(s, name="%s_ArrByte%d" % (name, i),
+                                    datentyp="uint8", byte=s["byte"] + i,
+                                    bit=0, bytes=1, faktor=1.0, einheit=""))
     return out
 
 
@@ -723,7 +734,7 @@ SQL_PD_LESUNG = (
 
 
 class PdDb:
-    """Schreibt die Prozessdaten nach myboard.mvb_prozessdaten: jede Lesung
+    """Schreibt die Prozessdaten nach icn.mvb_prozessdaten: jede Lesung
     eines Sink-Ports (und jedes Senden eines eigenen Ports) als eine
     Anweisung mit allen Signalen des Ports - Wert, frisch, gelesen;
     geaendert nur, wenn sich der Wert aendert.
@@ -1430,7 +1441,7 @@ def main():
     if pd_db:
         log("Prozessdaten: %d Sink-Ports mit %d Signalen, im Takt ihrer "
             "Zykluszeit gelesen, und %d gesendete Signale - jede Lesung -> "
-            "myboard.mvb_prozessdaten"
+            "icn.mvb_prozessdaten"
             % (len(senken), sum(1 for s in signale if s["port"] in senken),
                sum(1 for s in signale if s["richtung"] == "schreiben")))
     elif not (o["db"] and o["pd"]):
