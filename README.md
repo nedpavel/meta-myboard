@@ -50,12 +50,26 @@ Enthält:
     und die Lüfterbefehle als Puls von 1 s; die Liste liefert idu2-mvb
     (`softkeys`/`softkey` über den Socket), dazu die Rückmeldungen aus
     Port 290.
+  - Bildnummer: FLG2N nimmt einen Softkey nur an, wenn `IDU2-XScreenNum`
+    (Port 498) das Bild nennt, zu dem er gehört — 100 Visiteur, 120
+    Türen-Test, 200 Zugbegleiter (Licht, HLK, Temperatur, Reservation),
+    2710 Klima-Prüflauf; die Lüfter haben keine. idu2-mvb setzt sie bei
+    jedem Softkey selbst, von der Oberfläche wie aus der Datenbank. War eine
+    andere Nummer gesetzt, folgt der Softkey nach `--bild-wartezeit`
+    (Vorgabe 0,15 s), das Loslassen der Applikation ebenso viel später —
+    die Pulslänge bleibt. Sicher wären rund 1,5 s: Port 498 holt der
+    Busmaster nur alle 1024 ms ab.
   - Source-Ports: alle drei der Rolle (IDU2 491/492/498, IDU1 481/488/489),
     gesendet im Takt ihrer Zykluszeit und nach jeder Änderung, jedes Senden
     ebenfalls in `mvb_prozessdaten`. Werte: Vorgabe 0 (Befehle nicht
     gedrückt), fest in `/etc/idu2-mvb/quellen.conf`, zur Laufzeit über den
     Socket
-    (`{"befehl": "setzen", "signal": ..., "wert": ..., "dauer": s}`).
+    (`{"befehl": "setzen", "signal": ..., "wert": ..., "dauer": s}`) oder
+    von der Applikation direkt in der Tabelle: `UPDATE icn.mvb_prozessdaten
+    SET wert = 3 WHERE name = 'IDU2-XScreenNum'` (Texte in `wert_text`).
+    idu2-mvb prüft die Zeilen mit `richtung = 'schreiben'` alle 10 ms
+    (`--db-takt`), sendet den Port sofort und schreibt den gesendeten Wert
+    mit `roh` zurück; ungültige Werte ersetzt es durch den gesendeten.
   - DDS: Jede Seite landet zusätzlich in `icn.dds_meldungen` (Stand in
     `icn.dds_stand`): neuer Cache_index von DIA1 → Inhalt ersetzt,
     Blättern → Seiten kommen dazu.
@@ -88,5 +102,40 @@ separat geklont und auf feste Revisionen gepinnt — siehe **[SETUP.md](SETUP.md
 cd ~/Embedded
 source openembedded-core/oe-init-build-env build
 bitbake myboard-image          # volles Image
+bitbake myboard-installer      # USB-Stick, der myboard-image auf die CFast schreibt
 bitbake myboard-gui            # nur die GUI (für NFS-Deploy)
 ```
+
+## Installation auf die CFast (Installer-Stick)
+
+`bitbake myboard-installer` baut `myboard-installer-intel-corei7-64.rootfs.wic.gz`
+(baut `myboard-image` mit und packt es hinein). Auf den Stick schreiben:
+
+```bash
+cd ~/Embedded/build/tmp/deploy/images/intel-corei7-64
+sudo bmaptool copy myboard-installer-intel-corei7-64.rootfs.wic.gz /dev/sdX
+# oder: zcat myboard-installer-intel-corei7-64.rootfs.wic.gz | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+Am Pixy vom Stick booten (UEFI). Der Installer zeigt auf dem Bildschirm das
+Ziel — die eine SATA-Platte, also die CFast — und zählt 10 s herunter;
+**jede Taste bricht ab**. Dann schreibt er das System, liest es zurück und
+vergleicht die Prüfsumme vom Bauen, verschiebt die GPT-Kopie ans Ende der
+Karte und meldet „USB-Stick jetzt abziehen“. Sobald der Stick draußen ist,
+startet das Pixy von der CFast neu. Die Schritte stehen zusätzlich auf der
+seriellen Konsole (`ttyS0`, Zeilen `myboard-installieren: …`).
+
+Die CFast wird **ganz** überschrieben, auch `/data`, die Datenbank und
+Änderungen unter `/etc` (z. B. `quellen.conf`). Der Stick hat eigene
+Partitionsbezeichnungen (`instboot`, `installer`), damit der Kernel nicht
+das `rootfs` der CFast mit dem des Sticks verwechselt.
+
+**Nur vom Stick starten, ohne Installation:** `bitbake myboard-image-usb`
+baut `myboard-image-usb-intel-corei7-64.rootfs.wic.gz` — derselbe Inhalt wie
+`myboard-image`, aber alle Partitionen über UUIDs, die bei jedem Bau neu
+entstehen (`root=PARTUUID=…`, fstab mit `UUID=…`), und mit den Bezeichnungen
+`usbboot`, `usbroot`, `usbdata`. So läuft alles vom Stick, auch wenn auf der
+CFast ein System steht. Das Image von `myboard-image` selbst ist nicht für
+den Stick gedacht: Es bindet `/boot` und `/data` als `/dev/sda1` und
+`/dev/sda3` ein und `/` über `PARTLABEL=rootfs` — vom Stick gestartet wären
+das die Partitionen der CFast.

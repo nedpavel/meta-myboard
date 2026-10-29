@@ -1,0 +1,130 @@
+#!/bin/bash
+# Installer des Pixy 1000 (USB-Stick myboard-installer): schreibt das
+# mitgelieferte myboard-image auf die CFast und startet neu, sobald der
+# Stick abgezogen ist. Laeuft auf tty1, gestartet von
+# myboard-installieren.service.
+#
+#   1. Ziel suchen: die eine SATA-Platte, die nicht der Startdatentraeger
+#      ist - die CFast. USB-Platten und der Stick selbst scheiden aus.
+#   2. 10 s Countdown auf dem Bildschirm, jede Taste bricht ab.
+#   3. Image entpacken und schreiben (dd mit O_DIRECT, Fortschritt mit pv).
+#   4. Zuruecklesen und mit der Pruefsumme vom Bauen vergleichen.
+#   5. GPT-Kopie ans Ende der CFast verschieben (das Image ist kleiner als
+#      die Karte).
+#   6. "USB-Stick abziehen", danach Neustart ueber SysRq: ohne Stick kann
+#      das System keine Programme mehr laden, Bash-Builtins und /proc gehen
+#      aber. Deshalb steht alles in main - Bash liest so das ganze Skript,
+#      bevor es laeuft.
+#
+# Alles auf der CFast wird ueberschrieben, auch /data und die Datenbank.
+# Meldungen ohne Umlaute: die Konsole hat nur die Grundschrift. Die
+# wichtigen Schritte gehen zusaetzlich auf die serielle Schnittstelle
+# (ttyS0), fuer die Fehlersuche mit Kabel.
+
+DATEN=/usr/share/myboard-installer
+WARTEN=10
+
+seriell() {
+    { printf 'myboard-installieren: %s\r\n' "$*" > /dev/ttyS0; } 2> /dev/null
+}
+
+anhalten() {
+    seriell "$*"
+    printf '\n%s\n\nDas Geraet ausschalten und den USB-Stick abziehen.\n' "$*"
+    while :; do read -r -s -n 1 -t 3600; done
+}
+
+fehler() {
+    anhalten "*** FEHLER: $*"
+}
+
+mib() {
+    echo $(( $1 / 1048576 ))
+}
+
+main() {
+    local groesse sha version mm start ziele d n ziel platz modell i ist
+    set -o pipefail
+    groesse=$(cat $DATEN/myboard-image.groesse) || fehler "Installer unvollstaendig"
+    sha=$(cat $DATEN/myboard-image.sha256)
+    version=$(cat $DATEN/myboard-image.version)
+
+    clear
+    printf '=== Pixy 1000: Installation auf die CFast ===\n\n'
+    printf 'System: %s (%s MiB)\n\n' "$version" "$(mib "$groesse")"
+
+    # Startdatentraeger: die Platte, auf der / liegt
+    mm=$(awk '$5 == "/" {print $3; exit}' /proc/self/mountinfo)
+    start=$(basename "$(dirname "$(readlink -f "/sys/dev/block/$mm")")")
+
+    # Ziel: SATA-Platten ausser dem Start; bis 10 s warten, bis sie da sind
+    for i in $(seq 20); do
+        ziele=()
+        for d in /sys/block/sd*; do
+            n=${d##*/}
+            [ -e "$d" ] && [ "$n" != "$start" ] || continue
+            case $(readlink -f "$d/device") in
+                */ata*) ziele+=("$n") ;;
+            esac
+        done
+        [ ${#ziele[@]} -gt 0 ] && break
+        sleep 0.5
+    done
+    [ ${#ziele[@]} -eq 1 ] ||
+        fehler "keine eindeutige CFast gefunden (SATA-Platten: ${ziele[*]:-keine})"
+    ziel=/dev/${ziele[0]}
+    platz=$(( $(cat "/sys/block/${ziele[0]}/size") * 512 ))
+    modell=$(xargs < "/sys/block/${ziele[0]}/device/model" 2>/dev/null)
+    [ "$platz" -ge "$groesse" ] ||
+        fehler "$ziel ist mit $(mib "$platz") MiB zu klein"
+    printf 'Ziel:   %s, %s, %s MiB (CFast)\n' "$ziel" "${modell:-?}" \
+        "$(mib "$platz")"
+    printf 'Start:  /dev/%s (dieser USB-Stick)\n\n' "$start"
+    seriell "Ziel $ziel (${modell:-?}, $(mib "$platz") MiB), Start /dev/$start, System $version"
+    printf 'ALLES auf %s wird ueberschrieben, auch Datenbank und /data.\n\n' \
+        "$ziel"
+
+    # aufgelaufene Tasten verwerfen, dann Countdown
+    while read -r -s -n 1 -t 0.2; do :; done
+    for ((i = WARTEN; i > 0; i--)); do
+        printf '\rInstallation beginnt in %2d s - Abbruch mit einer beliebigen Taste ' "$i"
+        if read -r -s -n 1 -t 1; then
+            anhalten $'\n'"Abgebrochen, auf $ziel wurde nichts geschrieben."
+        fi
+    done
+
+    printf '\n\n1/3 Schreiben auf %s\n' "$ziel"
+    seriell "schreibe $ziel"
+    gzip -dc "$DATEN/myboard-image.wic.gz" |
+        pv -f -s "$groesse" -w 70 |
+        dd of="$ziel" bs=4M iflag=fullblock oflag=direct status=none ||
+        fehler "Schreiben fehlgeschlagen - die CFast ist jetzt unvollstaendig, Installation wiederholen"
+    sync
+
+    printf '\n2/3 Pruefen\n'
+    ist=$(dd if="$ziel" bs=4M iflag=direct,count_bytes count="$groesse" status=none |
+          pv -f -s "$groesse" -w 70 | sha256sum | cut -d' ' -f1) ||
+        fehler "Zuruecklesen fehlgeschlagen - Installation wiederholen"
+    [ "$ist" = "$sha" ] ||
+        fehler "Pruefsumme stimmt nicht - Installation wiederholen"
+    printf 'Pruefsumme stimmt.\n'
+    seriell "Pruefsumme stimmt"
+
+    printf '\n3/3 Partitionstabelle\n'
+    sfdisk --relocate gpt-bak-std "$ziel" > /dev/null 2>&1 ||
+        printf '(GPT-Kopie nicht ans Ende verschoben - unkritisch)\n'
+    blockdev --rereadpt "$ziel" 2> /dev/null
+    sync
+
+    echo 1 > /proc/sys/kernel/sysrq
+    printf '\nFertig: %s ist auf %s installiert.\n\n' "$version" "$ziel"
+    printf 'USB-Stick jetzt abziehen - das Geraet startet dann von der CFast neu.\n'
+    seriell "fertig, warte auf das Abziehen des Sticks"
+    while [ -e "/sys/block/$start" ]; do
+        read -r -s -n 1 -t 1
+    done
+    seriell "Stick abgezogen, Neustart"
+    echo b > /proc/sysrq-trigger
+}
+
+main "$@"; exit

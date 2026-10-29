@@ -1,0 +1,19 @@
+[Unit]
+Description=Installer: myboard-image auf die CFast schreiben
+Documentation=file:/usr/sbin/myboard-installieren
+# Auf tty1, wo sonst die Anmeldung steht
+Conflicts=getty@tty1.service
+After=getty@tty1.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/myboard-installieren
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target

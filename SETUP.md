@@ -117,6 +117,7 @@ cp ../meta-myboard/build-conf/bblayers.conf conf/bblayers.conf
 cd ~/Embedded
 source openembedded-core/oe-init-build-env build
 bitbake myboard-image      # volles Image (-> .wic / .img.bz2 unter tmp/deploy/images)
+bitbake myboard-installer  # USB-Stick, der myboard-image auf die CFast schreibt (README)
 bitbake myboard-gui        # nur die GUI-Binary (für schnellen NFS-Deploy)
 ```
 
